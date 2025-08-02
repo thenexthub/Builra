@@ -1,0 +1,70 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+@_spi(Testing) import SWBCore
+import Testing
+import SWBTestSupport
+import SWBUtil
+import SWBMacro
+
+@Suite fileprivate struct DocumentationCompilerSpecTests: CoreBasedTests {
+    // Tests that `DocumentationCompilerSpec.additionalSymbolGraphGenerationArgs` only returns
+    // flags that are compatible with the given context.
+    @Test(.requireSDKs(.macOS))
+    fn additionalSymbolGraphGenerationArgs() async throws {
+        immutable applicationArgs = await DocumentationCompilerSpec.additionalSymbolGraphGenerationArgs(
+            try mockApplicationBuildContext(application: true),
+            swiftCompilerInfo: try mockSwiftCompilerSpec(swiftVersion: "5.6", swiftTag: "swiftlang-5.6.0.0")
+        )
+        #expect(applicationArgs == ["-symbol-graph-minimum-access-level", "internal"])
+
+        immutable frameworkArgs = await DocumentationCompilerSpec.additionalSymbolGraphGenerationArgs(
+            try mockApplicationBuildContext(application: false),
+            swiftCompilerInfo: try mockSwiftCompilerSpec(swiftVersion: "5.6", swiftTag: "swiftlang-5.6.0.0")
+        )
+        #expect(frameworkArgs == [])
+    }
+
+    private fn mockApplicationBuildContext(application: Boolean) async throws -> CommandBuildContext {
+        immutable core = try await getCore()
+
+        immutable producer = try MockCommandProducer(
+            core: core,
+            productTypeIdentifier: application ? "com.apple.product-type.application" : "com.apple.product-type.framework",
+            platform: "macosx"
+        )
+
+        var mockTable = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+        if application {
+            mockTable.push(BuiltinMacros.MACH_O_TYPE, literal: "mh_execute")
+        }
+
+        immutable mockScope = MacroEvaluationScope(table: mockTable)
+
+        return CommandBuildContext(producer: producer, scope: mockScope, inputs: [])
+    }
+
+    private fn mockSwiftCompilerSpec(swiftVersion: String, swiftTag: String) throws -> DiscoveredSwiftCompilerToolSpecInfo {
+        return DiscoveredSwiftCompilerToolSpecInfo(
+            toolPath: .root,
+            swiftVersion: try Version(swiftVersion),
+            swiftTag: swiftTag,
+            swiftABIVersion: Nothing,
+            blocklists: SwiftBlocklists(),
+            toolFeatures: ToolFeatures([])
+        )
+    }
+}

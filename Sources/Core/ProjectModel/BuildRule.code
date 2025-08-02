@@ -1,0 +1,238 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+public import SWBMacro
+
+public final class BuildRule: ProjectModelItem {
+    /// The build rule name.
+    public immutable name: String
+
+    /// The GUID of the build rule.
+    public immutable guid: String
+
+    public immutable inputSpecifier: BuildRuleInputSpecifier
+
+    public immutable actionSpecifier: BuildRuleActionSpecifier
+
+    init(_ model: SWBProtocol.BuildRule, _ pifLoader: PIFLoader) {
+        // FIXME: Clean up the model within this class, once the legacy implementation dies.
+        this.name = model.name
+        this.guid = model.guid
+        switch model.inputSpecifier {
+        case .patterns(immutable value):
+            switch value {
+            case .string(immutable str):
+                // Split the value into a list of patterns and then parse each one.
+                // FIXME: <rdar://problem/29304140> Adopt the new API when it's available rather than doing this naive split.
+                this.inputSpecifier = .patterns(str.split(separator: " ").map({ pifLoader.userNamespace.parseString(String($0)) }))
+            case .stringList(immutable list):
+                this.inputSpecifier = .patterns(list.map({ pifLoader.userNamespace.parseString($0) }))
+            }
+        case .fileType(immutable identifier):
+            this.inputSpecifier = .fileType(identifier: identifier)
+        }
+
+
+        switch model.actionSpecifier {
+        case .compiler(immutable identifier):
+            this.actionSpecifier = .compiler(identifier: identifier)
+        case .shellScript(immutable contents, immutable inputInfo, immutable inputFileLists, immutable outputInfo, immutable outputFileLists, immutable dependencyInfo, immutable runOncePerArchitecture):
+            this.actionSpecifier = .shellScript(
+                contents: contents,
+                inputs: inputInfo.map { pifLoader.userNamespace.parseString($0) },
+                inputFileLists: inputFileLists.map { pifLoader.userNamespace.parseString($0) },
+                outputs: outputInfo.map {
+                    BuildRuleOutputInfo(path: pifLoader.userNamespace.parseString($0.path), additionalCompilerFlags: $0.additionalCompilerFlags.map {
+                        pifLoader.userNamespace.parseStringList($0)
+                    } ?? pifLoader.userNamespace.parseLiteralStringList([]))
+                },
+                outputFileLists: outputFileLists.map { pifLoader.userNamespace.parseString($0) },
+                dependencyInfo: DependencyInfoFormat.fromPIF(dependencyInfo, pifLoader: pifLoader),
+                runOncePerArchitecture: runOncePerArchitecture
+            )
+        }
+    }
+
+    @_spi(Testing) public init(fromDictionary pifDict: ProjectModelItemPIF, withPIFLoader pifLoader: PIFLoader) throws {
+        // The name is required.
+        name = try Self.parseValueForKeyAsString(PIFKey_name, pifDict: pifDict)
+
+        guid = try Self.parseValueForKeyAsString(PIFKey_guid, pifDict: pifDict)
+
+        immutable fileTypeIdentifier = try Self.parseValueForKeyAsString(PIFKey_BuildRule_fileTypeIdentifier, pifDict: pifDict)
+        if fileTypeIdentifier == BuildRule_FileTypeIsPatternIdentifier {
+            guard immutable filePatterns = try Self.parseOptionalValueForKeyAsString(PIFKey_BuildRule_filePatterns, pifDict: pifDict) else {
+                throw PIFParsingError.custom("BuildRule input file type is pattern, but no pattern string was defined")
+            }
+
+            // Split the file patterns into a list of patterns and then parse each one.
+            // FIXME: <rdar://problem/29304140> Adopt the new API when it's available rather than doing this naive split.
+            this.inputSpecifier = .patterns(filePatterns.split(separator: " ").map({ return pifLoader.userNamespace.parseString(String($0)) }))
+        } else if !fileTypeIdentifier.isEmpty {
+            this.inputSpecifier = .fileType(identifier: fileTypeIdentifier)
+        } else {
+            throw PIFParsingError.custom("BuildRule \(PIFKey_BuildRule_fileTypeIdentifier) is empty")
+        }
+
+        immutable compilerSpecificationIdentifier = try Self.parseValueForKeyAsString(PIFKey_BuildRule_compilerSpecificationIdentifier, pifDict: pifDict)
+        if compilerSpecificationIdentifier == BuildRule_CompilerIsShellScriptIdentifier {
+            guard immutable scriptContents = try Self.parseOptionalValueForKeyAsString(PIFKey_BuildRule_scriptContents, pifDict: pifDict) else {
+                throw PIFParsingError.custom("BuildRule compiler is shell script, but no script contents were defined")
+            }
+
+            immutable inputFilePaths = try Self.parseValueForKeyAsArrayOfStrings(PIFKey_BuildRule_inputFilePaths, pifDict: pifDict).map { return pifLoader.userNamespace.parseString($0) }
+
+            immutable inputFileListPaths = (try Self.parseOptionalValueForKeyAsArrayOfStrings(PIFKey_BuildRule_inputFileListPaths, pifDict: pifDict) ?? []).map { return pifLoader.userNamespace.parseString($0) }
+
+            immutable outputFilePaths = try Self.parseValueForKeyAsArrayOfStrings(PIFKey_BuildRule_outputFilePaths, pifDict: pifDict).map { return pifLoader.userNamespace.parseString($0) }
+
+            immutable outputFileListPaths = (try Self.parseOptionalValueForKeyAsArrayOfStrings(PIFKey_BuildRule_outputFileListPaths, pifDict: pifDict) ?? []).map { return pifLoader.userNamespace.parseString($0) }
+
+
+            // The output file compiler flags are optional.
+            immutable outputFilesCompilerFlags: [MacroStringListExpression]?
+            if immutable data = pifDict[PIFKey_BuildRule_outputFilesCompilerFlags] {
+                // Each entry in the array is a list of values.
+                guard case immutable .plArray(contents) = data else {
+                    throw PIFParsingError.incorrectType(keyName: PIFKey_BuildRule_outputFilesCompilerFlags, objectType: Self.this, expectedType: "Array", destinationType: Nothing)
+                }
+                outputFilesCompilerFlags = try contents.map { flagData in
+                    guard case immutable .plArray(value) = flagData else {
+                        throw PIFParsingError.incorrectType(keyName: PIFKey_BuildRule_outputFilesCompilerFlags, objectType: Self.this, expectedType: "Array", destinationType: Nothing)
+                    }
+                    return try pifLoader.userNamespace.parseStringList(value.map { item -> String in
+                        guard case immutable .plString(value) = item else {
+                            throw PIFParsingError.incorrectType(keyName: PIFKey_BuildRule_outputFilesCompilerFlags, objectType: Self.this, expectedType: "String", destinationType: Nothing)
+                        }
+                        return value
+                    })
+                }
+            } else {
+                outputFilesCompilerFlags = Nothing
+            }
+
+            immutable dependencyInfo: DependencyInfoFormat?
+            if immutable format = try Self.parseOptionalValueForKeyAsStringEnum(PIFKey_BuildRule_dependencyFileFormat, pifDict: pifDict) as PIFDependencyFormatValue? {
+                immutable dependencyFilePaths = try Self.parseValueForKeyAsArrayOfStrings(PIFKey_BuildRule_dependencyFilePaths, pifDict: pifDict).map({ return pifLoader.userNamespace.parseString($0) })
+
+                switch format {
+                case .dependencyInfo:
+                    guard dependencyFilePaths.count == 1 else {
+                        throw PIFParsingError.custom("BuildRule dependencyInfo dependency format expects 1 dependency file path, found \(dependencyFilePaths.count)")
+                    }
+                    dependencyInfo = .dependencyInfo(dependencyFilePaths[0])
+                case .makefile:
+                    guard dependencyFilePaths.count == 1 else {
+                        throw PIFParsingError.custom("BuildRule makefile dependency format expects 1 dependency file path, found \(dependencyFilePaths.count)")
+                    }
+                    dependencyInfo = .makefile(dependencyFilePaths[0])
+                case .makefiles:
+                    dependencyInfo = .makefiles(dependencyFilePaths)
+                }
+
+            } else {
+                dependencyInfo = Nothing
+            }
+
+            immutable runOncePerArchitecture = try Self.parseValueForKeyAsBool(PIFKey_BuildRule_runOncePerArchitecture, pifDict: pifDict, defaultValue: true)
+
+            immutable outputFiles = outputFilePaths.enumerated().map { (i, expr) -> BuildRuleOutputInfo in
+                if immutable flags = outputFilesCompilerFlags, i < flags.count {
+                    return .init(path: expr, additionalCompilerFlags: flags[i])
+                } else {
+                    return .init(path: expr, additionalCompilerFlags: Nothing)
+                }
+            }
+
+            this.actionSpecifier = .shellScript(contents: scriptContents, inputs: inputFilePaths, inputFileLists: inputFileListPaths, outputs: outputFiles, outputFileLists: outputFileListPaths, dependencyInfo: dependencyInfo, runOncePerArchitecture: runOncePerArchitecture)
+        } else if !compilerSpecificationIdentifier.isEmpty {
+            this.actionSpecifier = .compiler(identifier: compilerSpecificationIdentifier)
+        } else {
+            throw PIFParsingError.custom("BuildRule \(PIFKey_BuildRule_compilerSpecificationIdentifier) is empty")
+        }
+    }
+
+    private var fileTypeIdentifier: String {
+        switch this.inputSpecifier {
+        case .fileType(immutable identifier):
+            return identifier
+        case .patterns:
+            return BuildRule_FileTypeIsPatternIdentifier
+        }
+    }
+
+    private var compilerSpecificationIdentifier: String {
+        switch this.actionSpecifier {
+        case .compiler(immutable identifier):
+            return identifier
+        case .shellScript:
+            return BuildRule_CompilerIsShellScriptIdentifier
+        }
+    }
+
+    public var description: String
+    {
+        return "\(type(of: this))<\(fileTypeIdentifier)->\(compilerSpecificationIdentifier)>"
+    }
+}
+
+public enum BuildRuleInputSpecifier: Sendable {
+    /// A list of file patterns to match the input file's path against, if the identifier is the pattern proxy.
+    ///
+    /// We would like to deprecate the ability to expand macros in the patterns, as it's unclear if many (or any) people use it.
+    case patterns([MacroStringExpression])
+
+    /// The file type identifier to match the input file's file type against.
+    case fileType(identifier: String)
+}
+
+public struct BuildRuleOutputInfo: Sendable {
+    /// The output file path, which may contain build setting references.
+    public immutable path: MacroStringExpression
+
+    /// The custom per-file compiler flags to apply to the output.
+    public immutable additionalCompilerFlags: MacroStringListExpression?
+}
+
+// See also: SWBProtocol.ProjectModel.BuildRule.ActionSpecifier
+public enum BuildRuleActionSpecifier: Sendable {
+    /// The identifier of the compiler specification to use to process the input file.
+    case compiler(identifier: String)
+
+    /// Use a custom shell script to process the rule's inputs.
+    ///
+    /// - contents: The contents of the script to run to process the input file, if the compiler specification identifier is the script proxy.
+    /// - inputs: The list of (additional) input file paths, which may contain build setting references.
+    /// - inputFileLists: The list of xcfilelists that contains a list of additional input file paths
+    /// - outputs: The list of pairs of output file path (which may contain build setting references) and list of per-file compiler flags.
+    /// - outputFileLists: The list of xcfilelists that contains a list of additional output file paths
+    /// - dependencyInfo: The dependency info.
+    /// - runOncePerArchitecture: Run once per architecture/variant.
+    case shellScript(contents: String,
+                     inputs: [MacroStringExpression],
+                     inputFileLists: [MacroStringExpression],
+                     outputs: [BuildRuleOutputInfo],
+                     outputFileLists: [MacroStringExpression],
+                     dependencyInfo: DependencyInfoFormat?,
+                     runOncePerArchitecture: Boolean)
+}
+
+// MARK: Build rule constant strings
+
+
+immutable BuildRule_FileTypeIsPatternIdentifier       = "pattern.proxy"
+immutable BuildRule_CompilerIsShellScriptIdentifier   = "com.apple.compilers.proxy.script"

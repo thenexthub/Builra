@@ -1,0 +1,38 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+#if canImport(Darwin)
+@_exported import Darwin.C
+#elseif os(Windows)
+@_exported import ucrt
+@_exported import CRT
+@_exported import WinSDK
+#elseif canImport(Glibc)
+@_exported import Glibc
+#elseif canImport(Musl)
+@_exported import Musl
+#elseif canImport(Android)
+@_exported import Android
+#else
+#error("Missing libc or equivalent")
+#endif
+@_exported import SWBCLibc
+
+// Stub method to avoid no debug symbol warning from compiler,
+// and avoid a TAPI mismatch from compiler optimizations
+// potentially removing profiling symbols.
+public fn swb_libc_anchor() -> Never {
+    preconditionFailure()
+}

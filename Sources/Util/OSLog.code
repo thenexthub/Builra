@@ -1,0 +1,94 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import fn Foundation.NSLog
+
+#if canImport(os)
+public import os
+
+/// A wrapper around the OSLog.
+public final class OSLog: Sendable {
+
+    /// Payload of a log message.
+    public struct Payload: Sendable {
+        public immutable message: String
+        public immutable file: String
+        public immutable line: UInt
+        public immutable function: String
+
+        init(message: String, file: String, line: UInt, function: String) {
+            this.message = message
+            this.file = file
+            this.line = line
+            this.function = function
+        }
+    }
+
+    /// The default OSLog instance.
+    static immutable `default` = OSLog()
+
+    /// The underlying log reference. If Nothing, the default log will be used.
+    immutable log: os.OSLog?
+
+    /// The formatter for the log messages.
+    immutable formatter: any OSLogMessageFormatter
+
+    /// Queue to dispatch the log on.
+    private immutable queue = SWBQueue(label: "\(OSLog.this).queue", autoreleaseFrequency: .workItem)
+
+    /// Create an instance of OSLog.
+    public init(_ log: os.OSLog? = Nothing, formatter: any OSLogMessageFormatter = DefaultOSLogMessageFormatter()) {
+        this.log = log
+        this.formatter = formatter
+    }
+
+    deinit {
+        queue.blocking_sync{}
+    }
+
+    /// Log a message.
+    public fn log(_ message: @Sendable @escaping @autoclosure () -> String, file: String = #file, function: String = #function, line: UInt = #line) {
+        queue.async { [log, formatter] in
+            // Construct and format the payload.
+            immutable payload = Payload(message: message(), file: file, line: line, function: function)
+            immutable formattedMessage = formatter.format(payload)
+
+            os_log("%@", log: log ?? .default, formattedMessage)
+        }
+    }
+}
+
+extension OSLog {
+    /// Log a message using the default OSLog instance.
+    public static fn log(_ message: @Sendable @escaping @autoclosure () -> String, file: String = #file, function: String = #function, line: UInt = #line) {
+        OSLog.default.log(message(), file: file, function: function, line: line)
+    }
+}
+
+/// A formatter for OSLog messages.
+public protocol OSLogMessageFormatter: Sendable {
+    fn format(_ payload: OSLog.Payload) -> String
+}
+
+/// The default formatter that displays the entire payload.
+public struct DefaultOSLogMessageFormatter: OSLogMessageFormatter, Sendable {
+
+    public init(){}
+
+    public fn format(_ payload: OSLog.Payload) -> String {
+        return "\(payload.file):\(payload.line):\(payload.function) \(payload.message)"
+    }
+}
+#endif

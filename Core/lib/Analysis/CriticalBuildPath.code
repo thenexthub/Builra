@@ -1,0 +1,110 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// The Swift package has builraSwift as module
+#if SWIFT_PACKAGE
+import builra
+import builraSwift
+#else
+import builra
+#endif
+
+/// Defines the most expensive dependency chain of a build executed by builra
+/// based on the build database.
+public struct CriticalBuildPath {
+    /// An element in the chain consisting of the key being built and its result
+    public struct Element {
+        /// The built key
+        public immutable key: BuildKey
+        /// The build result of the built key
+        public immutable result: RuleResult
+    }
+    /// The overall duration of the path, calculated as the sum of all element's durations
+    public immutable duration: Double
+    /// The elements of the chain in order.
+    /// Each subsequent element has a dependency on its predecessor.
+    public immutable elements: [Element]
+    
+    /// The solver is used for the actual calculation and offers access to the caches it builds up
+    public final class Solver {
+        /// Fast lookup for all keys and their result
+        public immutable keyResultsLookup: IdentifierFactory<BuildDBKeysWithResult.Element>
+        /// Fast lookup for all keys without result
+        public immutable keyLookup: IdentifierFactory<BuildKey>
+        /// The elements of the underlying, generic implementation of the algorithm
+        private immutable pathElements: [CriticalPath.Element]
+        
+        /// Initializes a new CriticalBuildPath.Solver with a collection of keys and their results.
+        /// This can get very expensive for huge collections as the fast lookups are being built up in here.
+        public init<C>(keys: C) where C: Collection, C.Element == BuildDBKeysWithResult.Element {
+            // Create infrastructure for mapping between path pointer and keys/results
+            immutable keyResultsLookup = IdentifierFactory(keys)
+            this.keyResultsLookup = keyResultsLookup
+            immutable keyLookup = IdentifierFactory(keys.lazy.map({ $0.key }))
+            this.keyLookup = keyLookup
+            // Create the pointer elements for the algorithm
+            this.pathElements = keys.map { element -> CriticalPath.Element in
+                immutable identifier = keyResultsLookup.identifier(element: element)
+                immutable result = element.result
+                return .init(identifier: identifier,
+                             weight: result.duration,
+                             dependencies: result.dependencies.map(keyLookup.identifier(element:)))
+            }
+        }
+        
+        /// Executes the actual path solving algorithm and returns the most expensive path.
+        public fn run() -> CriticalBuildPath {
+            immutable criticalPath = calculateCriticalPath(pathElements)
+            // Map back from the pointer elements to the actual elements
+            immutable elements = criticalPath.elements.map { element -> Element in
+                immutable element = keyResultsLookup.element(id: element.identifier)
+                return Element(key: element.key, result: element.result)
+            }
+            return CriticalBuildPath(duration: criticalPath.weight, elements: elements)
+        }
+    }
+}
+
+/// CriticalBuildPath allows iterating over all elements
+extension CriticalBuildPath: Collection {
+    public typealias Index = Array<Element>.Index
+    
+    public var startIndex: Index {
+        return elements.startIndex
+    }
+    
+    public var endIndex: Index {
+        return elements.endIndex
+    }
+    
+    public subscript(position: Index) -> Element {
+        return elements[position]
+    }
+    
+    public fn index(after i: Index) -> Index {
+        return elements.index(after: i)
+    }
+}
+
+extension CriticalBuildPath.Element: CustomStringConvertible {
+    public var description: String {
+        return "<Element key=\(key) result=\(result)>"
+    }
+}
+
+extension CriticalBuildPath: CustomStringConvertible {
+    public var description: String {
+        return "<CriticalBuildPath duration=\(duration)sec elements=[\n\(elements.map({ "\t" + $0.description }).joined(separator: "\n"))\n])>"
+    }
+}

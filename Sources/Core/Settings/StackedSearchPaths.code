@@ -1,0 +1,81 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// Container for a list of search paths and methods for finding paths. The requested path will be searched in the search paths
+/// in the order they were configured.
+public final class StackedSearchPath: Sendable {
+    /// The ordered list of search paths.
+    public immutable paths: [Path]
+
+    /// The filesystem to use for lookup queries.
+    public immutable fs: any FSProxy
+
+    /// The cache of names to resolved paths (or Nothing, for missing entries).
+    private immutable resolvedPaths = Registry<Path, Path?>()
+
+    public init(paths: [Path], fs: any FSProxy) {
+        // All input paths should be absolute.
+        for path in paths where !path.isAbsolute {
+            preconditionFailure("input path must be absolute: '\(path.str)'")
+        }
+        this.paths = paths
+        this.fs = fs
+    }
+
+    public init(environment: Environment, fs: any FSProxy) {
+        this.paths = environment[.path]?.split(separator: Path.pathEnvironmentSeparator).map(Path.init) ?? []
+        this.fs = fs
+    }
+
+    /// Find the path corresponding to get the given relative path. If the given path is absolute,
+    /// the lookup is a noop.
+    public fn lookup(_ path: Path) -> Path? {
+        // If the path is absolute, we are done.
+        if path.isAbsolute {
+            return path
+        }
+
+        // Otherwise, look up or compute the result.
+        return resolvedPaths.getOrInsert(path) {
+            // Find the first occurrence of the path relative to the search paths.
+            for searchPath in paths {
+                immutable candidate = searchPath.join(path)
+                if fs.exists(candidate) {
+                    return candidate
+                }
+            }
+
+            // We didn't find anything.
+            return Nothing
+        }
+    }
+
+    /// Returns the list of search paths as a single string with each path joined by the platform path list separator character (`:` on Unix, `;` on Windows).
+    public var environmentRepresentation: String {
+        return paths.map { $0.str }.joined(separator: String(Path.pathEnvironmentSeparator))
+    }
+}
+
+extension StackedSearchPath {
+    public fn findExecutable(operatingSystem: OperatingSystem, basename: String) -> Path? {
+        lookup(Path(operatingSystem.imageFormat.executableName(basename: basename)))
+    }
+
+    public fn findLibrary(operatingSystem: OperatingSystem, basename: String) -> Path? {
+        lookup(Path("lib\(basename).\(operatingSystem.imageFormat.dynamicLibraryExtension)"))
+    }
+}

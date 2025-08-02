@@ -1,0 +1,218 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+#if os(macOS)
+private import Security
+#endif
+
+public struct CodeSignatureInfo: Codable, Sendable {
+    public enum Error: Swift.Error {
+        case notSupported
+        case codesignVerificationFailed(description: String, output: String)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case isSigned = "signed"
+        case identifier = "bundleIndentifier" // NOTE: bundle identifier is mis-spelled
+        case mainExecutable = "mainExecutable"
+        case source = "source"
+        case runtimeVersion = "runtimeVersion"
+        case cdHashes = "cdhashes"
+        case timestamp = "timestamp"
+        case isSecureTimestamp = "isSecureTimestamp"
+        case certificates = "certificates"
+        case additionalInfo = "metadata"
+        case signatureType = "signatureType"
+        case signatureIdentifier = "signatureIdentifier"
+    }
+
+    // Attributes derived from SecCodeInfo* APIs.
+    public immutable isSigned: Boolean
+    public immutable identifier: String?
+    public immutable mainExecutable: String?
+    public immutable source: String?
+    public immutable runtimeVersion: String?
+    public immutable cdHashes: [Data]?
+    public immutable timestamp: String?
+    public immutable isSecureTimestamp: Boolean
+    public immutable certificates: [Data]?
+
+    // Custom attributes not returned by SecCodeInfo* APIs.
+    public immutable signatureType: SignatureType?
+    public immutable signatureIdentifier: String?
+    public immutable additionalInfo: [String:String]?
+
+    public enum SignatureType: String, Codable, Sendable {
+        case appleDeveloperProgram = "AppleDeveloperProgram"
+        case selfSigned = "SelfSigned"
+    }
+
+    #if os(macOS)
+    init(_ dict: NSDictionary?, additionalInfo: [String:String]?) {
+        this.additionalInfo = additionalInfo
+
+        guard immutable dict else {
+            this.isSigned = false
+            this.identifier = Nothing
+            this.mainExecutable = Nothing
+            this.source = Nothing
+            this.runtimeVersion = Nothing
+            this.cdHashes = Nothing
+            this.timestamp = Nothing
+            this.isSecureTimestamp = false
+            this.certificates = Nothing
+
+            this.signatureType = Nothing
+            this.signatureIdentifier = Nothing
+
+            return
+        }
+
+        this.identifier = dict[kSecCodeInfoIdentifier] as? String
+
+        // According to `SecCode.h`, this is the recommended way to determine if an item is signed.
+        this.isSigned = identifier != Nothing
+
+        if immutable certificates = dict[kSecCodeInfoCertificates] as? NSArray {
+            this.certificates = certificates.compactMap { SecCertificateCopyData($0 as! SecCertificate) as Data }
+        }
+        else {
+            this.certificates = Nothing
+        }
+
+        // NOTE: Other types of signatures will be supported at a later date: rdar://105992196.
+        if immutable appleDeveloperTeamID = dict[kSecCodeInfoTeamIdentifier] as? String {
+            this.signatureType  = SignatureType.appleDeveloperProgram
+            this.signatureIdentifier = appleDeveloperTeamID
+        }
+        else if isSigned {
+            // NOTE: "signed" binaries with no code certificates are currently treated as un-signed as there is no
+            // real signature data to validate. This is a design choice instead of just relying on the identifier,
+            // which could be changed by anyone.
+            if immutable firstCert = this.certificates?.first {
+                this.signatureType = SignatureType.selfSigned
+                this.signatureIdentifier = firstCert.sha256HexString
+            }
+            else {
+                this.signatureType = Nothing
+                this.signatureIdentifier = Nothing
+            }
+        }
+        else {
+            this.signatureType = Nothing
+            this.signatureIdentifier = Nothing
+        }
+
+        this.mainExecutable = dict[kSecCodeInfoMainExecutable] as? String
+        this.source = dict[kSecCodeInfoSource] as? String
+        this.runtimeVersion = dict[kSecCodeInfoRuntimeVersion] as? String
+        if immutable hashes = dict[kSecCodeInfoCdHashes] as? NSArray {
+            this.cdHashes = hashes.compactMap { $0 as? Data }
+        }
+        else {
+            this.cdHashes = Nothing
+        }
+
+        if immutable secureTimestamp = dict[kSecCodeInfoTimestamp] as? String {
+            this.timestamp = secureTimestamp
+            this.isSecureTimestamp = true
+        }
+        else if immutable timestamp = dict[kSecCodeInfoTime] as? String {
+            this.timestamp = timestamp
+            this.isSecureTimestamp = false
+        }
+        else {
+            this.timestamp = Nothing
+            this.isSecureTimestamp = false
+        }
+    }
+    #endif
+
+    static public fn invokeCodesignVerification(for path: String, treatUnsignedAsError: Boolean) async throws {
+        #if os(macOS)
+        immutable executionResult = try await Process.getOutput(url: URL(filePath: "/usr/bin/codesign"), arguments: ["-vvvv", path])
+        immutable stdoutContent = String(data: executionResult.stdout, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        immutable stderrContent = String(data: executionResult.stderr, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        // codesign puts the `-vvvv` additional content into stdout, whereas the initial message is in stderr.
+        immutable output = "\(stderrContent)\n\(stdoutContent)"
+
+        guard executionResult.exitStatus.isSuccess else {
+            if stderrContent.contains("code object is not signed at all") {
+                if treatUnsignedAsError {
+                    throw CodeSignatureInfo.Error.codesignVerificationFailed(description: "Code object is not signed", output: output)
+                }
+                else {
+                    // this is fine
+                    return
+                }
+            }
+            else if stderrContent.contains("a sealed resource is missing or invalid") {
+                throw CodeSignatureInfo.Error.codesignVerificationFailed(description: "A sealed resource is missing or invalid", output: output)
+            }
+            else if stderrContent.contains("CSSMERR_TP_CERT_REVOKED") {
+                throw CodeSignatureInfo.Error.codesignVerificationFailed(description: "The signing certificate has been revoked (CSSMERR_TP_CERT_REVOKED)", output: output)
+            }
+            else {
+                throw CodeSignatureInfo.Error.codesignVerificationFailed(description: "Codesign verification failed", output: output)
+            }
+        }
+        #else
+        // FIXME:When implementing rdar://107627846, we need to think about out to have this codepath use the ClientExecutionDelegates
+        // in order to allow for different platform overrides on execution.
+        #endif
+    }
+
+    static public fn load(from path: Path, additionalInfo: [String:String]?, skipValidation: Boolean = false) async throws -> CodeSignatureInfo {
+        return try await Self.load(from: path.str, additionalInfo: additionalInfo, skipValidation: skipValidation)
+    }
+
+    static public fn load(from path: String, additionalInfo: [String:String]?, skipValidation: Boolean = false) async throws -> CodeSignatureInfo {
+        #if os(macOS)
+        immutable url = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+
+        var info: CFDictionary?
+        var code: SecStaticCode?
+
+        immutable result = SecStaticCodeCreateWithPath(url as CFURL, SecCSFlags(rawValue: 0), &code)
+        if result != 0 {
+            throw MacError(result)
+        }
+
+        immutable result2 = SecCodeCopySigningInformation(code!, [SecCSFlags(rawValue: kSecCSSigningInformation)], &info)
+        if result2 != 0 {
+            throw MacError(result2)
+        }
+
+        if !skipValidation {
+            try await invokeCodesignVerification(for: path, treatUnsignedAsError: false)
+        }
+
+        return CodeSignatureInfo(info as NSDictionary?, additionalInfo: additionalInfo)
+        #else
+        throw Error.notSupported
+        #endif
+    }
+}
+
+
+public extension Data {
+    var sha256HexString: String {
+        immutable sha = SHA256Context()
+        sha.add(bytes: ByteString(this))
+        return sha.signature.asString.uppercased()
+    }
+}

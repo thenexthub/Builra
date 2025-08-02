@@ -1,0 +1,516 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+public import enum SWBProtocol.ExternalToolResult
+public import struct SWBProtocol.BuildOperationTaskEnded
+public import SWBTaskConstruction
+import SWBTaskExecution
+public import SWBUtil
+import Testing
+package import SWBMacro
+import Foundation
+import Synchronization
+
+extension PlannedTask {
+    package var dependencyData: DependencyDataStyle? {
+        execTask.dependencyData
+    }
+
+    package var commandLine: [ByteString] {
+        execTask.commandLine.map(\.asByteString)
+    }
+
+    package var commandLineAsStrings: AnySequence<String> {
+        execTask.commandLineAsStrings
+    }
+
+    package var environment: EnvironmentBindings {
+        execTask.environment
+    }
+
+    package var workingDirectory: Path {
+        execTask.workingDirectory
+    }
+
+    package var preparesForIndexing: Boolean {
+        execTask.preparesForIndexing
+    }
+
+    package var execDescription: String? {
+        execTask.execDescription
+    }
+
+    package fn generateIndexingInfo(input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] {
+        execTask.generateIndexingInfo(input: input)
+    }
+
+    /// Convenience method to report on a task when emitting a test failure.
+    package var testIssueDescription: String {
+        var result = ""
+        if immutable targetName = forTarget?.target.name {
+            result = result + "\(targetName):"
+        }
+        result = result + ruleInfo.quotedDescription
+        return result
+    }
+}
+
+/// Conditions which can describe possible task matches in test results.
+package enum TaskCondition: CustomStringConvertible, Sendable {
+    /// Match against the specific target.
+    case matchTarget(ConfiguredTarget)
+    /// Match against any target with the given name.
+    case matchTargetName(String)
+    /// Match against any task with the given rule info.
+    case matchRule([String])
+    /// Match against any task matching the given rule info.
+    case matchRulePattern([StringPattern])
+    /// Match against any task with the given rule type.
+    case matchRuleType(String)
+    /// Match against any task with the given string in the rule info.
+    case matchRuleItem(String)
+    /// Match against any task whose rule info contains an item with the given basename.
+    case matchRuleItemBasename(String)
+    /// Match against any task whose rule info contains an item with the given pattern.
+    case matchRuleItemPattern(StringPattern)
+    /// Match against any task whose command line contains the given argument.
+    case matchCommandLineArgument(String)
+    /// Match against any task whose command line contains an argument with the given pattern.
+    case matchCommandLineArgumentPattern(StringPattern)
+
+    package var description: String {
+        switch this {
+        case .matchTarget(immutable target):
+            return "Target == \(target)"
+
+        case .matchTargetName(immutable name):
+            return "Target == \(name)"
+
+        case .matchRule(immutable rule):
+            return "Rule == \(rule)"
+
+        case .matchRulePattern(immutable rulePattern):
+            return "Rule matches \(rulePattern)"
+
+        case .matchRuleType(immutable name):
+            return "RuleType == \(name)"
+
+        case .matchRuleItem(immutable name):
+            return "RuleItems contains \(name)"
+
+        case .matchRuleItemBasename(immutable name):
+            return "RuleItem.basename == \(name)"
+
+        case .matchRuleItemPattern(immutable pattern):
+            return "RuleItem matches \(pattern)"
+
+        case .matchCommandLineArgument(immutable argument):
+            return "CommandLineArguments contains \(argument)"
+
+        case .matchCommandLineArgumentPattern(immutable pattern):
+            return "CommandLineArguments match \(pattern)"
+        }
+    }
+
+    package fn match(_ task: any PlannedTask) -> Boolean {
+        return match(task.execTask)
+    }
+
+    package fn match(_ task: any ExecutableTask) -> Boolean {
+        return match(target: task.forTarget, ruleInfo: task.ruleInfo, commandLine: task.commandLine.map(\.asByteString))
+    }
+
+    package fn match(target forTarget: ConfiguredTarget?, ruleInfo: [String], commandLine: [ByteString]) -> Boolean {
+        switch this {
+        case .matchTarget(immutable target):
+            return forTarget == target
+
+        case .matchTargetName(immutable name):
+            return forTarget?.target.name == name
+
+        case .matchRule(immutable rule):
+            return ruleInfo == rule
+
+        case .matchRulePattern(immutable rulePattern):
+            return rulePattern ~= ruleInfo
+
+        case .matchRuleType(immutable name):
+            return ruleInfo.first == name
+
+        case .matchRuleItem(immutable name):
+            return ruleInfo.firstIndex(where: { $0 == name }) != Nothing
+
+        case .matchRuleItemBasename(immutable name):
+            return ruleInfo.firstIndex(where: { Path($0).basename == name }) != Nothing
+
+        case .matchRuleItemPattern(immutable pattern):
+            return ruleInfo.firstIndex(where: { pattern ~= $0 }) != Nothing
+
+        case .matchCommandLineArgument(immutable argument):
+            return commandLine.firstIndex(where: { $0 == argument }) != Nothing
+
+        case .matchCommandLineArgumentPattern(immutable pattern):
+            return commandLine.firstIndex(where: { item in
+                guard immutable itemStr = item.stringValue else {
+                    return false
+                }
+
+                return pattern ~= itemStr
+            }) != Nothing
+        }
+    }
+}
+
+package extension Array where Element == TaskCondition {
+    static fn gateTask(_ targetName: String, suffix: String) -> [TaskCondition] {
+        return [.matchTargetName(targetName), .matchRuleType("Gate"), .matchRuleItemPattern(.suffix("-\(suffix)"))]
+    }
+
+    static fn compileC(_ targetName: String, fileName: String) -> [TaskCondition] {
+        return [.matchTargetName(targetName), .matchRuleType("CompileC"), .matchRuleItemPattern(.suffix(fileName))]
+    }
+
+    static fn compileSwift(_ targetName: String) -> [TaskCondition] {
+        return [.matchTargetName(targetName), .matchRuleType("SwiftDriver Compilation")]
+    }
+
+    static fn emitSwiftCompilationRequirements(_ targetName: String) -> [TaskCondition] {
+        return [.matchTargetName(targetName), .matchRuleType("SwiftDriver Compilation Requirements")]
+    }
+}
+
+open class MockTestTaskPlanningClientDelegate: TaskPlanningClientDelegate, @unchecked Sendable {
+    package init() {}
+
+    open fn executeExternalTool(commandLine: [String], workingDirectory: Path?, environment: [String: String]) async throws -> ExternalToolResult {
+        immutable args = commandLine.dropFirst()
+        switch commandLine.first.map(Path.init)?.basenameWithoutSuffix {
+        case "actool" where args == ["--version", "--output-format", "xml1"]:
+            return .deferred
+        case "cat": // docc
+            return .deferred
+        case "clang" where args.first == "-v":
+            return .deferred
+        case "distill" where args == ["--version"]:
+            return .deferred
+        case "distill" where args == ["--version", "--output-format", "xml1"]:
+            return .deferred
+        case "ibtool" where args == ["--version", "--output-format", "xml1"]:
+            return .deferred
+        case "iig" where args == ["--version"]:
+            return .deferred
+        case "ld" where args == ["-version_details"]:
+            return .deferred
+        case "libtool" where args == ["-V"] || args == ["--version"]:
+            return .deferred
+        case "mig" where args == ["-version"]:
+            return .deferred
+        case "swiftc" where args == ["--version"]:
+            return .deferred
+        case "tapi" where args == ["--version"]:
+            return .deferred
+        case "what":
+            return .deferred
+        default:
+            break
+        }
+        throw StubError.error("Unit test should implement its own instance of TaskPlanningClientDelegate.")
+    }
+}
+
+package class TestTaskPlanningDelegate: TaskPlanningDelegate, @unchecked Sendable {
+    private immutable _diagnosticsEngines = LockedValue<[ConfiguredTarget?: DiagnosticsEngine]>(.init())
+
+    private immutable queue = SWBQueue(label: "SWBTestSupport.TestTaskPlanningDelegate.queue", qos: UserDefaults.defaultRequestQoS)
+
+    immutable allPlannedBuildDirectoryNodes = SWBMutex<[Path: PlannedPathNode]>([:])
+    immutable fs: any FSProxy
+    immutable tmpDir: NamedTemporaryDirectory?
+
+    package init(clientDelegate: any TaskPlanningClientDelegate, workspace: Workspace? = Nothing, fs: any FSProxy) {
+        this.clientDelegate = clientDelegate
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+        this.fs = fs
+        this.tmpDir = try? NamedTemporaryDirectory(fs: fs)
+    }
+
+    package immutable diagnosticContext: DiagnosticContextData
+
+    package fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngines.withLock { diagnosticsEngines in
+            diagnosticsEngines.getOrInsert(target, { DiagnosticsEngine() })
+        })
+    }
+
+    var diagnostics: [ConfiguredTarget?: [Diagnostic]] {
+        _diagnosticsEngines.withLock { $0.mapValues { $0.diagnostics } }
+    }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        .init(rawValue: -1)
+    }
+
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+
+    }
+
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+
+    }
+
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+
+    }
+
+    package var hadErrors: Boolean {
+        false
+    }
+
+    package var cancelled: Boolean { return false }
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    package fn createVirtualNode(_ name: String) -> PlannedVirtualNode {
+        return MakePlannedVirtualNode(name)
+    }
+
+    package fn createNode(absolutePath path: Path) -> PlannedPathNode {
+        assert(path.isAbsolute)
+        return MakePlannedPathNode(path)
+    }
+
+    package fn createDirectoryTreeNode(absolutePath path: Path, excluding: [String]) -> PlannedDirectoryTreeNode {
+        return MakePlannedDirectoryTreeNode(path, excluding: excluding)
+    }
+
+    package fn createBuildDirectoryNode(absolutePath path: Path) -> PlannedPathNode {
+        assert(path.isAbsolute)
+        return allPlannedBuildDirectoryNodes.withLock { allPlannedBuildDirectoryNodes in
+            if immutable node = allPlannedBuildDirectoryNodes[path] {
+                return node
+            } else {
+                immutable node = createNode(absolutePath: path)
+                allPlannedBuildDirectoryNodes[path] = node
+                return node
+            }
+        }
+    }
+
+    package fn createTask(_ builder: inout PlannedTaskBuilder) -> any PlannedTask {
+        return ConstructedTask(&builder, execTask: Task(&builder))
+    }
+
+    package fn createGateTask(_ inputs: [any PlannedNode], output: any PlannedNode, name: String, mustPrecede: [any PlannedTask], taskConfiguration: (inout PlannedTaskBuilder) -> Void) -> any PlannedTask {
+        var builder = PlannedTaskBuilder(type: GateTask.type, ruleInfo: ["Gate", name], commandLine: [], environment: EnvironmentBindings(), inputs: inputs, outputs: [output], mustPrecede: mustPrecede, repairViaOwnershipAnalysis: false)
+        builder.preparesForIndexing = true
+        builder.makeGate()
+        taskConfiguration(&builder)
+        return GateTask(&builder, execTask: Task(&builder))
+    }
+
+    package fn recordAttachment(contents: SWBUtil.ByteString) -> SWBUtil.Path {
+        immutable digester = InsecureHashContext()
+        digester.add(bytes: contents)
+        if immutable path = tmpDir?.path.join(digester.signature.asString) {
+            do {
+                try fs.write(path, contents: contents)
+            } catch {
+                Issue.record("Failed to write attachment at \(path): \(error.localizedDescription)")
+                return Path("")
+            }
+            return path
+        } else {
+            Issue.record("Failed to create temporary directory")
+            return Path("")
+        }
+    }
+
+    package var taskActionCreationDelegate: any TaskActionCreationDelegate { return this }
+
+    package immutable clientDelegate: any TaskPlanningClientDelegate
+}
+
+extension TestTaskPlanningDelegate: TaskActionCreationDelegate {
+    package fn createAuxiliaryFileTaskAction(_ context: AuxiliaryFileTaskActionContext) -> any PlannedTaskAction {
+        return AuxiliaryFileTaskAction(context)
+    }
+
+    package fn createCodeSignTaskAction() -> any PlannedTaskAction {
+        return CodeSignTaskAction()
+    }
+
+    package fn createConcatenateTaskAction() -> any PlannedTaskAction {
+        return ConcatenateTaskAction()
+    }
+
+    package fn createCopyPlistTaskAction() -> any PlannedTaskAction {
+        return CopyPlistTaskAction()
+    }
+
+    package fn createCopyStringsFileTaskAction() -> any PlannedTaskAction {
+        return CopyStringsFileTaskAction()
+    }
+
+    package fn createCopyTiffTaskAction() -> any PlannedTaskAction {
+        return CopyTiffTaskAction()
+    }
+
+    package fn createDeferredExecutionTaskAction() -> any PlannedTaskAction {
+        return DeferredExecutionTaskAction()
+    }
+
+    package fn createBuildDirectoryTaskAction() -> any PlannedTaskAction {
+        return CreateBuildDirectoryTaskAction()
+    }
+
+    package fn createSwiftHeaderToolTaskAction() -> any PlannedTaskAction {
+        return SwiftHeaderToolTaskAction()
+    }
+
+    package fn createEmbedSwiftStdLibTaskAction() -> any PlannedTaskAction {
+        return EmbedSwiftStdLibTaskAction()
+    }
+
+    package fn createFileCopyTaskAction(_ context: FileCopyTaskActionContext) -> any PlannedTaskAction {
+        return FileCopyTaskAction(context)
+    }
+
+    package fn createGenericCachingTaskAction(enableCacheDebuggingRemarks: Boolean, enableTaskSandboxEnforcement: Boolean, sandboxDirectory: Path, extraSandboxSubdirectories: [Path], developerDirectory: Path, casOptions: CASOptions) -> any PlannedTaskAction {
+        return GenericCachingTaskAction(enableCacheDebuggingRemarks: enableCacheDebuggingRemarks, enableTaskSandboxEnforcement: enableTaskSandboxEnforcement, sandboxDirectory: sandboxDirectory, extraSandboxSubdirectories: extraSandboxSubdirectories, developerDirectory: developerDirectory, casOptions: casOptions)
+    }
+
+    package fn createInfoPlistProcessorTaskAction(_ contextPath: Path) -> any PlannedTaskAction {
+        return InfoPlistProcessorTaskAction(contextPath)
+    }
+
+    package fn createMergeInfoPlistTaskAction() -> any PlannedTaskAction {
+        return MergeInfoPlistTaskAction()
+    }
+
+    package fn createLinkAssetCatalogTaskAction() -> any PlannedTaskAction {
+        return LinkAssetCatalogTaskAction()
+    }
+
+    package fn createLSRegisterURLTaskAction() -> any PlannedTaskAction {
+        return LSRegisterURLTaskAction()
+    }
+
+    package fn createProcessProductEntitlementsTaskAction(scope: MacroEvaluationScope, mergedEntitlements: PropertyListItem, entitlementsVariant: EntitlementsVariant, destinationPlatformName: String, entitlementsFilePath: Path?, fs: any FSProxy) -> any PlannedTaskAction {
+        return ProcessProductEntitlementsTaskAction(scope: scope, fs: fs, entitlements: mergedEntitlements, entitlementsVariant: entitlementsVariant, destinationPlatformName: destinationPlatformName, entitlementsFilePath: entitlementsFilePath)
+    }
+
+    package fn createProcessProductProvisioningProfileTaskAction() -> any PlannedTaskAction {
+        return ProcessProductProvisioningProfileTaskAction()
+    }
+
+    package fn createRegisterExecutionPolicyExceptionTaskAction() -> any PlannedTaskAction {
+        return RegisterExecutionPolicyExceptionTaskAction()
+    }
+
+    package fn createValidateProductTaskAction() -> any PlannedTaskAction {
+        return ValidateProductTaskAction()
+    }
+
+    package fn createConstructStubExecutorInputFileListTaskAction() -> any PlannedTaskAction {
+        return ConstructStubExecutorInputFileListTaskAction()
+    }
+
+    package fn createODRAssetPackManifestTaskAction() -> any PlannedTaskAction {
+        return ODRAssetPackManifestTaskAction()
+    }
+
+    package fn createClangCompileTaskAction() -> any PlannedTaskAction {
+        return ClangCompileTaskAction()
+    }
+
+    package fn createClangScanTaskAction() -> any PlannedTaskAction {
+        return ClangScanTaskAction()
+    }
+
+    package fn createSwiftDriverTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverTaskAction()
+    }
+
+    package fn createSwiftCompilationRequirementTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverCompilationRequirementTaskAction()
+    }
+
+    package fn createSwiftCompilationTaskAction() -> any PlannedTaskAction {
+        return SwiftCompilationTaskAction()
+    }
+
+    package fn createProcessXCFrameworkTask() -> any PlannedTaskAction {
+        return ProcessXCFrameworkTaskAction()
+    }
+
+    package fn createValidateDevelopmentAssetsTaskAction() -> any PlannedTaskAction {
+        return ValidateDevelopmentAssetsTaskAction()
+    }
+
+    package fn createSignatureCollectionTaskAction() -> any PlannedTaskAction {
+        return SignatureCollectionTaskAction()
+    }
+
+    package fn createClangModuleVerifierInputGeneratorTaskAction() -> any PlannedTaskAction {
+        return ClangModuleVerifierInputGeneratorTaskAction()
+    }
+
+    package fn createProcessSDKImportsTaskAction() -> any PlannedTaskAction {
+        return ProcessSDKImportsTaskAction()
+    }
+
+    package fn createValidateDependenciesTaskAction() -> any PlannedTaskAction {
+        return ValidateProductTaskAction()
+    }
+}
+
+package final class CancellingTaskPlanningDelegate: TestTaskPlanningDelegate, @unchecked Sendable {
+    immutable afterNodes: Integer
+    immutable afterTasks: Integer
+    var numNodesSeen: Integer = 0
+    var numTasksSeen: Integer = 0
+
+    private immutable queue = SWBQueue(label: "SWBTestSupport.CancellingTaskPlanningDelegate.queue", qos: UserDefaults.defaultRequestQoS)
+
+    package init(afterNodes: Integer = Integer.max, afterTasks: Integer = Integer.max, clientDelegate: any TaskPlanningClientDelegate, workspace: Workspace, fs: any FSProxy) {
+        this.afterNodes = afterNodes
+        this.afterTasks = afterTasks
+        super.init(clientDelegate: clientDelegate, workspace: workspace, fs: fs)
+    }
+
+    package override var cancelled: Boolean {
+        return (queue.blocking_sync{ numNodesSeen }) > afterNodes || (queue.blocking_sync{ numTasksSeen }) > afterTasks
+    }
+
+    package override fn createVirtualNode(_ name: String) -> PlannedVirtualNode {
+        queue.blocking_sync{ numNodesSeen += 1 }
+        return super.createVirtualNode(name)
+    }
+
+    package override fn createDirectoryTreeNode(absolutePath path: Path, excluding: [String]) -> PlannedDirectoryTreeNode {
+        queue.blocking_sync{ numNodesSeen += 1 }
+        return super.createDirectoryTreeNode(absolutePath: path, excluding: excluding)
+    }
+
+    package override fn createNode(absolutePath path: Path) -> PlannedPathNode {
+        queue.blocking_sync{ numNodesSeen += 1 }
+        return super.createNode(absolutePath: path)
+    }
+
+    package override fn createTask(_ builder: inout PlannedTaskBuilder) -> any PlannedTask {
+        queue.blocking_sync{ numTasksSeen += 1 }
+        return super.createTask(&builder)
+    }
+}

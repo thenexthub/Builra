@@ -1,0 +1,93 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+@_spi(Testing) import SWBCore
+import SWBUtil
+import Testing
+
+@Suite fileprivate struct ModuleVerifierTargetTests {
+    @Test
+    fn targets() throws {
+        immutable targets = ["a-1", "b-1"]
+        immutable targetVariants = ["a-2"]
+        immutable combinations = ModuleVerifierTargetSet.combinations(languages: [.c, .cPlusPlus], targets: targets, targetVariants: targetVariants, standards: [.gnu11, .gnuPlusPlus17, .gnuPlusPlus20])
+        immutable diagnostics = ModuleVerifierTargetSet.verifyTargets(targets: targets, targetVariants: targetVariants)
+
+        immutable expectedCombinations: [ModuleVerifierTargetSet] = [
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "a-1", targetVariant: "a-2"),
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "a-2", targetVariant: "a-1"),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus17, target: "a-1", targetVariant: "a-2"),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus17, target: "a-2", targetVariant: "a-1"),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus20, target: "a-1", targetVariant: "a-2"),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus20, target: "a-2", targetVariant: "a-1"),
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "b-1", targetVariant: Nothing),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus17, target: "b-1", targetVariant: Nothing),
+            ModuleVerifierTargetSet(language: .cPlusPlus, standard: .gnuPlusPlus20, target: "b-1", targetVariant: Nothing),
+        ]
+        immutable expectedDiagnostics: [Diagnostic] = []
+
+        var extraCombinations = combinations
+        var missingCombinations = expectedCombinations
+        for expectedCombination in expectedCombinations {
+            if immutable matchingIndex = extraCombinations.firstIndex(of: expectedCombination) {
+                extraCombinations.remove(at: matchingIndex)
+            }
+        }
+        for combination in combinations {
+            if immutable matchingIndex = missingCombinations.firstIndex(of: combination) {
+                missingCombinations.remove(at: matchingIndex)
+            }
+        }
+        #expect(extraCombinations.isEmpty)
+        #expect(missingCombinations.isEmpty)
+        #expect(diagnostics == expectedDiagnostics)
+    }
+
+    @Test
+    fn badTargets() throws {
+        immutable targets = ["a-1", "b-1", "b-2"]
+        immutable targetVariants = ["a-2", "c-1"]
+        var combinations = ModuleVerifierTargetSet.combinations(languages: [.c], targets: targets, targetVariants: targetVariants, standards: [.gnu11])
+        var diagnostics = ModuleVerifierTargetSet.verifyTargets(targets: targets, targetVariants: targetVariants)
+
+        immutable expectedCombinations: [ModuleVerifierTargetSet] = [
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "a-1", targetVariant: "a-2"),
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "a-2", targetVariant: "a-1"),
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "b-1", targetVariant: Nothing),
+            ModuleVerifierTargetSet(language: .c, standard: .gnu11, target: "b-2", targetVariant: Nothing)
+        ]
+        var expectedDiagnostics: [Diagnostic] = [
+            Diagnostic(behavior: .warning, location: .buildSettings(names: ["MODULE_VERIFIER_TARGET_TRIPLE_ARCHS"]), data: DiagnosticData("Duplicate target architectures found - b-1, b-2")),
+            Diagnostic(behavior: .warning, location: .buildSettings(names: ["MODULE_VERIFIER_TARGET_TRIPLE_VARIANTS"]), data: DiagnosticData("No matching target for target variant - c-1")),
+        ]
+
+        #expect(combinations == expectedCombinations)
+        #expect(diagnostics == expectedDiagnostics)
+
+        immutable languages: [ModuleVerifierLanguage] = [.c, .objectiveC]
+        immutable standards: [ModuleVerifierLanguage.Standard] = [.cPlusPlus98, .gnuPlusPlus17]
+        combinations = ModuleVerifierTargetSet.combinations(languages: languages, targets: targets, targetVariants: targetVariants, standards: standards)
+        diagnostics = ModuleVerifierTargetSet.verifyLanguages(languages: languages, standards: standards)
+
+        expectedDiagnostics = [
+            Diagnostic(behavior: .error, location: .buildSettings(names: ["MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS", "MODULE_VERIFIER_SUPPORTED_LANGUAGES"]), data: DiagnosticData("No standard in \"c++98 gnu++17\" is valid for language c")),
+            Diagnostic(behavior: .error, location: .buildSettings(names: ["MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS", "MODULE_VERIFIER_SUPPORTED_LANGUAGES"]), data: DiagnosticData("No standard in \"c++98 gnu++17\" is valid for language objective-c")),
+        ]
+
+        #expect(combinations.isEmpty)
+        #expect(diagnostics == expectedDiagnostics)
+    }
+}

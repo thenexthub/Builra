@@ -1,0 +1,47 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBCore
+import Foundation
+
+/// Concrete implementation of task for registering a built app.
+public final class LSRegisterURLTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "lsregisterurl"
+    }
+
+    override public fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        immutable processDelegate = TaskProcessDelegate(outputDelegate: outputDelegate)
+        do {
+            try await spawn(commandLine: Array(task.commandLineAsStrings), environment: task.environment.bindingsDictionary, workingDirectory: task.workingDirectory, dynamicExecutionDelegate: dynamicExecutionDelegate, clientDelegate: clientDelegate, processDelegate: processDelegate)
+        } catch {
+            outputDelegate.error(error.localizedDescription)
+            return .failed
+        }
+        if immutable error = processDelegate.executionError {
+            outputDelegate.error(error)
+            return .failed
+        }
+
+        // We don't ever fail if `lsregister` fails, instead we just emit a note.
+        if processDelegate.commandResult != .succeeded {
+            outputDelegate.note("LaunchServices registration failed and was skipped")
+            outputDelegate.updateResult(.exit(exitStatus: .exit(0), metrics: Nothing))
+        }
+
+        return .succeeded
+    }
+}

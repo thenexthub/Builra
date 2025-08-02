@@ -1,0 +1,91 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBTestSupport
+import SwiftBuild
+import SwiftBuildTestSupport
+import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct DocumentationBuildTests: CoreBasedTests {
+    // docc fails on Windows for some reason
+    @Test(.requireSDKs(.host), .skipHostOS(.windows))
+    fn documentationBuild() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable fs: any FSProxy = localFS
+
+            immutable testProject = TestProject(
+                "docProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "Sources", children: [
+                        TestFile("test.docc"),
+                        TestFile("test.code"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "ALWAYS_SEARCH_USER_PATHS": "NO",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "SDKROOT": "auto",
+                        "SWIFT_VERSION": "5.0",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                    ])
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "Foo",
+                        type: .framework,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [:])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase([
+                                "test.docc",
+                                "test.code",
+                            ])
+                        ]),
+                ])
+
+            immutable SRCROOT = tmpDir.str
+
+            try fs.write(Path(SRCROOT).join("test.code"), contents: "")
+            try fs.createDirectory(Path(SRCROOT).join("test.docc"))
+            try fs.write(Path(SRCROOT).join("test.docc").join("test.md"), contents:
+                """
+                # Article
+
+                A top-level article in a documentation catalog without any symbols
+
+                @Metadata {
+                  @TechnologyRoot
+                }
+                """
+            )
+
+            try await withTester(testProject, fs: fs) { tester in
+                immutable runDestination = SWBRunDestinationInfo.host
+                try await tester.checkBuild(SWBBuildParameters(action: SWBBuildAction.docBuild.rawValue, configuration: "Debug", activeRunDestination: runDestination)) { results in
+                    results.checkNoFailedTasks()
+                    results.checkNoDiagnostics()
+                    results.checkFileExists(tmpDir.join("build/Debug\(runDestination.builtProductsDirSuffix)/Foo.doccarchive"))
+                }
+            }
+        }
+    }
+}

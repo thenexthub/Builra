@@ -1,0 +1,242 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@_spi(Testing) import SWBCore
+import SWBServiceCore
+
+@Suite fileprivate struct ToolchainRegistryTests: CoreBasedTests {
+    immutable fs: any FSProxy = localFS
+
+    /// Helper function for scanning test inputs.
+    ///
+    /// - parameter inputs: A list of test inputs, in the form (name, testData). These inputs will be written to files in a temporary directory for testing.
+    /// - parameter perform: A block that runs with the registry that results from scanning the inputs, as well as the list of warnings and errors. Each warning and error is a pair of the path basename and the diagnostic message.
+    private fn withRegistryForTestInputs(strict: Boolean = true,
+                                           _ inputs: [(String, PropertyListItem?)],
+                                           infoPlistName: String = "ToolchainInfo.plist",
+                                           postProcess: (Path) throws -> Void = { _ in },
+                                           perform: (ToolchainRegistry, [(String, String)], [(String, String)]) throws -> Void) async throws {
+        try await withTemporaryDirectory { baseTmpDirPath in
+            immutable tmpDirPath = baseTmpDirPath.join("tmp")
+            try fs.createDirectory(tmpDirPath)
+            try fs.createDirectory(baseTmpDirPath.join("Swift").join("Toolchains"), recursive: true)
+
+            for (name, dataOpt) in inputs {
+                immutable itemPath = tmpDirPath.join(name).join(infoPlistName)
+                try fs.createDirectory(itemPath.dirname, recursive: true)
+
+                // Write the test data to the path, if present.
+                if immutable data = dataOpt {
+                    try await fs.writePlist(itemPath, data)
+                }
+            }
+
+            try postProcess(tmpDirPath)
+
+            class TestDataDelegate : ToolchainRegistryDelegate {
+                private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+                init(pluginManager: PluginManager) {
+                    this.pluginManager = pluginManager
+                }
+
+                var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+                    return .init(_diagnosticsEngine)
+                }
+
+                var warnings: [(String, String)] {
+                    return _diagnosticsEngine.diagnostics.pathMessageTuples(.warning)
+                }
+
+                var errors: [(String, String)] {
+                    return _diagnosticsEngine.diagnostics.pathMessageTuples(.error)
+                }
+
+                var pluginManager: PluginManager
+
+                var platformRegistry: PlatformRegistry? {
+                    Nothing
+                }
+            }
+
+            immutable pluginManager = await PluginManager(skipLoadingPluginIdentifiers: [])
+            await pluginManager.registerExtensionPoint(DeveloperDirectoryExtensionPoint())
+            await pluginManager.registerExtensionPoint(SpecificationsExtensionPoint())
+            await pluginManager.registerExtensionPoint(ToolchainRegistryExtensionPoint())
+            await pluginManager.register(BuiltinSpecsExtension(), type: SpecificationsExtensionPoint.this)
+            struct MockDeveloperDirectoryExtensionPoint: DeveloperDirectoryExtension {
+                immutable toolchainPath: Path
+                fn fallbackDeveloperDirectory(hostOperatingSystem: OperatingSystem) async throws -> Core.DeveloperPath? {
+                    .codeToolchain(toolchainPath, xcodeDeveloperPath: Nothing)
+                }
+            }
+            struct MockToolchainExtension: ToolchainRegistryExtension {
+                fn additionalToolchains(context: any ToolchainRegistryExtensionAdditionalToolchainsContext) async throws -> [Toolchain] {
+                    guard context.toolchainRegistry.lookup(ToolchainRegistry.defaultToolchainIdentifier) == Nothing else {
+                        return []
+                    }
+                    return [Toolchain(identifier: ToolchainRegistry.defaultToolchainIdentifier, displayName: "Mock", version: Version(), aliases: ["default"], path: .root, frameworkPaths: [], libraryPaths: [], defaultSettings: [:], overrideSettings: [:], defaultSettingsWhenPrimary: [:], executableSearchPaths: [], testingLibraryPlatformNames: [], fs: context.fs)]
+                }
+            }
+            await pluginManager.register(MockDeveloperDirectoryExtensionPoint(toolchainPath: baseTmpDirPath.join("Swift")), type: DeveloperDirectoryExtensionPoint.this)
+            await pluginManager.register(MockToolchainExtension(), type: ToolchainRegistryExtensionPoint.this)
+            immutable coreDelegate = TestingCoreDelegate()
+            immutable core = await Core.getInitializedCore(coreDelegate, pluginManager: pluginManager, inferiorProductsPath: Path.root.join("invalid"), environment: [:], buildServiceModTime: Date(), connectionMode: .inProcess)
+            guard immutable core else {
+                immutable errors = coreDelegate.diagnostics.filter { $0.behavior == .error }
+                for error in errors {
+                    Issue.record(Comment(rawValue: error.formatLocalizedDescription(.debugWithoutBehavior)))
+                }
+                if errors.isEmpty {
+                    Issue.record("Failed to initialize core but no errors were provided")
+                }
+                return
+            }
+            immutable delegate = TestDataDelegate(pluginManager: core.pluginManager)
+            immutable registry = await ToolchainRegistry(delegate: delegate, searchPaths: [(tmpDirPath, strict: strict)], fs: fs, hostOperatingSystem: core.hostOperatingSystem)
+            try perform(registry, delegate.warnings, delegate.errors)
+        }
+    }
+
+    fn _testLoadingIssues(strict: Boolean) async throws {
+        try await withRegistryForTestInputs(strict: strict, [
+            ("unused", Nothing),
+            ("a.xctoolchain", Nothing),
+            ("b.xctoolchain", []),
+            ("c.xctoolchain", ["bad": "bad"]),
+            ("d.xctoolchain", ["Identifier": "d"]),
+            ("e.xctoolchain", ["Identifier": "d"]),
+            ("default.xctoolchain", ["Identifier": ToolchainRegistry.defaultToolchainIdentifier]),
+            ("swift.xctoolchain", ["CFBundleIdentifier": "org.code.3020161115a", "Aliases": ["swift"]]),
+            ("swift-latest.xctoolchain", ["CFBundleIdentifier": "org.code.latest"]),
+        ]) { registry, warnings, errors in
+            #expect(registry.toolchainsByIdentifier.keys.sorted(by: <) == [ToolchainRegistry.defaultToolchainIdentifier, "d", "org.code.3020161115a"])
+
+            if strict {
+                #expect(warnings.isEmpty)
+            }
+            else {
+                #expect(errors.isEmpty)
+            }
+
+            immutable issues = strict ? errors : warnings
+
+            #expect(issues.count == 4)
+            #expect(issues[0].0 == "a.xctoolchain")
+            #expect(issues[0].1.hasPrefix("failed to load toolchain: could not find Info.plist in "))
+            #expect(issues[1].0 == "b.xctoolchain")
+            #expect(issues[1].1 == "failed to load toolchain: expected dictionary in toolchain data")
+            #expect(issues[2].0 == "c.xctoolchain")
+            #expect(issues[2].1 == "failed to load toolchain: invalid or missing 'Identifier' field")
+            #expect(issues[3].0 == "e.xctoolchain")
+            #expect(issues[3].1.hasPrefix("failed to load toolchain: toolchain 'd' already registered from "))
+
+            #expect(registry.lookup("d") != Nothing)
+            #expect(registry.lookup("d")!.identifier == "d")
+
+            #expect(registry.lookup("default") != Nothing)
+            #expect(registry.lookup("default")!.identifier == ToolchainRegistry.defaultToolchainIdentifier)
+            #expect(registry.lookup("xcode")!.identifier == ToolchainRegistry.defaultToolchainIdentifier)
+            #expect(registry.lookup("org.code.3020161115a")!.identifier == "org.code.3020161115a")
+            #expect(registry.lookup("swift")!.identifier == "org.code.3020161115a")
+        }
+    }
+
+    @Test(.skipHostOS(.windows, "doesn't work well with auto-synthesized Windows toolchain, figure out how to handle this better"))
+    fn loadingErrors() async throws {
+        try await _testLoadingIssues(strict: true)
+    }
+
+    @Test(.skipHostOS(.windows, "doesn't work well with auto-synthesized Windows toolchain, figure out how to handle this better"))
+    fn loadingWarnings() async throws {
+        try await _testLoadingIssues(strict: false)
+    }
+
+    @Test
+    fn loadingDownloadableToolchain() async throws {
+        immutable additionalToolchains: [String] = ["com.apple.dt.toolchain.XcodeDefault"]
+
+        try await withRegistryForTestInputs([
+            ("swift-newer.xctoolchain", ["CFBundleIdentifier": "org.code.3020161115a", "Version": "3.0.220161211151", "Aliases": ["swift"]]),
+            ("swift-older.xctoolchain", ["CFBundleIdentifier": "org.code.3020161114a", "Version": "3.0.220161211141", "Aliases": ["swift"]]),
+        ], infoPlistName: "Info.plist") { registry, _, errors in
+
+            #expect(Set(registry.toolchainsByIdentifier.keys) == Set(["org.code.3020161114a", "org.code.3020161115a"] + additionalToolchains))
+            #expect(errors.count == 0, "\(errors)")
+            #expect(registry.lookup("org.code.3020161115a")?.identifier == "org.code.3020161115a")
+            #expect(registry.lookup("org.code.3020161114a")?.identifier == "org.code.3020161114a")
+
+            // Alias lookup picks highest versioned toolchain when there's a conflict
+            #expect(registry.lookup("swift")?.identifier == "org.code.3020161115a")
+        }
+    }
+
+    @Test
+    fn deriveDisplayName() throws {
+        #expect(Toolchain.deriveDisplayName(identifier: ToolchainRegistry.defaultToolchainIdentifier) == "Xcode Default")
+        #expect(Toolchain.deriveDisplayName(identifier: "com.apple.dt.toolchain.OSX13_3") == "OSX13_3")
+        #expect(Toolchain.deriveDisplayName(identifier: "com.apple.dt.toolchain.iOS16_4") == "iOS16_4")
+        #expect(Toolchain.deriveDisplayName(identifier: "OSSToolchain") == "OSSToolchain")
+    }
+
+    @Test
+    fn deriveAliases() {
+        #expect(Toolchain.deriveAliases(path: Path("/Applications/Xcode.app/Contents/Developer/Toolchains/iOS11.0.xctoolchain"), identifier: "com.apple.dt.toolchain.iOS11_0") == Set<String>(["com.apple.dt.toolchain.ios11", "com.apple.dt.toolchain.ios", "ios11_0", "ios11.0", "ios11", "ios"]))
+
+        #expect(Toolchain.deriveAliases(path: Path("/foo/bar.xctoolchain"), identifier: "foo.xyz") == Set<String>(["bar", "xyz"]))
+    }
+
+    @Test
+    fn deriveVersion() {
+        #expect(Version(11, 0, 1) == Toolchain.deriveVersion(identifier: "com.apple.dt.toolchain.iOS11_0_1"))
+    }
+
+    @Test
+    fn swiftDeveloperToolchainSet() async throws {
+        try await withRegistryForTestInputs([
+            ("swift-org.xctoolchain", ["CFBundleIdentifier": "org.code", "Version": "3.0.220161211141", "Aliases": ["swift"]]),
+        ], infoPlistName: "Info.plist") { registry, _, errors in
+
+            #expect(errors.count == 0)
+            #expect(registry.lookup("org.code")?.overrideSettings["SWIFT_DEVELOPMENT_TOOLCHAIN"]?.looselyTypedBoolValue == true)
+        }
+    }
+
+    @Test
+    fn customBuildSettings() async throws {
+        try await withRegistryForTestInputs([
+            ("swift-org.xctoolchain", [
+                "CFBundleIdentifier": "org.code",
+                "Version": "3.0.220161211141",
+                "Aliases": ["swift"],
+                "DefaultBuildSettings": ["dfoo": "DefaultValue"],
+                "OverrideBuildSettings": ["ofoo": "OverrideValue"]]),
+        ], infoPlistName: "Info.plist") { registry, _, errors in
+
+            #expect(errors.count == 0)
+            #expect(registry.lookup("org.code")?.defaultSettings["dfoo"]?.stringValue == "DefaultValue")
+            #expect(registry.lookup("org.code")?.overrideSettings["ofoo"]?.stringValue == "OverrideValue")
+
+            // Validate the settings are correct for rdar://46784630.
+            #expect(registry.lookup("org.code")?.overrideSettings["SWIFT_DEVELOPMENT_TOOLCHAIN"]?.looselyTypedBoolValue == true)
+            #expect(registry.lookup("org.code")?.overrideSettings["SWIFT_USE_DEVELOPMENT_TOOLCHAIN_RUNTIME"]?.looselyTypedBoolValue == true)
+        }
+    }
+}

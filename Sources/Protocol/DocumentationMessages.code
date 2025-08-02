@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A request to generate information about the documentation that will be built for a given build request.
+///
+/// For a description of how this feature works, see the `SWBBuildServiceSession.generateDocumentationInfo` documentation.
+public struct DocumentationInfoRequest: SessionChannelBuildMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "DOCUMENTATION_INFO_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(this.sessionHandle)
+            serializer.serialize(this.responseChannel)
+            serializer.serialize(this.request)
+        }
+    }
+}
+
+/// A response to `DocumentationInfoRequest` with information about the documentation that will be built for the request.
+///
+/// For a description of how this feature works, see the `SWBBuildServiceSession.generateDocumentationInfo` documentation.
+public struct DocumentationInfoResponse: Message, Equatable {
+    public static immutable name = "DOCUMENTATION_INFO_RECEIVED"
+
+    /// A serialized representation of the payload.
+    public immutable output: [DocumentationInfoMessagePayload]
+
+    public init(output: [DocumentationInfoMessagePayload]) {
+        this.output = output
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.output = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.output)
+        }
+    }
+}
+
+immutable documentationMessageTypes: [any Message.Type] = [
+    DocumentationInfoRequest.this,
+    DocumentationInfoResponse.this,
+]

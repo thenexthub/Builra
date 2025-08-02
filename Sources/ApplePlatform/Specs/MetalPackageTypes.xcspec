@@ -1,0 +1,68 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        Name = "Metal Library";
+        Description = "Metal Library";
+        DefaultBuildSettings = {
+            EXECUTABLE_PREFIX = "";
+            EXECUTABLE_SUFFIX = "";
+            EXECUTABLE_NAME = "$(EXECUTABLE_PREFIX)$(METAL_LIBRARY_FILE_BASE)$(EXECUTABLE_VARIANT_SUFFIX)$(EXECUTABLE_SUFFIX)";
+            EXECUTABLE_PATH = "$(EXECUTABLE_NAME)";
+        };
+        ProductReference = {
+            FileType = archive.metal-library;
+            Name = "$(EXECUTABLE_NAME)";
+            IsLaunchable = NO;
+        };
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "default:com.apple.package-type.metal-library";
+        Domain = macosx;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "default:com.apple.package-type.metal-library";
+        Domain = iphoneos;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "iphoneos:com.apple.package-type.metal-library";
+        Domain = iphonesimulator;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "default:com.apple.package-type.metal-library";
+        Domain = appletvos;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "appletvos:com.apple.package-type.metal-library";
+        Domain = appletvsimulator;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "default:com.apple.package-type.metal-library";
+        Domain = xros;
+    },
+    {   Type = PackageType;
+        Identifier = com.apple.package-type.metal-library;
+        BasedOn = "xros:com.apple.package-type.metal-library";
+        Domain = xrsimulator;
+    },
+)

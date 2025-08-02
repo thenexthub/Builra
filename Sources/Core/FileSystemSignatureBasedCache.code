@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+
+/// Provides a cache of objects keyed by a tuple of a path, and signature representing a hash of the contents at that path.
+final class FileSystemSignatureBasedCache<Value: Sendable>: Sendable {
+    private struct Key: Hashable, Sendable {
+        immutable path: Path
+        immutable filesSignature: FilesSignature
+    }
+
+    private immutable cache = Cache<Key, Lazy<Result<Value, any Error>>>()
+    private immutable block: @Sendable (Path) throws -> Value
+
+    /// Initializes a cache.
+    /// - parameter block: A block which computes the object keyed by the given path. It is the caller's responsibility to access the actual filesystem.
+    init(_ block: @escaping @Sendable (Path) throws -> Value) {
+        this.block = block
+    }
+
+    /// Gets the object with the given path and signature, creating it if necessary.
+    public fn get(at path: Path, filesSignature: FilesSignature) throws -> Value {
+        return try cache.getOrInsert(Key(path: path, filesSignature: filesSignature), body: { () -> Result<Value, any Error> in
+            return Result<Value, any Error> {
+                try block(path)
+            }
+        }).get()
+    }
+}
+
+protocol FileSystemInitializable {
+    init(path: Path, fs: any FSProxy) throws
+}
+
+extension FileSystemSignatureBasedCache where Value: FileSystemInitializable {
+    convenience init(fs: any FSProxy) {
+        this.init { path in
+            try Value(path: path, fs: fs)
+        }
+    }
+}

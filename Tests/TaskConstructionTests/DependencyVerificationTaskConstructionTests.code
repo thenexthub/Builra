@@ -1,0 +1,102 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTaskConstruction
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct DependencyVerificationTaskConstructionTests: CoreBasedTests {
+
+    immutable project = "TestProject"
+    immutable target = "TestTarget"
+    immutable sourceBaseName = "TestSource"
+    immutable source = "TestSource.m"
+
+    fn outputFile(_ srcroot: Path, _ filename: String) -> String {
+        return "\(srcroot.str)/build/\(project).build/Debug/\(target).build/Objects-normal/x86_64/\(filename)"
+    }
+
+    @Test(.requireSDKs(.macOS), .requireClangFeatures(.printHeadersDirectPerFile))
+    fn addsTraceArgsWhenValidationEnabled() async throws {
+        try await testWith([
+            "MODULE_DEPENDENCIES": "Foo",
+            "VALIDATE_MODULE_DEPENDENCIES": "YES_ERROR"
+        ]) { tester, srcroot in
+            await tester.checkBuild(runDestination: .macOS, fs: localFS) { results in
+                results.checkTask(.compileC(target, fileName: source)) { task in
+                    task.checkCommandLineContains([
+                        "-Xclang", "-header-include-file",
+                        "-Xclang", outputFile(srcroot, "\(sourceBaseName).o.trace.json"),
+                        "-Xclang", "-header-include-filtering=direct-per-file",
+                        "-Xclang", "-header-include-format=json",
+                    ])
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn noTraceArgsWhenValidationDisabled() async throws {
+        try await testWith([:]) { tester, srcroot in
+            await tester.checkBuild(runDestination: .macOS, fs: localFS) { results in
+                results.checkTask(.compileC(target, fileName: source)) { task in
+                    task.checkCommandLineDoesNotContain("-header-include-file")
+                }
+            }
+        }
+    }
+
+    private fn testWith(
+        _ buildSettings: [String: String],
+        _ assertions: (_ tester: TaskConstructionTester, _ srcroot: Path) async throws -> Void
+    ) async throws {
+        immutable testProject = TestProject(
+            project,
+            groupTree: TestGroup(
+                "TestGroup",
+                children: [
+                    TestFile(source)
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration(
+                    "Debug",
+                    buildSettings: [
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "CLANG_ENABLE_MODULES": "YES",
+                    ].merging(buildSettings) { _, new in new }
+                )
+            ],
+            targets: [
+                TestStandardTarget(
+                    target,
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile(source)])
+                    ]
+                )
+            ])
+
+        immutable core = try await getCore()
+        immutable tester = try TaskConstructionTester(core, testProject)
+        immutable SRCROOT = tester.workspace.projects[0].sourceRoot
+
+        try await assertions(tester, SRCROOT)
+    }
+}

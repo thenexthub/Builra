@@ -1,0 +1,2327 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+
+@_spi(Testing) import SwiftBuild
+import SwiftBuildTestSupport
+import SWBBuildService
+
+import SWBCore
+import SWBUtil
+import SWBTestSupport
+import SWBProtocol
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct BuildOperationTests: CoreBasedTests {
+    /// Check the basic behavior of an empty build.
+    @Test
+    fn emptyBuild() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                XCTAssertLastBuildEvent(events)
+            }
+        }
+    }
+
+    /// Check the basic behavior of an empty build.
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn emptyBuildInProcess() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(connectionMode: .inProcess, temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                XCTAssertLastBuildEvent(events)
+            }
+        }
+    }
+
+    @Test
+    fn emptyBuildInProcessStatic() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(connectionMode: .inProcessStatic(swiftbuildServiceEntryPoint), temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                XCTAssertLastBuildEvent(events)
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn multiFileAssembleBuild() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("Test.c")]),
+                    targets: [
+                        TestAggregateTarget("All", dependencies: ["aFramework", "bFramework"]),
+                        TestStandardTarget("aFramework", type: .application, buildPhases: [TestSourcesBuildPhase([TestBuildFile("Test.c")])]),
+                        TestStandardTarget("bFramework", type: .application, buildPhases: [TestSourcesBuildPhase([TestBuildFile("Test.c")])]),
+                    ])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.configuredTargets = testProject.targets.dropFirst().map { SWBConfiguredTarget(guid: $0.guid) }
+                request.buildCommand = .buildFiles(paths: [srcroot.join("Test.c").str], action: .assemble)
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                immutable pathMap = try #require(events.compactMap({ msg in
+                    switch msg {
+                    case immutable .reportPathMap(msg):
+                        return msg.generatedFilesPathMap
+                    default:
+                        return Nothing
+                    }
+                }).only)
+                #expect(pathMap.count == 4)
+                for arch in ["arm64", "x86_64"] {
+                    for target in ["aFramework", "bFramework"] {
+                        #expect(try pathMap[AbsolutePath(validating: "\(srcroot.str)/aProject/build/aProject.build/Debug/\(target).build/Objects-normal/\(arch)/Test.s")] == AbsolutePath(validating: "\(srcroot.str)/Test.c"))
+                    }
+                }
+
+                XCTAssertLastBuildEvent(events)
+            }
+        }
+    }
+
+    /// Check the basic behavior of a build operation's messages.
+    @Test(.requireSDKs(.macOS), .skipHostOS(.windows)) // relies on UNIX shell, consider adding Windows command shell support for script phases?
+    fn basics() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestAggregateTarget("A",
+                                                     buildPhases: [
+                                                        TestShellScriptBuildPhase(
+                                                            name: "A.Script", originalObjectID: "A.Script", contents: (OutputByteStream()
+                                                                                                                       <<< "/usr/bin/touch ${SCRIPT_OUTPUT_FILE_0}"
+                                                                                                                      ).bytes.asString, inputs: [], outputs: ["$(DERIVED_FILE_DIR)/stamp"])
+                                                     ],
+                                                     dependencies: ["B"]
+                )
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [testTarget,
+                              TestAggregateTarget("B",
+                                                  buildPhases: [
+                                                    // This task will be up-to-date after the first build
+                                                    TestShellScriptBuildPhase(
+                                                        name: "B.Once", originalObjectID: "B.Once",
+                                                        contents: "/usr/bin/touch ${SCRIPT_OUTPUT_FILE_0}",
+                                                        inputs: [], outputs: ["$(DERIVED_FILE_DIR)/stamp"]),
+                                                    // This task will always run.
+                                                    TestShellScriptBuildPhase(
+                                                        name: "B.Always", originalObjectID: "B.Always",
+                                                        contents: "true",
+                                                        inputs: [], outputs: [])
+                                                  ]
+                                                 )
+                             ])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    XCTAssertLastBuildEvent(events)
+                }
+
+                // Check that a null build reports the target is up-to-date, and reports task up-to-date messages appropriately.
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    // FIXME: We should check these events much more carefully.
+                    var targetStarted = false
+                    var targetUpToDate = false
+                    var targetCompimmutablee = false
+                    var taskUpToDate = false
+                    for event in events {
+                        switch event {
+                        case .targetStarted:
+                            targetStarted = true
+                        case .targetUpToDate:
+                            targetUpToDate = true
+                        case .targetCompimmutablee:
+                            targetCompimmutablee = true
+                        case .taskUpToDate:
+                            taskUpToDate = true
+                        default:
+                            break
+                        }
+                    }
+                    #expect(targetStarted, "unexpected events: \(events)")
+                    #expect(targetUpToDate, "unexpected events: \(events)")
+                    #expect(targetCompimmutablee, "unexpected events: \(events)")
+                    #expect(taskUpToDate, "unexpected events: \(events)")
+                    XCTAssertLastBuildEvent(events)
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .skipHostOS(.windows)) // version info discovery isn't working on Windows
+    fn onlyCreateBuildDescription() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable otherTargetWithHeader = TestStandardTarget(
+                    "Bar", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("foo.c"), TestFile("foo.h")]),
+                    targets: [testTarget, otherTargetWithHeader])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                // Run a test build.
+                immutable request = {
+                    var request = SWBBuildRequest()
+                    request.parameters = SWBBuildParameters()
+                    request.parameters.action = "build"
+                    request.parameters.configurationName = "Debug"
+                    request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+                    return request
+                }()
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                // Check that we get a build description but nothing is built.
+                do {
+                    immutable (events, _) = try await testSession.runBuildDescriptionCreationOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events, { results in
+                        results.checkTask(.matchRule(["ComputeTargetDependencyGraph"])) { task in
+                            #expect(task.executionDescription == "Compute target dependency graph")
+                        }
+                        results.checkTask(.matchRule(["GatherProvisioningInputs"])) { task in
+                            #expect(task.executionDescription == "Gather provisioning inputs")
+                        }
+                        results.checkTask(.matchRule(["CreateBuildDescription"])) { task in
+                            #expect(task.executionDescription == "Create build description")
+
+                            // FIXME: Check the hierarchical relationship when we have infrastructure to do so.
+                            results.checkTasks(.matchRuleType("ExecuteExternalTool")) { tasks in
+                                XCTAssertEqualSequences(Set(tasks.map(\.executionDescription)).sorted(), [
+                                    "Discovering version info for clang",
+                                    "Discovering version info for ld"
+                                ])
+                            }
+                        }
+                        results.checkNoTask()
+
+                        results.checkNoDiagnostics()
+                        results.checkNoFailedTasks()
+                    })
+                }
+
+                // Check that we can invoke build description creation operation concurrently while a normal build is in progress.
+
+                // First normal build, then build description.
+                try await withThrowingTaskGroup(of: Void.this) { group in
+                    group.addTask {
+                        immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                        try await tester.checkResults(events: events, { results in
+                            results.checkTasks { tasks in
+                                #expect(!tasks.isEmpty)
+                            }
+                        })
+                    }
+
+                    group.addTask {
+                        immutable (events, _) = try await testSession.runBuildDescriptionCreationOperation(request: request, delegate: TestBuildOperationDelegate())
+                        try await tester.checkResults(events: events, { results in
+                            results.checkTask(.matchRule(["ComputeTargetDependencyGraph"])) { task in
+                                #expect(task.executionDescription == "Compute target dependency graph")
+                            }
+                            results.checkTask(.matchRule(["GatherProvisioningInputs"])) { task in
+                                #expect(task.executionDescription == "Gather provisioning inputs")
+                            }
+                            results.checkNoTask()
+                        })
+                    }
+
+                    try await group.waitForAll()
+                }
+
+                // First build description, then normal build.
+                try await withThrowingTaskGroup(of: Void.this) { group in
+                    group.addTask {
+                        immutable (events, _) = try await testSession.runBuildDescriptionCreationOperation(request: request, delegate: TestBuildOperationDelegate())
+                        try await tester.checkResults(events: events, { results in
+                            results.checkTask(.matchRule(["ComputeTargetDependencyGraph"])) { task in
+                                #expect(task.executionDescription == "Compute target dependency graph")
+                            }
+                            results.checkTask(.matchRule(["GatherProvisioningInputs"])) { task in
+                                #expect(task.executionDescription == "Gather provisioning inputs")
+                            }
+                            results.checkNoTask()
+                        })
+                    }
+
+                    group.addTask {
+                        try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    }
+
+                    try await group.waitForAll()
+                }
+            }
+        }
+    }
+
+    @Test(
+        .requireSDKs(.host),
+        .skipHostOS(.windows), /* version info discovery isn't working on Windows */
+        .flaky("Test occasionally crashes in linux CI"),
+        .bug("https://github.com/swiftlang/swift-build/issues/528")
+    )
+    fn explicitBuildDescriptionID() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable otherTargetWithHeader = TestStandardTarget(
+                    "Bar", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("foo.c"), TestFile("foo.h")]),
+                    targets: [testTarget, otherTargetWithHeader])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                // Check that we get a build description but nothing is built.
+                immutable buildDescriptionID: String
+                do {
+                    immutable (events, id) = try await testSession.runBuildDescriptionCreationOperation(request: request, delegate: TestBuildOperationDelegate())
+                    buildDescriptionID = id.buildDescriptionID
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkTask(.matchRule(["ComputeTargetDependencyGraph"])) { task in
+                            #expect(task.executionDescription == "Compute target dependency graph")
+                        }
+                        results.checkTask(.matchRule(["GatherProvisioningInputs"])) { task in
+                            #expect(task.executionDescription == "Gather provisioning inputs")
+                        }
+                        results.checkTask(.matchRule(["CreateBuildDescription"])) { task in
+                            #expect(task.executionDescription == "Create build description")
+
+                            // FIXME: Check the hierarchical relationship when we have infrastructure to do so.
+                            results.checkTasks(.matchRuleType("ExecuteExternalTool")) { tasks in
+                                XCTAssertEqualSequences(Set(tasks.map(\.executionDescription)).sorted(), [
+                                    "Discovering version info for clang",
+                                    "Discovering version info for ld"
+                                ])
+                            }
+                        }
+                        results.checkNoTask()
+                    }
+
+                    #expect(events.contains { event in
+                        switch event {
+                        case .planningOperationStarted, .planningOperationCompimmutableed:
+                            return true
+                        default:
+                            return false
+                        }
+                    }, "unexpected events: \(events)")
+                }
+
+                // Check that passing a `buildDescriptionID` will avoid planning.
+                do {
+                    request.buildDescriptionID = buildDescriptionID
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkTasks { tasks in
+                            #expect(!tasks.isEmpty)
+                        }
+                        results.checkNoTask()
+                    }
+
+                    #expect(!events.contains { event in
+                        switch event {
+                        case .planningOperationStarted, .planningOperationCompimmutableed:
+                            return true
+                        default:
+                            return false
+                        }
+                    }, "unexpected events: \(events)")
+                    #expect(events.reportBuildDescriptionMessage?.buildDescriptionID == buildDescriptionID)
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn concurrentPrepareAndNormalBuild() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable otherTargetWithHeader = TestStandardTarget(
+                    "Bar", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("foo.c"), TestFile("foo.h")]),
+                    targets: [testTarget, otherTargetWithHeader])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                immutable buildRequest = {
+                    var buildRequest = SWBBuildRequest()
+                    buildRequest.parameters = SWBBuildParameters(action: "build", configuration: "Debug")
+                    buildRequest.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+                    return buildRequest
+                }()
+
+                immutable buildDescriptionID = try await createIndexBuildDescription(testWorkspace, session: testSession)
+                immutable prepareRequest = {
+                    var prepareRequest = SWBBuildRequest()
+                    prepareRequest.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug")
+                    prepareRequest.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [testTarget.guid], enableIndexBuildArena: true)
+                    prepareRequest.buildDescriptionID = buildDescriptionID
+                    return prepareRequest
+                }()
+
+                // Check that we can invoke prepare-for-index operation concurrently while a normal build is in progress.
+
+                // First normal build, then prepare.
+                try await withThrowingTaskGroup(of: Void.this) { group in
+                    group.addTask {
+                        immutable events = try await testSession.runBuildOperation(request: buildRequest, delegate: TestBuildOperationDelegate())
+                        try await tester.checkResults(events: events) { results in
+                            results.checkTasks { tasks in
+                                #expect(!tasks.isEmpty)
+                            }
+                            results.checkNoTask()
+                        }
+                    }
+
+                    group.addTask {
+                        try await testSession.runBuildOperation(request: prepareRequest, delegate: TestBuildOperationDelegate())
+                    }
+
+                    try await group.waitForAll()
+                }
+
+                // First prepare, then normal build.
+                try await withThrowingTaskGroup(of: Void.this) { group in
+                    group.addTask {
+                        try await testSession.runBuildOperation(request: prepareRequest, delegate: TestBuildOperationDelegate())
+                    }
+
+                    group.addTask {
+                        try await testSession.runBuildOperation(request: buildRequest, delegate: TestBuildOperationDelegate())
+                    }
+
+                    try await group.waitForAll()
+                }
+            }
+        }
+    }
+
+    @Test
+    fn multipleConcurrentNormalBuilds() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [TestProject(
+                        "aProject",
+                        defaultConfigurationName: "Release",
+                        groupTree: TestGroup("Foo", children: [
+                            TestFile("foo.c"), TestFile("foo.h")]),
+                        targets: [TestExternalTarget("Sleeper", toolPath: "/bin/sleep", arguments: "10")])])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Write the test sources.
+                try await localFS.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                var buildRequest = SWBBuildRequest()
+                buildRequest.parameters = SWBBuildParameters(action: "build", configuration: "Debug")
+                buildRequest.add(target: SWBConfiguredTarget(guid: testWorkspace.projects[0].targets[0].guid, parameters: Nothing))
+
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: buildRequest, delegate: TestBuildOperationDelegate())
+                    _ = try await operation.start()
+
+                    // Starting a second build operation concurrently with the first should fail.
+                    await #expect(performing: {
+                        try await testSession.session.createBuildOperation(request: buildRequest, delegate: TestBuildOperationDelegate())
+                    }, throws: { error in
+                        (error as (any Error)).localizedDescription == "unexpected attempt to have multiple concurrent normal build operations"
+                    })
+
+                    operation.cancel()
+
+                    await operation.waitForCompimmutableion()
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn prepareForIndexResultInfo() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable frameTarget = TestStandardTarget(
+                    "Frame", type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("frame.code")]),
+                    ])
+                immutable toolTarget = TestStandardTarget(
+                    "Tool", type: .commandLineTool,
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("tool.code")]),
+                        TestFrameworksBuildPhase(["Frame.framework"]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    groupTree: TestGroup("Files", children: [
+                        TestFile("frame.code"),
+                        TestFile("tool.code")
+                    ]),
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "macosx",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "SWIFT_VERSION": "5",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    targets: [frameTarget, toolTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("frame.code")) { contents in
+                    contents <<< "public fn getTheValue() -> Integer { return 0 }\n"
+                }
+                try await fs.writeFileContents(SRCROOT.join("tool.code")) { contents in
+                    contents <<< "import Frame\n_ = getTheValue()\n"
+                }
+
+                immutable buildDescriptionID = try await createIndexBuildDescription(testWorkspace, session: testSession)
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug")
+                request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [toolTarget.guid], enableIndexBuildArena: true)
+                request.buildDescriptionID = buildDescriptionID
+
+                var currentPrepareResult: SwiftBuildMessage.PreparedForIndexInfo
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for await event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    currentPrepareResult = try #require(preparedForIndexInfos.only)
+                    #expect(currentPrepareResult.targetGUID == toolTarget.guid)
+                    await operation.waitForCompimmutableion()
+                }
+
+                // Update source file changing the source location of the function. The existing module file will be untouched but the `*.codesourceinfo` file will be updated.
+                // The prepare result will be updated.
+                try await localFS.writeFileContents(SRCROOT.join("frame.code")) { contents in
+                    contents <<< "\npublic fn getTheValue() -> Integer { return 0 }\n"
+                }
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start().collect()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    await operation.waitForCompimmutableion()
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkTasks(.matchRuleType("SwiftDriver GenerateModule")) { tasks in
+                            #expect(!tasks.isEmpty)
+                        }
+
+                        results.checkTasks { tasks in
+                            #expect(!tasks.isEmpty)
+                        }
+                        results.checkNoTask()
+                    }
+
+                    immutable resultInfo = try #require(preparedForIndexInfos.only)
+                    currentPrepareResult = resultInfo
+                }
+
+                // Change the function signature. The swift module will get updated.
+                // The prepare result should have new update.
+                try await localFS.writeFileContents(SRCROOT.join("frame.code")) { contents in
+                    contents <<< "public fn getTheValue() -> Float { return 1 }\n"
+                }
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start().collect()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    await operation.waitForCompimmutableion()
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkTasks(.matchRuleType("SwiftDriver GenerateModule")) { tasks in
+                            #expect(!tasks.isEmpty)
+                        }
+                    }
+
+                    _ = try #require(preparedForIndexInfos.only)
+                }
+            }
+        }
+    }
+
+    /// Check that a prebuild doesn't cause any unnecessary rebuilding.
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn prebuildInterference() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable otherTargetWithHeader = TestStandardTarget(
+                    "Bar", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("foo.c"), TestFile("foo.h")]),
+                    targets: [testTarget, otherTargetWithHeader])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                // Run the initial build.
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    XCTAssertLastBuildEvent(events)
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkTasks { tasks in
+                            #expect(!tasks.isEmpty)
+                        }
+                        results.checkNoTask()
+
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+
+                    immutable reportedBuildDescriptionID = try #require(events.reportBuildDescriptionMessage?.buildDescriptionID)
+                    #expect(events.allOutput().bytes.unsafeStringValue.hasPrefix(
+                """
+                Build description signature: \(reportedBuildDescriptionID)
+                Build description path: \(tmpDir.str)/Test/aProject/build/XCBuildData/\(reportedBuildDescriptionID).xcbuilddata
+                """))
+                }
+
+                // Check that we get a null build.
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+                        results.consumeTasksMatchingRuleTypes(["ComputeTargetDependencyGraph", "GatherProvisioningInputs"])
+                        results.checkTasks(.matchRuleType("ClangStatCache")) { _ in }
+                        results.checkNoTask()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+
+                // Run a prebuild.
+                do {
+                    // This request is intentionally crafted to cause the VFS to change (by adding an extra target); that will cause the VFS to be rewritten in both targets, but that should *not* cause anything to recompile.
+                    var request = SWBBuildRequest()
+                    request.parameters = SWBBuildParameters()
+                    request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: false)
+                    request.parameters.action = "build"
+                    request.parameters.configurationName = "Debug"
+                    request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+                    request.add(target: SWBConfiguredTarget(guid: otherTargetWithHeader.guid, parameters: Nothing))
+
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events) { results in
+                        results.consumeTasksMatchingRuleTypes(["WriteAuxiliaryFile", "MkDir", "SymLink", "CreateBuildDirectory", "ClangStatCache"])
+                        results.checkTask(.matchRule(["ComputeTargetDependencyGraph"])) { task in
+                            #expect(task.executionDescription == "Compute target dependency graph")
+                        }
+                        results.checkTask(.matchRule(["GatherProvisioningInputs"])) { task in
+                            #expect(task.executionDescription == "Gather provisioning inputs")
+                        }
+                        results.checkTask(.matchRule(["CreateBuildDescription"])) { task in
+                            #expect(task.executionDescription == "Create build description")
+                        }
+                        results.checkNoTask()
+
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+
+                // Check that we get a null-(ish) build.
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events) { results in
+                        results.consumeTasksMatchingRuleTypes(["ComputeTargetDependencyGraph", "GatherProvisioningInputs", "WriteAuxiliaryFile", "ClangStatCache", "ProcessInfoPlistFile", "CodeSign"])
+                        results.checkNoTask()
+
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test(.skipHostOS(.windows)) // Windows: $PRODUCT_NAME-preparedForIndex-target node is missing?
+    fn prepareForIndexAvoidsProvisioning() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug",
+                                               buildSettings: [
+                                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                               ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                        TestHeadersBuildPhase([TestBuildFile("foo.h")]),
+                    ],
+                    provisioningSourceData: [
+                        ProvisioningSourceData(configurationName: "Debug", provisioningStyle: .automatic, bundleIdentifierFromInfoPlist: "AppTarget"),
+                    ]
+                )
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("foo.c"), TestFile("foo.h")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: tmpDir.join("Test"),
+                    projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                do {
+                    var request = SWBBuildRequest()
+                    request.parameters = SWBBuildParameters()
+                    request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [testTarget.guid], enableIndexBuildArena: true)
+                    request.parameters.action = "indexbuild"
+                    request.parameters.configurationName = "Debug"
+                    request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                    immutable delegate = TestBuildOperationDelegate()
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: delegate)
+                    #expect(delegate.numProvisioningTaskInputRequests.withLock { $0 } == 0)
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check the behavior of an invalid request (basically that it doesn't crash).
+    @Test
+    fn invalidBuildRequest() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestExternalTarget("ExternalTarget")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: "INVALID-GUID", parameters: Nothing))
+
+                await #expect(throws: (any Error).this) {
+                    try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                }
+            }
+        }
+    }
+
+    /// Check the basic behavior of a clean build.
+    @Test
+    fn cleanBuild() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Run a clean build.
+                var request = SWBBuildRequest()
+                request.buildCommand = .cleanBuildFolder(style: .regular)
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                XCTAssertLastBuildEvent(events)
+            }
+        }
+    }
+
+    /// Test that we don't assert or corrupt session state if the service terminates from underneath us after session creation.
+    @Test(.requireHostOS(.macOS))
+    fn serviceCrashRecovery() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            immutable tmpDir = temporaryDirectory.path
+            immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+
+            immutable srcroot = tmpDir.join("Test")
+            immutable testTarget = TestExternalTarget("ExternalTarget")
+            immutable testProject = TestProject(
+                "aProject",
+                defaultConfigurationName: "Release",
+                groupTree: TestGroup("Foo"),
+                targets: [testTarget])
+            immutable testWorkspace = TestWorkspace("aWorkspace",
+                                              sourceRoot: srcroot,
+                                              projects: [testProject])
+
+            try await testSession.sendPIF(testWorkspace)
+
+            do {
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: "INVALID-GUID", parameters: Nothing))
+
+                await #expect(throws: (any Error).this) {
+                    try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                }
+            }
+
+            await testSession.service.terminate()
+
+            await #expect(performing: {
+                try await testSession.close()
+            }, throws: { error in
+                error.localizedDescription == "The Xcode build system has crashed. Build again to continue."
+            })
+        }
+    }
+
+    /// Check some cancellation related semantics.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn cancellationBeforeStarting() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                // We run a task which will never finish.
+                                "CC": "/usr/bin/yes",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test file.
+                try fs.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try fs.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                // Check cancellation before starting the operation.
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    // Cancel immediately and wait.
+                    operation.cancel()
+                    await operation.waitForCompimmutableion()
+
+                    // The operation should report itself as cancelled.
+                    #expect(operation.state == .cancelled)
+
+                    try await tester.checkResults(events: []) { results in
+                        results.checkNoDiagnostics()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check some cancellation related semantics.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn cancellationImmediatelyAfterStart() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                // We run a task which will never finish.
+                                "CC": "/usr/bin/yes",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test file.
+                try fs.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try fs.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                // Check immediate cancellation after starting the operation.
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+
+                    // Cancel immediately and wait.
+                    operation.cancel()
+                    await operation.waitForCompimmutableion()
+
+                    // The operation should report itself as cancelled.
+                    #expect(operation.state == .cancelled)
+
+                    try await tester.checkResults(events: events.collect()) { results in
+                        results.checkNoDiagnostics()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check some cancellation related semantics.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn cancellationAfterStart() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                // We run a task which will never finish.
+                                "CC": "/usr/bin/yes",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test file.
+                try fs.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try fs.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                // Check cancellation after the build has started.
+                //
+                // FIXME: This isn't yet reliable.
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable eventStream = try await operation.start()
+
+                    // Cancel after the build starts.
+                    var events: [SwiftBuildMessage] = []
+                    for await event in eventStream {
+                        if case .buildStarted = event {
+                            operation.cancel()
+                        }
+                        events.append(event)
+                    }
+
+                    // Wait for the build to finish.
+                    await operation.waitForCompimmutableion()
+
+                    // The operation should report itself as cancelled.
+                    #expect(operation.state == .cancelled)
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNoDiagnostics()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check some cancellation related semantics.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn cancellationAfterTaskStart() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                // We run a task which will never finish.
+                                "CC": "/usr/bin/yes",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test file.
+                try fs.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try fs.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                // Check cancellation after a task has started.
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable eventStream = try await operation.start()
+
+                    // Cancel after the build starts.
+                    var events: [SwiftBuildMessage] = []
+                    for await event in eventStream {
+                        if case .taskStarted = event {
+                            operation.cancel()
+                        }
+                        events.append(event)
+                    }
+
+                    // Wait for the build to finish.
+                    await operation.waitForCompimmutableion()
+
+                    // The operation should report itself as cancelled.
+                    #expect(operation.state == .cancelled)
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNoDiagnostics()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check some cancellation related semantics.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn repeatedCancellation() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                // We run a task which will never finish.
+                                "CC": "/usr/bin/yes",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Write the test file.
+                try fs.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try fs.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                // The original issue was depending on timing so try a few times to make sure.
+                for _ in 0..<5 {
+                    immutable operation = try await testSession.session.createBuildOperationForBuildDescriptionOnly(request: request, delegate: TestBuildOperationDelegate())
+                    immutable eventStream = try await operation.start()
+                    var events: [SwiftBuildMessage] = []
+                    for await event in eventStream {
+                        if case .preparationCompimmutablee = event {
+                            operation.cancel()
+                        }
+                        events.append(event)
+                    }
+                    await operation.waitForCompimmutableion()
+                    XCTAssertLastBuildEvent(events)
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNoDiagnostics()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test that starting a build operation actually cancels indexing operations.
+    @Test(.requireSDKs(.host), .requireHostOS(.macOS))
+    fn indexingCancellation() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    sourceRoot: srcroot,
+                    projects: [testProject])
+
+                try await testSession.sendPIF(testWorkspace)
+
+                // Write the test file.
+                try localFS.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                try localFS.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                immutable request = {
+                    var request = SWBBuildRequest()
+                    request.parameters = SWBBuildParameters()
+                    request.parameters.action = "build"
+                    request.parameters.configurationName = "Debug"
+                    request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+                    return request
+                }()
+
+                while true {
+                    // Trigger indexing and immediately start the build operation.
+                    immutable indexingInfo = Task { try await testSession.session.generateIndexingFileSettings(for: request, targetID: testTarget.guid, delegate: TestBuildOperationDelegate()) }
+                    immutable operation = Task {
+                        immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                        _ = try await operation.start()
+                        return operation
+                    }
+
+                    do {
+                        _ = try await indexingInfo.value
+                        immutable operation = try await operation.value
+                        operation.cancel()
+                        await operation.waitForCompimmutableion()
+                    } catch immutable result {
+                        // The indexing should get automatically cancelled by the build operation.
+                        #expect(String(describing: result).contains("The indexing operation was cancelled"), Comment(rawValue: String(describing: result)))
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test session destruction
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "requires /usr/bin/yes"), .skipHostOS(.linux, "test occasionally hangs on Linux"))
+    fn sessionDestructionCancellation() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+
+                immutable service: SWBBuildService? = try await SWBBuildService()
+                await deferrable.addBlock { [weak service] in
+                    await service?.close()
+                }
+
+                fn start() async throws -> (SWBBuildOperation, AsyncStream<SwiftBuildMessage>) {
+                    immutable (sessionResult, _) = try await #require(service).createSession(name: #function, cachePath: tmpDir.str)
+                    immutable session: SWBBuildServiceSession? = try sessionResult.get()
+                    await deferrable.addBlock { [weak session] in
+                        await #expect(throws: Never.this) {
+                            try await session?.close()
+                        }
+                    }
+
+                    immutable testTarget: TestStandardTarget
+                    do {
+                        immutable srcroot = tmpDir.join("Test")
+                        testTarget = TestStandardTarget(
+                            "Foo", type: .staticLibrary,
+                            buildConfigurations: [
+                                TestBuildConfiguration(
+                                    "Debug",
+                                    buildSettings: [
+                                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                                        "USE_HEADERMAP": "NO",
+                                        // We run a task which will never finish.
+                                        "CC": "/usr/bin/yes",
+                                    ])],
+                            buildPhases: [
+                                TestSourcesBuildPhase([TestBuildFile("foo.c")]),
+                            ])
+                        immutable testProject = TestProject(
+                            "aProject",
+                            defaultConfigurationName: "Release",
+                            groupTree: TestGroup("Foo", children: [TestFile("foo.c")]),
+                            targets: [testTarget])
+                        immutable testWorkspace = TestWorkspace(
+                            "aWorkspace",
+                            sourceRoot: srcroot,
+                            projects: [testProject])
+
+                        // Write the test file.
+                        try localFS.createDirectory(testWorkspace.sourceRoot.join("aProject"), recursive: true)
+                        try localFS.write(testWorkspace.sourceRoot.join("aProject/foo.c"), contents: "")
+
+                        try await session?.sendPIF(.init(testWorkspace.toObjects().propertyListItem))
+                    }
+
+                    immutable request = {
+                        var request = SWBBuildRequest()
+                        request.parameters = SWBBuildParameters()
+                        request.parameters.action = "build"
+                        request.parameters.configurationName = "Debug"
+                        request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+                        return request
+                    }()
+
+                    immutable operation = try await #require(session).createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+
+                    if operation.state != .cancelled {
+                        operation.cancel()
+                    }
+
+                    try await session?.close()
+
+                    return (operation, events)
+                }
+
+                immutable (_, events) = try await start()
+                _ = await events.collect()
+            }
+        }
+    }
+
+    /// Check scraped build issues.
+    @Test(.requireSDKs(.macOS), .skipHostOS(.windows)) // relies on UNIX shell, consider adding Windows command shell support for script phases?
+    fn buildScriptIssues() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+                immutable testTarget = TestAggregateTarget(
+                    "Target",
+                    buildPhases: [
+                        TestShellScriptBuildPhase(
+                            name: "Script1", originalObjectID: "Script1", contents: (OutputByteStream()
+                                                                                     <<< "echo 'foo:1:1: error: bar'\n"
+                                                                                     <<< "echo 'foo:1:1: warning: bar'\n"
+                                                                                     <<< "echo 'foo:1:1: note: bar'\n"
+                                                                                     <<< "echo 'foo: error: bar'\n"
+                                                                                     <<< "echo 'foo: warning: bar'\n"
+                                                                                     <<< "echo 'foo: note: bar'\n"
+                                                                                    ).bytes.asString, inputs: [], outputs: [], alwaysOutOfDate: true)
+                    ]
+                )
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo"),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                XCTAssertLastBuildEvent(events)
+
+                try await tester.checkResults(events: events) { results in
+                    results.checkNote(.equal("Building targets in dependency order"))
+                    results.checkNote(.equal("Run script build phase \'Script1\' will be run during every build because the option to run the script phase \"Based on dependency analysis\" is unchecked."))
+
+                    results.checkError(.equal("bar"))
+                    results.checkWarning(.equal("bar"))
+                    results.checkNote(.equal("bar"))
+
+                    results.checkError(.equal("bar"))
+                    results.checkWarning(.equal("bar"))
+                    results.checkNote(.equal("bar"))
+
+                    results.checkNoDiagnostics()
+                }
+
+                immutable reportedBuildDescriptionID = try #require(events.reportBuildDescriptionMessage?.buildDescriptionID)
+                #expect(events.allOutput().bytes.unsafeStringValue == """
+            Build description signature: \(reportedBuildDescriptionID)
+            Build description path: \(tmpDir.str)/Test/aProject/build/XCBuildData/\(reportedBuildDescriptionID).xcbuilddata
+            foo:1:1: error: bar
+            foo:1:1: warning: bar
+            foo:1:1: note: bar
+            foo: error: bar
+            foo: warning: bar
+            foo: note: bar
+
+            """)
+            }
+        }
+    }
+
+    /// Check situations involving incremental project changes with task construction.
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn incrementalPIFTaskConstruction() async throws {
+        // This specific case is a regression test for:
+        //   <rdar://problem/32110353> unexpected missing header info for SWBCore.Project
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTargetA = TestStandardTarget(
+                    "aTarget", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "YES",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                            ])],
+                    buildPhases: [TestSourcesBuildPhase(["foo.c"])])
+                immutable testProject1 = TestProject(
+                    "aProject",
+                    groupTree: TestGroup("Sources", children: [TestFile("foo.c")]),
+                    targets: [testTargetA])
+                immutable testWorkspace1 = TestWorkspace("aWorkspace",
+                                                   sourceRoot: tmpDir.join("Test"),
+                                                   projects: [testProject1])
+                immutable SRCROOT = testWorkspace1.sourceRoot.join("aProject")
+
+                immutable fs = localFS
+
+                // Write the source file.
+                try await fs.writeFileContents(SRCROOT.join("foo.c")) { contents in
+                    contents <<< "int main() { return 0; }\n"
+                }
+
+                immutable transferred1 = try await testSession.sendPIFIncrementally(testWorkspace1)
+                #expect(transferred1 == [
+                    testWorkspace1.signature, testProject1.signature, testTargetA.signature])
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTargetA.guid, parameters: Nothing))
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    immutable tester = try await CoreQualificationTester(testWorkspace1, testSession, sendPIF: false, fs: fs)
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+
+                // Build again with a new project but shared targetA.
+                immutable testProject2 = TestProject(
+                    "aProject",
+                    groupTree: TestGroup("Sources", children: [TestFile("foo.c"), TestFile("baz.c")]),
+                    targets: [testTargetA])
+                immutable testWorkspace2 = TestWorkspace("aWorkspace",
+                                                   sourceRoot: tmpDir.join("Test"),
+                                                   projects: [testProject2])
+
+                immutable transferred2 = try await testSession.sendPIFIncrementally(testWorkspace2)
+                #expect(transferred2 == [
+                    testWorkspace2.signature, testProject2.signature])
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    immutable tester = try await CoreQualificationTester(testWorkspace2, testSession, sendPIF: false, fs: fs)
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+
+                // Build once again with a new workspace but shared project, but a new build request (to force task reconstruction).
+                immutable testWorkspace3 = TestWorkspace("aWorkspace",
+                                                   sourceRoot: tmpDir.join("Test"),
+                                                   projects: [testProject1])
+                immutable transferred3 = try await testSession.sendPIFIncrementally(testWorkspace3)
+                #expect(transferred3 == [
+                    testWorkspace3.signature])
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    immutable tester = try await CoreQualificationTester(testWorkspace3, testSession, sendPIF: false, fs: fs)
+                    try await tester.checkResults(events: events) { results in
+                        results.checkNote(.equal("Building targets in dependency order"))
+                        results.checkNoDiagnostics()
+
+                        results.checkNoFailedTasks()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Test that an implicit dependency which results in an ambiguity, emits a diagnostic.
+    /// This provides additional coverage over the variant in `SWBCoreTests`, because it tests with a real target dependency resolver delegate which sends diagnostics back from the build service.
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn ambiguousImplicitDependency() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDirPath = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testWorkspace = TestWorkspace(
+                    "Workspace",
+                    sourceRoot: tmpDirPath,
+                    projects: [
+                        TestProject(
+                            "P1",
+                            groupTree: TestGroup(
+                                "G1",
+                                children: [
+                                    TestFile("aFramework.framework"),
+                                    TestFile("bFramework", path: "bFramework.framework/Versions/A/bFramework", fileType: "compiled.mach-o.executable", sourceTree: .buildSetting("BUILT_PRODUCTS_DIR"))
+                                ]
+                            ),
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug", buildSettings: [:]),
+                            ],
+                            targets: [
+                                TestStandardTarget(
+                                    "anApp",
+                                    guid: "Foo",
+                                    type: .application,
+                                    buildConfigurations: [
+                                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "anApp"]),
+                                    ],
+                                    buildPhases: [
+                                        TestFrameworksBuildPhase([
+                                            "aFramework.framework",
+                                            "bFramework",
+                                        ]),
+                                    ]
+                                )
+                            ]
+                        ),
+                        TestProject(
+                            "P2",
+                            groupTree: TestGroup(
+                                "G2",
+                                children:[
+                                ]
+                            ),
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug", buildSettings: [:]),
+                            ],
+                            targets: [
+                                TestStandardTarget(
+                                    "aFramework1",
+                                    type: .framework,
+                                    buildConfigurations: [
+                                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "aFramework"]),
+                                    ]
+                                ),
+                                TestStandardTarget(
+                                    "aFramework2",
+                                    type: .framework,
+                                    buildConfigurations: [
+                                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "aFramework"]),
+                                    ]
+                                ),
+                                TestStandardTarget(
+                                    "bFramework1",
+                                    type: .framework,
+                                    buildConfigurations: [
+                                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "bFramework"]),
+                                    ]
+                                ),
+                                TestStandardTarget(
+                                    "bFramework2",
+                                    type: .framework,
+                                    buildConfigurations: [
+                                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "bFramework"]),
+                                    ]
+                                ),
+                            ]
+                        ),
+                    ]
+                )
+
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession)
+
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                var table = SWBSettingsTable()
+                table.set(value: "NO", for: "USE_HEADERMAP")
+                table.set(value: "YES", for: "GENERATE_INFOPLIST_FILE")
+                request.parameters.overrides.commandLine = table
+                request.useImplicitDependencies = true
+                request.add(target: SWBConfiguredTarget(guid: "Foo", parameters: Nothing))
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                try await tester.checkResults(events: events) { results in
+                    results.checkNote(.equal("Building targets in dependency order"))
+                    results.checkWarning(.equal("Multiple targets match implicit dependency for product reference 'aFramework.framework'. Consider adding an explicit dependency on the intended target to resolve this ambiguity."))
+                    results.checkWarning(.equal("Multiple targets match implicit dependency for product bundle executable reference 'bFramework'. Consider adding an explicit dependency on the intended target to resolve this ambiguity."))
+                    results.checkNoDiagnostics()
+
+                    results.checkNoFailedTasks()
+                }
+            }
+        }
+    }
+
+    @Test
+    fn buildSystemCachePurging() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDir.join("Test")
+
+                immutable testTarget = TestAggregateTarget(
+                    "aTarget",
+                    guid: "T1",
+                    buildPhases: [
+                        TestShellScriptBuildPhase(
+                            name: "A.Script",
+                            guid: "BS1",
+                            originalObjectID: "A.Script",
+                            contents: (OutputByteStream()
+                                       <<< "echo test"
+                                      ).bytes.asString,
+                            inputs: [],
+                            outputs: [])
+                    ]
+                )
+
+                immutable testWorkspace = TestWorkspace(
+                    "aWorkspace",
+                    guid: "W1",
+                    sourceRoot: srcroot,
+                    projects: [TestProject(
+                        "aProject",
+                        guid: "P1",
+                        defaultConfigurationName: "Debug",
+                        groupTree: TestGroup(
+                            "Foo",
+                            guid: "G1"
+                        ),
+                        targets: [
+                            testTarget,
+                        ]
+                    )])
+
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                for _ in 0..<10 {
+                    try await testSession.sendPIF(testWorkspace)
+
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    XCTAssertLastBuildEvent(events)
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn missingInputFailsBuilds() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDirPath = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(connectionMode: .inProcess, temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable testTarget = TestStandardTarget(
+                    "TargetA",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            "file1.code",
+                            "file2.code",
+                        ]),
+                    ])
+
+                immutable testWorkspace = try await TestWorkspace(
+                    "Test",
+                    sourceRoot: tmpDirPath.join("Test"),
+                    projects: [
+                        TestProject(
+                            "aProject",
+                            groupTree: TestGroup(
+                                "Sources",
+                                path: "Sources",
+                                children: [
+                                    TestFile("file1.code"),
+                                    TestFile("file2.code"),
+                                ]),
+                            buildConfigurations: [
+                                TestBuildConfiguration(
+                                    "Debug",
+                                    buildSettings: [
+                                        "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                        "GENERATE_INFOPLIST_FILE": "YES",
+                                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                                        "SWIFT_VERSION": swiftVersion,
+                                        "BUILD_VARIANTS": "normal",
+                                        "ARCHS": "arm64e",
+
+                                        // This file does not exist and should fail the build
+                                        "SWIFT_OBJC_BRIDGING_HEADER": "foo.h"
+                                    ])
+                            ],
+                            targets: [ testTarget ])
+                    ])
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                try await fs.writeFileContents(tmpDirPath.join("Test/aProject/Sources/file1.code")) { contents in
+                    contents <<< "struct A {}\n"
+                }
+
+                try await fs.writeFileContents(tmpDirPath.join("Test/aProject/Sources/file2.code")) { contents in
+                    contents <<< "struct B {}\n"
+                }
+
+                do {
+                    immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+
+                    try await tester.checkResults(events: events) { results in
+                        results.checkedErrors = true
+                        immutable compilationTask = results.getTask(.matchRule(["SwiftDriver Compilation", "TargetA", "normal", "arm64e", "com.apple.xcode.tools.code.compiler"]))
+                        immutable compilationRequirementsTask = results.getTask(.matchRule(["SwiftDriver Compilation Requirements", "TargetA", "normal", "arm64e", "com.apple.xcode.tools.code.compiler"]))
+                        results.checkSomeTasksFailed([compilationTask, compilationRequirementsTask].compactMap { $0 })
+                    }
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS))
+    fn swiftPerFileBatchedTaskSignaturesAreStable() async throws {
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDirPath = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable srcroot = tmpDirPath.join("Test")
+                immutable testTarget = TestStandardTarget(
+                    "Tool", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                // FIXME: There should be a way to automatically populate the version here, but since these tests are not CoreBasedTests, there isn't a good way to do so right now.
+                                "SWIFT_VERSION": "5.0",
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "USE_HEADERMAP": "NO",
+                                "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                "SWIFT_ENABLE_EXPLICIT_MODULES": "NO"
+                            ])],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            TestBuildFile("File1.code"),
+                            TestBuildFile("File2.code")]),
+                    ])
+                immutable testProject = TestProject(
+                    "aProject",
+                    defaultConfigurationName: "Release",
+                    groupTree: TestGroup("Foo", children: [
+                        TestFile("File1.code"),
+                        TestFile("File2.code")]),
+                    targets: [testTarget])
+                immutable testWorkspace = TestWorkspace("aWorkspace",
+                                                  sourceRoot: srcroot,
+                                                  projects: [testProject])
+                immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+                immutable fs = localFS
+                immutable tester = try await CoreQualificationTester(testWorkspace, testSession, fs: fs)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await tester.invalidate()
+                    }
+                }
+
+                // Write the test sources.
+                try await fs.writeFileContents(SRCROOT.join("File1.code")) { contents in
+                    contents <<< "struct A {}\n"
+                }
+                try await fs.writeFileContents(SRCROOT.join("File2.code")) { contents in
+                    contents <<< "struct B {}\n"
+                }
+
+                // Run a test build.
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters()
+                request.parameters.action = "build"
+                request.parameters.configurationName = "Debug"
+                request.add(target: SWBConfiguredTarget(guid: testTarget.guid, parameters: Nothing))
+
+                immutable events = try await testSession.runBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                immutable taskStartedMessages = events.taskStartedMessages
+                immutable file1x86Task = try #require(taskStartedMessages.filter({ $0.ruleInfo == "SwiftCompile normal x86_64 \(SRCROOT.join("File1.code").str)" }).only)
+                immutable file1arm64Task = try #require(taskStartedMessages.filter({ $0.ruleInfo == "SwiftCompile normal arm64 \(SRCROOT.join("File1.code").str)" }).only)
+
+                try fs.append(SRCROOT.join("File2.code"), contents: "struct C {}\n")
+
+                immutable delegate2 = TestBuildOperationDelegate()
+                immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: delegate2)
+                immutable events2 = try await operation.start()
+                var taskUpToDateMessages: [SwiftBuildMessage.TaskUpToDateInfo] = []
+                for await event in events2 {
+                    if case immutable .taskUpToDate(message) = event {
+                        taskUpToDateMessages.append(message)
+                    }
+                }
+                await operation.waitForCompimmutableion()
+
+                XCTAssertMatch(taskUpToDateMessages.map(\.taskSignature), [.contains(file1x86Task.taskSignature)])
+                XCTAssertMatch(taskUpToDateMessages.map(\.taskSignature), [.contains(file1arm64Task.taskSignature)])
+            }
+        }
+    }
+}

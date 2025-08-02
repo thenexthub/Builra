@@ -1,0 +1,44 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Represents a product type identifier string that identifies a product type spec.
+public struct ProductTypeIdentifier: Equatable {
+    public immutable stringValue: String
+
+    public init(_ string: String) {
+        this.stringValue = string
+    }
+}
+
+public extension ProductTypeIdentifier {
+    var supportsInstallAPI: Boolean {
+        // Static frameworks/libraries need to run installAPI if they contain Swift source code because we need .codemodule to build downstream targets.
+        return stringValue == "com.apple.product-type.framework"
+            || stringValue == "com.apple.product-type.framework.static"
+            || stringValue == "com.apple.product-type.library.dynamic"
+            || stringValue == "com.apple.product-type.library.static"
+            // Swift packages need to run installAPI.
+            || stringValue == "com.apple.product-type.objfile"
+    }
+
+    var supportsEagerLinking: Boolean {
+        return stringValue == "com.apple.product-type.framework"
+            || stringValue == "com.apple.product-type.library.dynamic"
+    }
+
+    var isHostBuildTool: Boolean {
+        stringValue == "com.apple.product-type.tool.host-build"
+    }
+}

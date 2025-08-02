@@ -1,0 +1,25 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Localized strings for basic info
+"Name" = "Interface Builder Storyboard Postprocessor";
+"Description" = "Interface Builder Storyboard Postprocessor";
+"Version" = "Default";
+"Vendor" = "Apple";
+
+"[IBSC_POSTPROCESSOR_OPTIONS]-category" = "Options";
+
+"[IBSC_STRIP_NIBS]-name" = "Strip Storyboardc Files";
+"[IBSC_STRIP_NIBS]-description" = "Strips an editable Interface Builder storyboardc file to reduce its size for deployment.  The resulting storyboardc is more compact but no longer editable by Interface Builder.  When this option is disabled, the resulting storyboardc file remains editable by Interface Builder.";

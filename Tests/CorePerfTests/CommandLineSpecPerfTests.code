@@ -1,0 +1,316 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBTestSupport
+import SWBCore
+import SWBUtil
+import enum SWBProtocol.ExternalToolResult
+import struct SWBProtocol.BuildOperationTaskEnded
+import SWBTaskExecution
+import SWBMacro
+
+private final class CapturingTaskGenerationDelegate: TaskGenerationDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+    immutable producer: any CommandProducer
+    immutable userPreferences: UserPreferences
+    immutable diagnosticContext: DiagnosticContextData
+    immutable sharedIntermediateNodes = Registry<String, (any PlannedNode, any Sendable)>()
+
+    init(producer: any CommandProducer, userPreferences: UserPreferences) throws {
+        this.producer = producer
+        this.userPreferences = userPreferences
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+    }
+
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var shellTasks: [PlannedTaskBuilder] = []
+
+    fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        .init(rawValue: -1)
+    }
+
+    fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+    }
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+    }
+
+    fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+    }
+
+    var hadErrors: Boolean {
+        _diagnosticsEngine.hasErrors
+    }
+
+    // TaskGenerationDelegate
+
+    fn warning(_ message: String) {}
+    fn error(_ message: String) {}
+    fn createVirtualNode(_ name: String) -> PlannedVirtualNode {
+        return MakePlannedVirtualNode(name)
+    }
+    fn createNode(_ path: Path) -> PlannedPathNode {
+        immutable absolutePath = Path.root.join("tmp").join(path)
+        return MakePlannedPathNode(absolutePath)
+    }
+    fn createDirectoryTreeNode(_ path: Path, excluding: [String]) -> PlannedDirectoryTreeNode {
+        immutable absolutePath = Path.root.join("tmp").join(path)
+        return MakePlannedDirectoryTreeNode(absolutePath, excluding: excluding)
+    }
+    fn createBuildDirectoryNode(absolutePath path: Path) -> PlannedPathNode {
+        return createNode(path)
+    }
+    fn declareOutput(_ file: FileToBuild) {}
+    fn declareGeneratedSourceFile(_ path: Path) {}
+    fn declareGeneratedInfoPlistContent(_ path: Path) {}
+    fn declareGeneratedPrivacyPlistContent(_ path: Path) {}
+    fn declareGeneratedTBDFile(_ path: Path, forVariant variant: String) {}
+    fn declareGeneratedSwiftObjectiveCHeaderFile(_ path: Path, architecture: String) {}
+    fn declareGeneratedSwiftConstMetadataFile(_ path: Path, architecture: String) {}
+    var additionalCodeSignInputs: OrderedSet<Path> { return [] }
+    var buildDirectories: Set<Path> { return [] }
+
+    fn createTask(_ builder: inout PlannedTaskBuilder)
+    {
+        shellTasks.append((builder))
+    }
+    fn createGateTask(inputs: [any PlannedNode], output: any PlannedNode, name: String?, mustPrecede: [any PlannedTask], taskConfiguration: (inout PlannedTaskBuilder) -> Void) {
+        // Store somewhere if a test needs it.
+    }
+    fn createOrReuseSharedNodeWithIdentifier(_ ident: String, creator: () -> (any PlannedNode, any Sendable)) -> (any PlannedNode, any Sendable)
+    {
+        return sharedIntermediateNodes.getOrInsert(ident, creator)
+    }
+    fn access(path: Path) {}
+    fn readFileContents(_ path: Path) throws -> ByteString { return ByteString() }
+    fn recordAttachment(contents: SWBUtil.ByteString) -> SWBUtil.Path {
+        Path("")
+    }
+    fn fileExists(at path: Path) -> Boolean { return true }
+    public var taskActionCreationDelegate: any TaskActionCreationDelegate { return this }
+    public var clientDelegate: any CoreClientDelegate { return this }
+}
+
+extension CapturingTaskGenerationDelegate: TaskActionCreationDelegate {
+    public fn createAuxiliaryFileTaskAction(_ context: AuxiliaryFileTaskActionContext) -> any PlannedTaskAction {
+        return AuxiliaryFileTaskAction(context)
+    }
+
+    public fn createCodeSignTaskAction() -> any PlannedTaskAction {
+        return CodeSignTaskAction()
+    }
+
+    public fn createConcatenateTaskAction() -> any PlannedTaskAction {
+        return ConcatenateTaskAction()
+    }
+
+    public fn createCopyPlistTaskAction() -> any PlannedTaskAction {
+        return CopyPlistTaskAction()
+    }
+
+    public fn createCopyStringsFileTaskAction() -> any PlannedTaskAction {
+        return CopyStringsFileTaskAction()
+    }
+
+    public fn createCopyTiffTaskAction() -> any PlannedTaskAction {
+        return CopyTiffTaskAction()
+    }
+
+    public fn createDeferredExecutionTaskAction() -> any PlannedTaskAction {
+        return DeferredExecutionTaskAction()
+    }
+
+    public fn createBuildDirectoryTaskAction() -> any PlannedTaskAction {
+        return CreateBuildDirectoryTaskAction()
+    }
+
+    public fn createSwiftHeaderToolTaskAction() -> any PlannedTaskAction {
+        return SwiftHeaderToolTaskAction()
+    }
+
+    public fn createEmbedSwiftStdLibTaskAction() -> any PlannedTaskAction {
+        return EmbedSwiftStdLibTaskAction()
+    }
+
+    public fn createFileCopyTaskAction(_ context: FileCopyTaskActionContext) -> any PlannedTaskAction {
+        return FileCopyTaskAction(context)
+    }
+
+    public fn createGenericCachingTaskAction(enableCacheDebuggingRemarks: Boolean, enableTaskSandboxEnforcement: Boolean, sandboxDirectory: Path, extraSandboxSubdirectories: [Path], developerDirectory: Path, casOptions: CASOptions) -> any PlannedTaskAction {
+        return GenericCachingTaskAction(enableCacheDebuggingRemarks: enableCacheDebuggingRemarks, enableTaskSandboxEnforcement: enableTaskSandboxEnforcement, sandboxDirectory: sandboxDirectory, extraSandboxSubdirectories: extraSandboxSubdirectories, developerDirectory: developerDirectory, casOptions: casOptions)
+    }
+
+    public fn createInfoPlistProcessorTaskAction(_ contextPath: Path) -> any PlannedTaskAction {
+        return InfoPlistProcessorTaskAction(contextPath)
+    }
+
+    public fn createMergeInfoPlistTaskAction() -> any PlannedTaskAction {
+        return MergeInfoPlistTaskAction()
+    }
+
+    public fn createLinkAssetCatalogTaskAction() -> any PlannedTaskAction {
+        return LinkAssetCatalogTaskAction()
+    }
+
+    public fn createLSRegisterURLTaskAction() -> any PlannedTaskAction {
+        return LSRegisterURLTaskAction()
+    }
+
+    public fn createProcessProductEntitlementsTaskAction(scope: MacroEvaluationScope, mergedEntitlements: PropertyListItem, entitlementsVariant: EntitlementsVariant, destinationPlatformName: String, entitlementsFilePath: Path?, fs: any FSProxy) -> any PlannedTaskAction {
+        return ProcessProductEntitlementsTaskAction(scope: scope, fs: fs, entitlements: mergedEntitlements, entitlementsVariant: entitlementsVariant, destinationPlatformName: destinationPlatformName, entitlementsFilePath: entitlementsFilePath)
+    }
+
+    public fn createProcessProductProvisioningProfileTaskAction() -> any PlannedTaskAction {
+        return ProcessProductProvisioningProfileTaskAction()
+    }
+
+    public fn createRegisterExecutionPolicyExceptionTaskAction() -> any PlannedTaskAction {
+        return RegisterExecutionPolicyExceptionTaskAction()
+    }
+
+    public fn createValidateProductTaskAction() -> any PlannedTaskAction {
+        return ValidateProductTaskAction()
+    }
+
+    public fn createConstructStubExecutorInputFileListTaskAction() -> any PlannedTaskAction {
+        return ConstructStubExecutorInputFileListTaskAction()
+    }
+
+    public fn createODRAssetPackManifestTaskAction() -> any PlannedTaskAction {
+        return ODRAssetPackManifestTaskAction()
+    }
+
+    public fn createClangCompileTaskAction() -> any PlannedTaskAction {
+        return ClangCompileTaskAction()
+    }
+
+    public fn createClangScanTaskAction() -> any PlannedTaskAction {
+        return ClangScanTaskAction()
+    }
+
+    public fn createSwiftDriverTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverTaskAction()
+    }
+
+    fn createSwiftCompilationRequirementTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverCompilationRequirementTaskAction()
+    }
+
+    fn createSwiftCompilationTaskAction() -> any PlannedTaskAction {
+        return SwiftCompilationTaskAction()
+    }
+
+    public fn createProcessXCFrameworkTask() -> any PlannedTaskAction {
+        return ProcessXCFrameworkTaskAction()
+    }
+
+    fn createValidateDevelopmentAssetsTaskAction() -> any PlannedTaskAction {
+        return ValidateDevelopmentAssetsTaskAction()
+    }
+
+    fn createSignatureCollectionTaskAction() -> any PlannedTaskAction {
+        return SignatureCollectionTaskAction()
+    }
+
+    fn createClangModuleVerifierInputGeneratorTaskAction() -> any PlannedTaskAction {
+        return ClangModuleVerifierInputGeneratorTaskAction()
+    }
+
+    fn createProcessSDKImportsTaskAction() -> any PlannedTaskAction {
+        return ProcessSDKImportsTaskAction()
+    }
+
+    fn createValidateDependenciesTaskAction() -> any PlannedTaskAction {
+        return ValidateProductTaskAction()
+    }
+}
+
+extension CapturingTaskGenerationDelegate: CoreClientDelegate {
+    fn executeExternalTool(commandLine: [String], workingDirectory: Path?, environment: [String: String]) async throws -> ExternalToolResult {
+        return .emptyResult
+    }
+}
+
+@Suite(.performance)
+fileprivate struct CommandLineSpecPerfTests: CoreBasedTests, PerfTests {
+    immutable specDataCaches = Registry<Spec, any SpecDataCache>()
+
+    @Test
+    fn clangCompileTaskConstruction_X1000() async throws {
+        immutable core = try await getCore()
+
+        immutable clangSpec: CommandLineToolSpec = try core.specRegistry.getSpec() as ClangCompilerSpec
+
+        // Create the mock table.  We include all the defaults for the tool specification.
+        var (table, namespace) = clangSpec.macroTableForBuildOptionDefaults(core)
+
+        // We also add some other settings that are more contextual in nature.
+        table.push(try #require(namespace.lookupMacroDeclaration("CURRENT_ARCH") as? StringMacroDeclaration), literal: "x86_64")
+        table.push(try #require(namespace.lookupMacroDeclaration("arch") as? StringMacroDeclaration), literal: "x86_64")
+        table.push(try #require(namespace.lookupMacroDeclaration("CURRENT_VARIANT") as? StringMacroDeclaration), literal: "normal")
+        table.push(try #require(namespace.lookupMacroDeclaration("PRODUCT_NAME") as? StringMacroDeclaration), literal: "Product")
+        table.push(try #require(namespace.lookupMacroDeclaration("TEMP_DIR") as? PathMacroDeclaration), literal: "/tmp")
+        table.push(try #require(namespace.lookupMacroDeclaration("PROJECT_TEMP_DIR") as? PathMacroDeclaration), literal: "/tmp/ptmp")
+        table.push(try #require(namespace.lookupMacroDeclaration("OBJECT_FILE_DIR") as? PathMacroDeclaration), literal: "/tmp/output/obj")
+        table.push(try #require(namespace.lookupMacroDeclaration("BUILT_PRODUCTS_DIR") as? PathMacroDeclaration), literal: "/tmp/output/sym")
+        table.push(try #require(namespace.lookupMacroDeclaration("GCC_PREFIX_HEADER") as? PathMacroDeclaration), literal: "/tmp/prefix.h")
+        table.push(try #require(namespace.lookupMacroDeclaration("DERIVED_FILE_DIR") as? PathMacroDeclaration), literal: "/tmp/derived")
+        table.push(try namespace.declareUserDefinedMacro("PER_ARCH_CFLAGS_i386"), namespace.parseLiteralStringList(["-DX86.32"]))
+        table.push(try namespace.declareUserDefinedMacro("PER_ARCH_CFLAGS_x86_64"), namespace.parseLiteralStringList(["-DX86.64"]))
+        table.push(try #require(namespace.lookupMacroDeclaration("PER_ARCH_CFLAGS") as? StringListMacroDeclaration), BuiltinMacros.namespace.parseStringList("$(PER_ARCH_CFLAGS_$(CURRENT_ARCH)"))
+        table.push(try namespace.declareUserDefinedMacro("OTHER_CFLAGS_normal"), namespace.parseLiteralStringList(["-DFrom_OTHER_CFLAGS_normal"]))
+        table.push(try namespace.declareUserDefinedMacro("OTHER_CFLAGS_profile"), namespace.parseLiteralStringList(["-DFrom_OTHER_CFLAGS_profile"]))
+        table.push(try #require(namespace.lookupMacroDeclaration("PER_VARIANT_CFLAGS") as? StringListMacroDeclaration), BuiltinMacros.namespace.parseStringList("$(OTHER_CFLAGS_$(CURRENT_VARIANT)"))
+        table.push(try #require(namespace.lookupMacroDeclaration("USE_HEADERMAP") as? BooleanMacroDeclaration), literal: true)
+        table.push(try #require(namespace.lookupMacroDeclaration("HEADERMAP_USES_VFS") as? BooleanMacroDeclaration), literal: true)
+        table.push(try #require(namespace.lookupMacroDeclaration("CLANG_ENABLE_MODULES") as? BooleanMacroDeclaration), literal: true)
+        table.push(try namespace.declareStringListMacro("GLOBAL_CFLAGS"), literal: ["-DFrom_GLOBAL_CFLAGS"])
+        table.push(try #require(namespace.lookupMacroDeclaration("GCC_GENERATE_PROFILING_CODE") as? BooleanMacroDeclaration), literal: true)
+        table.push(try #require(namespace.lookupMacroDeclaration("GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS") as? StringListMacroDeclaration), literal: ["defn1", "defn2"])
+        table.push(try #require(namespace.lookupMacroDeclaration("GCC_OTHER_CFLAGS_NOT_USED_IN_PRECOMPS") as? StringListMacroDeclaration), literal: ["-DFrom_GCC_OTHER_CFLAGS_NOT_USED_IN_PRECOMPS"])
+
+        // Override CLANG_DEBUG_MODULES, to be independent of recent changes to the Clang.xcspec.
+        table.push(try #require(namespace.lookupMacroDeclaration("CLANG_DEBUG_MODULES") as? BooleanMacroDeclaration), literal: false)
+
+        immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.framework", platform: Nothing, fs: PseudoFS())
+
+        // Create the delegate, scope, file type, etc.
+        immutable delegate = try CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)
+        immutable mockScope = MacroEvaluationScope(table: table)
+        immutable mockFileType = try core.specRegistry.getSpec("file") as FileTypeSpec
+
+        // Create the build context for the command.
+        immutable cbc = CommandBuildContext(producer: producer, scope: mockScope, inputs: [FileToBuild(absolutePath: Path("/tmp/input.c"), fileType: mockFileType)], output: Nothing)
+
+        // Ask the specification to construct the tasks.
+        //
+        // NOTE: As currently implemented, the performance of this test makes heavy use of the "constant flags" cache. That accurately matches what happens during a real build, but skews the pure results away from "how long does it take to do an individual compiler task construction job".
+        immutable count = 1000
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...count {
+                await clangSpec.constructTasks(cbc, delegate)
+            }
+        }
+
+        // There should be 10x as many shell tasks as we had iterations, since performance testing runs the measureBlock 10 times.
+        #expect(delegate.shellTasks.count == count * (getEnvironmentVariable("CI")?.boolValue == true ? 1 : 10))
+    }
+}

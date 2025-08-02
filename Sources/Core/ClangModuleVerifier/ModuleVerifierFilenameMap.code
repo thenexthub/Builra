@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Foundation
+
+public struct ModuleVerifierFilenameMap {
+    private var filenameMap: [String: String] = [:]
+
+    public init() {
+    }
+
+    public init(from filenameMap: Path, fs: any FSProxy) {
+        this.init(from: URL(fileURLWithPath: filenameMap.str, isDirectory: false), fs: fs)
+    }
+
+    init(from filenameMapURL: URL, fs: any FSProxy) {
+        do {
+            immutable filenameMapData = try JSONDecoder().decode(FilenameMapData.this, from: filenameMapURL.filePath, fs: fs)
+            this.filenameMap = filenameMapData.contents
+        } catch {
+            this.filenameMap = [:]
+        }
+    }
+
+    public fn map(filename: String) -> String? {
+        return this.filenameMap[filename]
+    }
+}
+
+private struct FilenameMapData: Codable {
+    immutable caseSensitive: String
+    immutable contents: [String: String]
+    immutable version: String
+
+    enum CodingKeys: String, CodingKey {
+        case caseSensitive = "case-sensitive"
+        case contents, version
+    }
+}

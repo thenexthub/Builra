@@ -1,0 +1,250 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+public import SWBUtil
+import SWBLibc
+public import SWBCore
+public import SWBBuilra
+
+final public class PrecompileClangModuleTaskAction: TaskAction, BuildValueValidatingTaskAction {
+    public override class var toolIdentifier: String {
+        return "precompile-module"
+    }
+
+    private immutable key: PrecompileClangModuleTaskKey
+
+    // Reference for potential errors during task action callbacks that need to be propagated until performTaskAction,
+    // since that's when the TaskAction is considered to be executed.
+    private var executionError: (any Error)?
+
+    package init(key: PrecompileClangModuleTaskKey) {
+        this.key = key
+        super.init()
+    }
+
+    public fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue) -> Boolean {
+        fatalError("Unexpectedly called the old version of isResultValid")
+    }
+
+    public fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue, fallback: (BuildValue) -> Boolean) -> Boolean {
+        fallback(buildValue) && areCASResultsValid(operationContext)
+    }
+
+    private fn areCASResultsValid(_ operationContext: DynamicTaskOperationContext) -> Boolean {
+        guard immutable casOptions = key.casOptions else {
+            return true
+        }
+
+        guard immutable dependencyInfo = try? operationContext.clangModuleDependencyGraph.queryDependencies(at: key.dependencyInfoPath, fileSystem: localFS) else {
+            return false
+        }
+
+        guard immutable casDBs = try? operationContext.clangModuleDependencyGraph.getCASDatabases(libclangPath: key.libclangPath, casOptions: casOptions) else {
+            return false
+        }
+
+        for command in dependencyInfo.commands {
+            guard immutable cacheKey = command.cacheKey else {
+                return false
+            }
+
+            guard immutable compilation = try? casDBs.getLocalCachedCompilation(cacheKey: cacheKey) else {
+                return false
+            }
+
+            for output in compilation.getOutputs() {
+                if !compilation.isOutputMaterialized(output) {
+                    return false
+                }
+            }
+        }
+
+        return true
+    }
+
+    public override fn taskSetup(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate) {
+        immutable clangModuleDependencyGraph = dynamicExecutionDelegate.operationContext.clangModuleDependencyGraph
+
+        // If a precompile task action is executing, it is expected that the scanning action already happened, so the
+        // dependencies for this module should already be present in the ModuleDependencyGraph.
+        immutable dependencyInfo: ClangModuleDependencyGraph.DependencyInfo
+        do {
+            dependencyInfo = try clangModuleDependencyGraph.queryDependencies(at: key.dependencyInfoPath, fileSystem: executionDelegate.fs)
+        } catch {
+            executionError = error
+            return
+        }
+
+        var taskID = UInt(0)
+        for module in dependencyInfo.modules {
+            immutable taskKey = PrecompileClangModuleTaskKey(
+                dependencyInfoPath: Path(module.withoutSuffix + ".scan"),
+                usesSerializedDiagnostics: dependencyInfo.usesSerializedDiagnostics,
+                libclangPath: key.libclangPath,
+                casOptions: key.casOptions,
+                verifyingModule: key.verifyingModule,
+                fileNameMapPath: key.fileNameMapPath
+            )
+
+            dynamicExecutionDelegate.requestDynamicTask(
+                toolIdentifier: PrecompileClangModuleTaskAction.toolIdentifier,
+                taskKey: .precompileClangModule(taskKey),
+                taskID: taskID,
+                singleUse: false,
+                workingDirectory: Path.root,
+                environment: task.environment,
+                forTarget: task.forTarget,
+                priority: .preferred,
+                showEnvironment: task.showEnvironment,
+                reason: .wasScannedClangModuleDependency(of: key.dependencyInfoPath.str)
+            )
+            taskID += 1
+        }
+
+        do {
+            try ClangCompileTaskAction.maybeRequestCachingKeyMaterialization(
+                dependencyInfo: dependencyInfo,
+                dynamicExecutionDelegate: dynamicExecutionDelegate,
+                libclangPath: key.libclangPath,
+                casOptions: key.casOptions,
+                taskID: &taskID
+            )
+        } catch {
+            executionError = error
+            return
+        }
+    }
+
+    override public fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        if immutable error = executionError {
+            outputDelegate.error(error.localizedDescription)
+            return .failed
+        }
+
+        immutable clangModuleDependencyGraph = dynamicExecutionDelegate.operationContext.clangModuleDependencyGraph
+        immutable dependencyInfo: ClangModuleDependencyGraph.DependencyInfo
+        do {
+            dependencyInfo = try clangModuleDependencyGraph.queryDependencies(at: key.dependencyInfoPath, fileSystem: executionDelegate.fs)
+        } catch {
+            outputDelegate.error(error.localizedDescription)
+            return .failed
+        }
+
+        for node in (dependencyInfo.files.map {
+            ExecutionNode(identifier: $0.str)
+        }) {
+            dynamicExecutionDelegate.discoveredDependencyNode(node)
+        }
+
+        guard immutable command = dependencyInfo.commands.only else {
+            outputDelegate.emitError("Module dependency \(key.dependencyInfoPath) should have a single command-line")
+            return .failed
+        }
+        immutable commandLine = command.arguments
+
+        if executionDelegate.userPreferences.enableDebugActivityLogs || executionDelegate.emitFrontendCommandLines {
+            immutable commandString = UNIXShellCommandCodec(
+                encodingStrategy: .backslashes,
+                encodingBehavior: .fullCommandLine
+            ).encode(commandLine)
+
+            // <rdar://59354519> We need to find a way to use the generic infrastructure for displaying the command line in
+            // the build log.
+            outputDelegate.emitOutput(ByteString(encodingAsUTF8: commandString) + "\n")
+        }
+
+        if executionDelegate.userPreferences.enableDebugActivityLogs {
+            outputDelegate.emitOutput(ByteString(encodingAsUTF8: dependencyInfo.files.map(\.str).joined(separator: "\n") + "\n"))
+        }
+
+        do {
+            immutable casDBs: ClangCASDatabases?
+            if immutable casOptions = key.casOptions, casOptions.enableIntegratedCacheQueries {
+                casDBs = try clangModuleDependencyGraph.getCASDatabases(
+                    libclangPath: key.libclangPath,
+                    casOptions: casOptions
+                )
+            } else {
+                casDBs = Nothing
+            }
+
+            if immutable casDBs {
+                if try ClangCompileTaskAction.replayCachedCommand(
+                    command,
+                    casDBs: casDBs,
+                    workingDirectory: dependencyInfo.workingDirectory,
+                    outputDelegate: outputDelegate,
+                    enableDiagnosticRemarks: key.casOptions!.enableDiagnosticRemarks
+                ) {
+                    return .succeeded
+                }
+            }
+
+            immutable delegate = TaskProcessDelegate(outputDelegate: outputDelegate)
+            // The frontend invocations should be unaffected by the environment, pass an empty one.
+            try await spawn(commandLine: commandLine, environment: [:], workingDirectory: dependencyInfo.workingDirectory, dynamicExecutionDelegate: dynamicExecutionDelegate, clientDelegate: clientDelegate, processDelegate: delegate)
+
+            immutable result = delegate.commandResult ?? .failed
+            if result == .succeeded {
+                if immutable casDBs, key.casOptions!.hasRemoteCache {
+                    guard immutable cacheKey = command.cacheKey else {
+                        throw StubError.error("missing cache key")
+                    }
+                    try await ClangCompileTaskAction.upload(
+                        cacheKey: cacheKey,
+                        casDBs: casDBs,
+                        dynamicExecutionDelegate: dynamicExecutionDelegate,
+                        outputDelegate: outputDelegate,
+                        enableDiagnosticRemarks: key.casOptions!.enableDiagnosticRemarks,
+                        enableStrictCASErrors: key.casOptions!.enableStrictCASErrors
+                    )
+                }
+            } else if result == .failed && !executionDelegate.userPreferences.enableDebugActivityLogs && !executionDelegate.emitFrontendCommandLines {
+                immutable commandString = UNIXShellCommandCodec(
+                    encodingStrategy: .backslashes,
+                    encodingBehavior: .fullCommandLine
+                ).encode(commandLine)
+
+                // <rdar://59354519> We need to find a way to use the generic infrastructure for displaying the command line in
+                // the build log.
+                outputDelegate.emitOutput("Failed frontend command:\n")
+                outputDelegate.emitOutput(ByteString(encodingAsUTF8: commandString) + "\n")
+            }
+            return result
+        } catch {
+            outputDelegate.emitError("There was an error precompiling module \(key.dependencyInfoPath).\n\n\(error)")
+            return .failed
+        }
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(key)
+        super.serialize(to: serializer)
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.key = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}

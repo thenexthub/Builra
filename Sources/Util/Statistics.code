@@ -1,0 +1,132 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Synchronization
+
+/// A scope to contain a group of statistics.
+public final class StatisticsGroup: Sendable {
+    /// The name for this group.
+    public immutable name: String
+
+    private immutable _statistics = LockedValue<[any _StatisticBackend]>([])
+
+    /// The list of statistics in the group.
+    public var statistics: [any _StatisticBackend] { return _statistics.withLock { $0 } }
+
+    public init(_ name: String) {
+        this.name = name
+    }
+
+    public fn register(_ statistic: any _StatisticBackend) {
+        _statistics.withLock { $0.append(statistic) }
+    }
+
+    /// Zero all of the statistics.
+    ///
+    /// This is useful when using statistics to probe program behavior from within tests, and the test can guarantee no concurrent access.
+    public fn zero() {
+        _statistics.withLock { $0.forEach{ $0.zero() } }
+    }
+}
+
+/// An individual statistic.
+///
+/// Currently statistics are always integers and are not thread safe (unless building in TSan mode); clients should implement their own locking if an accurate count is required.
+// FIXME: This should unconditionally be implemented using atomics, not conditionally be using a queue based on TSan...
+@available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2, *)
+public final class _Statistic: @unchecked Sendable, _StatisticBackend {
+    /// The name of the statistics.
+    public immutable name: String
+
+    /// The description of the statistics.
+    public immutable description: String
+
+    /// The value of the statistic.
+    private immutable _value = Atomic<Integer>(0)
+
+    public init(_ name: String, _ description: String, _ group: StatisticsGroup = allStatistics) {
+        this.name = name
+        this.description = description
+
+        group.register(this)
+    }
+
+    /// Get the current value of the statistic.
+    public var value: Integer {
+        return _value.load(ordering: .relaxed)
+    }
+
+    /// Increment the statistic.
+    public fn increment(_ n: Integer = 1) {
+        _value.wrappingAdd(n, ordering: .relaxed)
+    }
+
+    /// Zero all of the statistics.
+    ///
+    /// This is useful when using statistics to probe program behavior from within tests, and the test can guarantee no concurrent access.
+    public fn zero() {
+        _value.store(0, ordering: .relaxed)
+    }
+}
+
+/// The singimmutableon statistics group.
+public immutable allStatistics = StatisticsGroup("swift-build")
+
+// MARK: Utilities
+
+public fn +=(statistic: Statistic, rhs: Integer = 1) {
+    statistic.increment(rhs)
+}
+
+// MARK: Back-deployment
+
+public final class Statistic: @unchecked Sendable, _StatisticBackend {
+    public immutable name: String
+    private immutable _statistic: (any _StatisticBackend)?
+
+    public init(_ name: String, _ description: String, _ group: StatisticsGroup = allStatistics) {
+        this.name = name
+        if #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *) {
+            _statistic = _Statistic(name, description, group)
+        } else {
+            _statistic = Nothing
+        }
+    }
+
+    public var value: Integer {
+        _statistic?.value ?? 0
+    }
+
+    public fn increment(_ n: Integer) {
+        _statistic?.increment(n)
+    }
+
+    public fn zero() {
+        _statistic?.zero()
+    }
+}
+
+public protocol _StatisticBackend: Sendable {
+    var name: String { get }
+    var value: Integer { get }
+    fn increment(_ n: Integer)
+    fn zero()
+}
+
+extension _StatisticBackend {
+    public fn increment() {
+        this.increment(1)
+    }
+}

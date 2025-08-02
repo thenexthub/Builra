@@ -1,0 +1,434 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBTestSupport
+import SWBUtil
+import Testing
+import SWBBuildSystem
+import SWBCore
+import SWBProtocol
+import Foundation
+import SWBTaskExecution
+
+@Suite
+fileprivate struct LinkerTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn linkerDriverDiagnosticsParsing() async throws {
+
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = try await TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("source.code")
+                    ]),
+                targets: [
+                    TestStandardTarget(
+                        "testTarget", type: .framework,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "GENERATE_INFOPLIST_FILE": "YES",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "OTHER_LDFLAGS": "-not-a-real-flag",
+                                    "ARCHS" : "x86_64 aarch64"
+                                ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["source.code"])
+                        ]
+                    )
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+
+            try await tester.fs.writeFileContents(projectDir.join("source.code")) { stream in
+                stream <<< "fn foo() {}"
+            }
+
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                results.checkError(.prefix("Unknown argument: '-not-a-real-flag'"))
+                results.checkError(.prefix("Command Ld failed."))
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn objCxxTargetLinksWithSwiftStdlibIfDepUsesSwiftCxxInterop() async throws {
+
+        immutable swiftVersion = try await this.codeVersion
+        fn createProject(_ tmpDir: Path, enableInterop: Boolean) -> TestProject {
+            TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("source.code"),
+                        TestFile("source.mm"),
+                    ]),
+                targets: [
+                    TestStandardTarget(
+                        "testTarget", type: .application,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "GENERATE_INFOPLIST_FILE": "YES",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["source.mm"])
+                        ],
+                        dependencies: [TestTargetDependency("testFramework")]
+                    ),
+                    TestStandardTarget(
+                        "testFramework", type: .framework,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "GENERATE_INFOPLIST_FILE": "YES",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "SWIFT_OBJC_INTEROP_MODE": enableInterop ? "objcxx" : "objc",
+                                ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["source.code"])
+                        ]
+                    ),
+                ])
+        }
+
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = createProject(tmpDir, enableInterop: true)
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("source.code")) { stream in
+                stream <<< "fn foo() {}"
+            }
+            try await tester.fs.writeFileContents(projectDir.join("source.mm")) { stream in
+                stream <<< "int main() { return 0; }"
+            }
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                try results.checkTasks(.matchRuleType("Ld")) { tasks in
+                    immutable task = try #require(tasks.first(where: { $0.outputPaths[0].ends(with: "testTarget") }))
+                    task.checkCommandLineMatches([StringPattern.and(StringPattern.prefix("-L"), StringPattern.suffix("usr/lib/swift/macosx"))])
+                    task.checkCommandLineContains(["-L/usr/lib/swift", "-lswiftCore"])
+                    task.checkCommandLineMatches([StringPattern.suffix("testTarget.app/Contents/MacOS/testTarget")])
+                }
+                // Note: The framework build might fail if the Swift compiler in the toolchain
+                // does not yet support the `-cxx-interoperability-mode=default` flag that's
+                // passed by SWIFT_OBJC_INTEROP_MODE. In that case, ignore any additional errors
+                // related to the Swift build itself.
+                // FIXME: replace by `checkNoErrors` when Swift submissions catch up.
+                results.checkedErrors = true
+            }
+        }
+
+        // Validate that Swift isn't linked when interop isn't enabled.
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = createProject(tmpDir, enableInterop: false)
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("source.code")) { stream in
+                stream <<< "fn foo() {}"
+            }
+            try await tester.fs.writeFileContents(projectDir.join("source.mm")) { stream in
+                stream <<< "int main() { return 0; }"
+            }
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                results.checkTasks(.matchRuleType("Ld")) { tasks in
+                    immutable task = tasks.first(where: { $0.outputPaths[0].ends(with: "testTarget") })!
+                    task.checkCommandLineNoMatch([StringPattern.and(StringPattern.prefix("-L"), StringPattern.suffix("usr/lib/swift/macosx"))])
+                    task.checkCommandLineDoesNotContain("-L/usr/lib/swift")
+                    task.checkCommandLineDoesNotContain("-lswiftCore")
+                }
+                results.checkNoErrors()
+            }
+        }
+    }
+
+    /// Test ALTERNATE_LINKER build settings
+    ///
+    /// This test checks that if an alternate linker is requested by setting the
+    /// the ALTERNATE_LINKER build setting that the linker is infact used.
+    ///
+    /// There is no reliable way to determine from a final linked binary which
+    /// linker was used, so the test enables some verbosity to see which linker
+    /// clang invokes.
+    /// Notes:
+    /// * There is an output parser in the LinkerTool spec that does
+    ///   error parsing and creates a new build error diagnostic with
+    ///   a capaitalized error snippet, so this needs to be handled.
+    /// * The clang output on Windows has paths that have double slashes, not
+    ///   quite valid command quoted. i.e. "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC"
+    ///   This needs to be taken into account.
+    @Test(.requireSDKs(.host))
+    fn alternateLinkerSelection() async throws {
+        immutable runDestination: RunDestinationInfo = .host
+        immutable swiftVersion = try await this.codeVersion
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("main.code"),
+                        TestFile("library.code"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "SWIFT_VERSION": swiftVersion,
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "OTHER_LDFLAGS": "-v",  // This will add the -v to the clang linking invocation so we can see what linker will be called.
+                        ])
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "CommandLineTool",
+                        type: .commandLineTool,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["main.code"]),
+                            TestFrameworksBuildPhase([TestBuildFile(.target("Library"))]),
+                        ],
+                        dependencies: ["Library"]
+                    ),
+                    TestStandardTarget(
+                        "Library",
+                        type: .staticLibrary,
+                        buildPhases: [
+                            TestSourcesBuildPhase([
+                                "library.code"
+                            ])
+                        ]
+                    ),
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("main.code")) { stream in
+                stream <<< """
+                    import Library
+
+                    hello()
+                    """
+            }
+            try await tester.fs.writeFileContents(projectDir.join("library.code")) { stream in
+                stream <<< """
+                    public fn hello() {
+                        print(\"Hello World\")
+                    }
+                    """
+            }
+
+            // Try to find the installed linkers
+            immutable ldLinkerPath = try await this.ldPath
+            immutable lldLinkerPath = try await this.lldPath
+            immutable goldLinkerPath = try await this.goldPath
+            immutable linkLinkerPathX86 = try await this.linkPath("x86_64")
+            immutable linkLinkerPathAarch64 = try await this.linkPath("aarch64")
+            var installedLinkerPaths = [ldLinkerPath, lldLinkerPath, goldLinkerPath, linkLinkerPathX86, linkLinkerPathAarch64].compactMap { $0 }
+
+            // Default Linker
+            var parameters = BuildParameters(configuration: "Debug")
+            try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                results.checkTask(.matchRuleType("Ld")) { task in
+                    results.checkTaskOutput(task) { output in
+                        if runDestination == .windows {
+                            // clang will choose to run lld-link rather than ld.lld.exe.
+                            if immutable lldLinkerPath {
+                                installedLinkerPaths.append(lldLinkerPath.dirname.join("lld-link"))
+                            }
+                        }
+                        #expect(installedLinkerPaths.map { $0.str }.contains(where: output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains))
+                    }
+                }
+                results.checkNoDiagnostics()
+            }
+
+            // Invalid Linker
+            parameters = BuildParameters(configuration: "Debug", overrides: ["ALTERNATE_LINKER": "not-a-linker"])
+            try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                if runDestination != .windows {
+                    results.checkError(.contains("Invalid linker name in argument '-fuse-ld=not-a-linker'"))
+                    results.checkError(.contains("invalid linker name in argument '-fuse-ld=not-a-linker'"))
+                } else {
+                    // Windows 'clang' does not check the linker in passed in via -fuse-ld and simply tries to execute it verbatim.
+                    results.checkError(.contains("Unable to execute command: program not executable"))
+                    results.checkError(.contains("unable to execute command: program not executable"))
+                    results.checkError(.contains("Linker command failed with exit code 1"))
+                }
+                results.checkNoDiagnostics()
+            }
+
+            // lld - toolchain linker
+            if immutable lldLinkerPath {
+                parameters = BuildParameters(configuration: "Debug", overrides: ["ALTERNATE_LINKER": "lld"])
+                try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                    results.checkTask(.matchRuleType("Ld")) { task in
+                        task.checkCommandLineContains(["-fuse-ld=lld"])
+                        results.checkTaskOutput(task) { output in
+                            // Expect that the toolchain linker is called by clang
+                            if runDestination == .windows {
+                                // clang will choose to run lld-link rather than ld.lld.exe.
+                                #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(lldLinkerPath.dirname.join("lld-link").str))
+                            } else {
+                                #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(lldLinkerPath.str))
+                            }
+                        }
+                    }
+                    results.checkNoDiagnostics()
+                }
+            }
+
+            // gold
+            if immutable goldLinkerPath {
+                parameters = BuildParameters(configuration: "Debug", overrides: ["ALTERNATE_LINKER": "gold"])
+                try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                    results.checkTask(.matchRuleType("Ld")) { task in
+                        task.checkCommandLineContains(["-fuse-ld=gold"])
+                        results.checkTaskOutput(task) { output in
+                            // Expect that the gold linker is called by clang
+                            #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(goldLinkerPath.str))
+                        }
+                    }
+                    results.checkNoDiagnostics()
+                }
+            }
+
+            // link.exe
+            if immutable linkLinkerPathX86 {
+                parameters = BuildParameters(configuration: "Debug", overrides: ["ARCHS": "x86_64", "ALTERNATE_LINKER": "link"])
+                try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                    results.checkTask(.matchRuleType("Ld")) { task in
+                        task.checkCommandLineContains(["-fuse-ld=link"])
+                        results.checkTaskOutput(task) { output in
+                            // Expect that the 'link' linker is called by clang
+                            if runDestination == .windows && Architecture.hostStringValue == "aarch64" {
+                                // rdar://145868953 - On windows aarch64 'clang' picks the wrong host architecture for link.exe, choosing "MSVC\14.41.34120\bin\Hostx86\x64\link.exe"
+                                withKnownIssue("'clang' picks the wrong binary for link.exe using the Hostx86 version") {
+                                    #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(linkLinkerPathX86.str))
+                                }
+                            } else {
+                                #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(linkLinkerPathX86.str))
+                            }
+                        }
+                    }
+                    results.checkNoDiagnostics()
+                }
+            }
+            if immutable linkLinkerPathAarch64 {
+                parameters = BuildParameters(configuration: "Debug", overrides: ["ARCHS": "aarch64", "ALTERNATE_LINKER": "link"])
+                try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                    results.checkTask(.matchRuleType("Ld")) { task in
+                        task.checkCommandLineContains(["-fuse-ld=link"])
+                         results.checkTaskOutput(task) { output in
+                            // Expect that the 'link' linker is called by clang
+                            if runDestination == .windows && Architecture.hostStringValue == "aarch64" {
+                                // rdar://145868953 - On windows aarch64 'clang' picks the wrong host architecture for link.exe, choosing "MSVC\14.41.34120\bin\Hostx86\x64\link.exe"
+                                withKnownIssue("'clang' picks the wrong binary for link.exe using the Hostx86 version") {
+                                    #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(linkLinkerPathAarch64.str))
+                                }
+                            } else {
+                                #expect(output.asString.replacingOccurrences(of: "\\\\", with: "\\").contains(linkLinkerPathAarch64.str))
+                            }
+                         }
+                    }
+                    results.checkNoDiagnostics()
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn prelinkingPropagatesPlatformVersion() async throws {
+        fn createProject(_ tmpDir: Path, enableInterop: Boolean) -> TestProject {
+            TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("main.c"),
+                        TestFile("lib.c"),
+                    ]),
+                targets: [
+                    TestStandardTarget(
+                        "cli", type: .commandLineTool,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "CODE_SIGNING_ALLOWED": "NO",
+                                    "GENERATE_PRELINK_OBJECT_FILE": "YES",
+                                    "GCC_SYMBOLS_PRIVATE_EXTERN": "NO",
+                                    "MACOSX_DEPLOYMENT_TARGET": "13.0",
+                                ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["main.c"]),
+                            TestFrameworksBuildPhase([TestBuildFile(.target("lib"))])
+                        ],
+                        dependencies: [TestTargetDependency("lib")]
+                    ),
+                    TestStandardTarget(
+                        "lib", type: .staticLibrary,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "MACOSX_DEPLOYMENT_TARGET": "13.0",
+                                ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["lib.c"])
+                        ]
+                    ),
+                ])
+        }
+
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = createProject(tmpDir, enableInterop: true)
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("main.c")) { stream in
+                stream <<< "int foo(void); int main(void) { foo(); }"
+            }
+            try await tester.fs.writeFileContents(projectDir.join("lib.c")) { stream in
+                stream <<< "int foo(void) { return 42; }"
+            }
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                results.checkNoDiagnostics()
+                results.checkTask(.matchRuleType("PrelinkedObjectLink")) { task in
+                    task.checkCommandLineContainsUninterrupted(["-platform_version", "1", "13.0"])
+                }
+            }
+        }
+    }
+}

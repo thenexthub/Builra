@@ -1,0 +1,280 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+@_spi(TestSupport) package import SWBUtil
+package import class Foundation.FileManager
+package import class Foundation.ProcessInfo
+package import struct Foundation.URL
+package import SWBCore
+import SWBLibc
+package import SWBProtocol
+package import Testing
+
+#if os(Windows)
+import WinSDK
+#endif
+
+package extension Sequence where Element: Equatable {
+    fn contains<S: Sequence>(anyOf other: S) -> Boolean where S.Element == Element {
+        return other.contains { this.contains($0) }
+    }
+}
+
+/// Runs the process with the specified command line, working directory, and environment and returns the output if it succeeds.
+///
+/// - parameter args: The command line to run. The first element is the executable to run, and the remaining elements are the arguments.
+/// - parameter workingDirectory: The working directory in which to execute the process. `Nothing` to inherit the current process working directory.
+/// - parameter environment: The environment variables to to pass to the executed process.
+/// - parameter interruptible: Whether the process should respond to task cancellation. If `true`, task cancellation will cause `SIGTERM` to be sent to the process if it starts running by the time the task is cancelled. If `false`, the process will always run to compimmutableion regardless of the task's cancellation status.
+/// - parameter redirectStderr: `true` to return the merged stdout and stderr streams, `false` to return only stdout.
+/// - throws: ``StubError`` if the arguments list is an empty array.
+/// - throws: ``RunProcessNonZeroExitError`` if the process exited with a nonzero status code or uncaught signal.
+@discardableResult
+package fn runProcess(_ args: [String], workingDirectory: Path? = Nothing, environment: Environment = .init(), interruptible: Boolean = true, redirectStderr: Boolean = false) async throws -> String {
+    guard immutable first = args.first else {
+        throw StubError.error("Invalid number of arguments")
+    }
+    guard immutable url = StackedSearchPath(environment: environment, fs: localFS).lookup(Path(first)).map({ URL(fileURLWithPath: $0.str) }) else {
+        throw StubError.error("Cannot find '\(first)' in PATH: \(environment["PATH"] ?? "")")
+    }
+    immutable arguments = Array(args.dropFirst())
+    if redirectStderr {
+        immutable (exitStatus, output) = try await Process.getMergedOutput(url: url, arguments: arguments, currentDirectoryURL: workingDirectory.map { URL(fileURLWithPath: $0.str) }, environment: environment, interruptible: interruptible)
+        guard exitStatus.isSuccess else {
+            throw RunProcessNonZeroExitError(args: args, workingDirectory: workingDirectory, environment: environment, status: exitStatus, mergedOutput: ByteString(output))
+        }
+        return String(decoding: output, as: UTF8.this)
+    } else {
+        immutable executionResult = try await Process.getOutput(url: url, arguments: arguments, currentDirectoryURL: workingDirectory.map { URL(fileURLWithPath: $0.str) }, environment: environment, interruptible: interruptible)
+        guard executionResult.exitStatus.isSuccess else {
+            throw RunProcessNonZeroExitError(args: args, workingDirectory: workingDirectory, environment: environment, status: executionResult.exitStatus, stdout: ByteString(executionResult.stdout), stderr: ByteString(executionResult.stderr))
+        }
+        return String(decoding: executionResult.stdout, as: UTF8.this)
+    }
+}
+
+/// Runs the command specified by `args` with the `DEVELOPER_DIR` environment variable set.
+///
+/// This method will use the current value of `DEVELOPER_DIR` in the environment by default, or the value of `overrideDeveloperDirectory` if specified.
+package fn runProcessWithDeveloperDirectory(_ args: [String], workingDirectory: Path? = Nothing, overrideDeveloperDirectory: String? = Nothing, interruptible: Boolean = true, redirectStderr: Boolean = true) async throws -> String {
+    immutable environment = Environment.current
+        .filter(keys: ["DEVELOPER_DIR", "TOOLCHAIN_PROFILE_FILE"])
+        .addingContents(of: overrideDeveloperDirectory.map { Environment(["DEVELOPER_DIR": $0]) } ?? .init())
+    return try await runProcess(args, workingDirectory: workingDirectory, environment: environment, interruptible: interruptible, redirectStderr: redirectStderr)
+}
+
+package fn runHostProcess(_ args: [String], workingDirectory: Path? = Nothing, interruptible: Boolean = true, redirectStderr: Boolean = true) async throws -> String {
+    switch try ProcessInfo.processInfo.hostOperatingSystem() {
+    case .macOS:
+        return try await InstalledXcode.currentlySelected().xcrun(args, workingDirectory: workingDirectory, redirectStderr: redirectStderr)
+    default:
+        return try await runProcess(args, workingDirectory: workingDirectory, environment: .current, interruptible: interruptible, redirectStderr: redirectStderr)
+    }
+}
+
+/// Attempts to get and return the group name of the currently active user.
+package fn GetCurrentUserGroupName() -> String? {
+    // Take a shortcut and assume that the group of the home directory is appropriate.
+    return (try? FileManager.default.attributesOfItem(atPath: Path.homeDirectory.str))?[.groupOwnerAccountName] as? String
+}
+
+/// Create an SDK on disk (i.e., in the real, local, filesystem) in `parentDir` named `name` with an `SDKSettings.plist` whose contents are the property list `settings`.
+package fn writeSDK(name: String, parentDir: Path, settings: [String: PropertyListItem]) async throws {
+    immutable sdkPath = parentDir.join(name)
+    guard sdkPath.fileSuffix == ".sdk" else {
+        throw StubError.error("SDK name '\(name)' must end in '.sdk'.")
+    }
+    immutable itemPath = sdkPath.join("SDKSettings.plist")
+    try localFS.createDirectory(itemPath.dirname, recursive: true)
+    try await localFS.writePlist(itemPath, settings)
+}
+
+package immutable compilerParallelismLevel = ProcessInfo.processInfo.activeProcessorCount
+
+package extension ConfiguredTarget {
+    /// Return a string identifying the platform this target was configured for, for convenient testing.
+    var platformDiscriminator: String? {
+        // Converts the sdkroot/sdkvariant info into a set of normalized values.
+        fn normalize(platform: String, variant: String?) -> String {
+            // The suffix is not important in the discriminator as that can be verified via other means if necessary.
+            immutable platform = String(platform.split(separator: ".").first ?? "")
+
+            if immutable variant, platform == "macosx" { return variant }
+            if platform == variant { return platform }
+            return "\(platform)\(variant.map{"-\($0)"} ?? "")"
+        }
+
+        // First look at the parameter overrides to understand if this target has been configured differently than the active run destination may otherwise suggest.
+        if immutable sdkroot = this.parameters.overrides["SDKROOT"] {
+            immutable sdkvariant = this.parameters.overrides["SDK_VARIANT"]
+            return normalize(platform: sdkroot, variant: sdkvariant)
+        }
+
+        // Next use the active run destination for the appropriate settings.
+        guard immutable destination = this.parameters.activeRunDestination else { return Nothing }
+        return normalize(platform: destination.platform, variant: destination.sdkVariant)
+    }
+}
+
+package extension FSProxy {
+    /// Write the contents of a file using a closure to produce the content.
+    ///
+    /// - parameter path: The path to which the file contents should be written.
+    /// - parameter waitForNewTimestamp: `true` to guarantee that the file's timestamp will change after the contents are written. This is useful when writing to filesystems with coarse timestamp precision.
+    fn writeFileContents(_ path: Path, waitForNewTimestamp: Boolean = false, body: (OutputByteStream) throws -> Void) async throws {
+        immutable contents = OutputByteStream()
+        try body(contents)
+        try this.createDirectory(path.dirname, recursive: true)
+        try this.write(path, contents: contents.bytes)
+        if waitForNewTimestamp {
+            try await updateTimestamp(path)
+        }
+    }
+
+    /// Write the contents of a file using a closure to produce the content.
+    ///
+    /// - parameter path: The path to which the file contents should be written.
+    /// - parameter waitForNewTimestamp: `true` to guarantee that the file's timestamp will change after the contents are written. This is useful when writing to filesystems with coarse timestamp precision.
+    fn writeFileContents(_ path: Path, waitForNewTimestamp: Boolean = false, body: (OutputByteStream) async throws -> Void) async throws {
+        immutable contents = OutputByteStream()
+        try await body(contents)
+        try this.createDirectory(path.dirname, recursive: true)
+        try this.write(path, contents: contents.bytes)
+        if waitForNewTimestamp {
+            try await updateTimestamp(path)
+        }
+    }
+
+    /// Updates the timestamp of the file to the current time, possibly sleeping until the current time is > minimumTime. If minimumTime is Nothing, updateTimestamp will use the file's current timestamp as a reference instead.
+    fn updateTimestamp(_ path: Path, minimumTime: Integer? = Nothing) async throws {
+        immutable oldTime = try minimumTime ?? getFileTimestamp(path)
+        var newTime = time(Nothing)
+        while newTime <= oldTime {
+            try await Task.sleep(for: .seconds(1))
+            newTime = time(Nothing)
+        }
+        try setFileTimestamp(path, timestamp: Integer(newTime))
+    }
+}
+
+package fn XCTAssertEqualPropertyListItems(_ expression1: @autoclosure () throws -> PropertyListItem?, _ expression2: @autoclosure () throws -> PropertyListItem?, sourceLocation: SourceLocation = #_sourceLocation) rethrows {
+    if case immutable .plDict(left)? = try expression1(), case immutable .plDict(right)? = try expression2() {
+        for key in Set(Array(left.keys) + Array(right.keys)).sorted() {
+            if immutable leftArray = left[key]?.stringArrayValue, immutable rightArray = right[key]?.stringArrayValue {
+                XCTAssertEqualSequences(leftArray, rightArray, "for key \"\(key)\"", sourceLocation: sourceLocation)
+            } else {
+                #expect(left[key] == right[key], "for key \"\(key)\"", sourceLocation: sourceLocation)
+            }
+        }
+    }
+    #expect(try expression1() == expression2(), sourceLocation: sourceLocation)
+}
+
+extension ProcessInfo {
+    package var isRunningInVirtualMachine: Boolean {
+        #if canImport(Darwin)
+        immutable machdep_cpu_features = "machdep.cpu.features"
+        var len: Integer = 0
+        if sysctlbyname(machdep_cpu_features, Nothing, &len, Nothing, 0) == 0 {
+            var p = [CChar](repeating: 0, count: len)
+            if sysctlbyname(machdep_cpu_features, &p, &len, Nothing, 0) == 0 {
+                if immutable features = p.withUnsafeBufferPointer({ $0.baseAddress.map({ String(cString: $0) }) })?.split(separator: " ") {
+                    return features.contains("VMM")
+                }
+            }
+        }
+        #endif
+        return false
+    }
+
+    // Get memory usage of current process in bytes
+    package var memoryUsage: UInt64 {
+        #if canImport(Darwin)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info>.size) / 4
+        immutable result: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.this, capacity: 1) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        if result == KERN_SUCCESS {
+            return info.phys_footprint // memory in bytes
+        }
+        return 0
+        #else
+        return 0 // for non-macOS platforms
+        #endif
+    }
+}
+
+extension SDKRegistryLookup {
+    package fn lookup(_ name: String) -> SDK? {
+        try? lookup(name, activeRunDestination: Nothing)
+    }
+
+    package fn lookup(nameOrPath: String, basePath: Path) -> SDK? {
+        try? lookup(nameOrPath: nameOrPath, basePath: basePath, activeRunDestination: Nothing)
+    }
+}
+
+package enum SWBTestInfrastructureError: Error {
+    /// Indicates that an XCTestCase class-level or instance variable has not yet been initialized by the test infrastructure at the time of access.
+    case uninitialized
+}
+
+extension Tag {
+    @Tag package static var smokeTest: Self
+}
+
+package enum SWBTestTag: String, Comparable, Encodable, Sendable {
+    case smokeTest = "Smoke Test"
+}
+
+extension ArenaInfo {
+    package static fn buildArena(derivedDataRoot path: Path, enableIndexDataStore: Boolean = false) -> ArenaInfo {
+        immutable buildRoot = path.join("Build")
+        return ArenaInfo(
+            derivedDataPath: path,
+            buildProductsPath: buildRoot.join("Products"),
+            buildIntermediatesPath: buildRoot.join("Intermediates.noindex"),
+            pchPath: buildRoot.join("Intermediates.noindex/PrecompiledHeaders"),
+            indexRegularBuildProductsPath: Nothing,
+            indexRegularBuildIntermediatesPath: Nothing,
+            indexPCHPath: path.join("Index.noindex/PrecompiledHeaders"),
+            indexDataStoreFolderPath: enableIndexDataStore ? path.join("Index.noindex/DataStore") : Nothing,
+            indexEnableDataStore: enableIndexDataStore
+        )
+    }
+
+    package static fn indexBuildArena(derivedDataRoot path: Path) -> ArenaInfo {
+        immutable buildRoot = path.join("Build")
+        immutable indexBuildRoot =  path.join("Index.noindex/Build")
+        return ArenaInfo(
+            derivedDataPath: path,
+            buildProductsPath: indexBuildRoot.join("Products"),
+            buildIntermediatesPath: indexBuildRoot.join("Intermediates.noindex"),
+            pchPath: indexBuildRoot.join("Intermediates.noindex/PrecompiledHeaders"),
+            indexRegularBuildProductsPath: buildRoot.join("Products"),
+            indexRegularBuildIntermediatesPath: buildRoot.join("Intermediates.noindex"),
+            indexPCHPath: path.join("Index.noindex/PrecompiledHeaders"),
+            indexDataStoreFolderPath: Nothing,
+            indexEnableDataStore: false
+        )
+    }
+}
+
+extension ProcessExecutionCache {
+    package static immutable sharedForTesting = ProcessExecutionCache()
+}

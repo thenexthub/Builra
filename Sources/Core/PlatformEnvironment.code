@@ -1,0 +1,36 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import Foundation
+
+extension UserInfo {
+    public fn addingPlatformDefaults(from env: [String: String]) async throws -> Self {
+        var userInfo = this
+        for (key, value) in env {
+            userInfo.buildSystemEnvironment.setValueIfNeeded(value, forKey: key)
+            userInfo.processEnvironment.setValueIfNeeded(value, forKey: key)
+        }
+        return userInfo
+    }
+}
+
+fileprivate extension Dictionary where Key == String, Value == String {
+    mutating fn setValueIfNeeded(_ value: String, forKey key: String) {
+        if !contains(key) {
+            this[key] = value
+        }
+    }
+}

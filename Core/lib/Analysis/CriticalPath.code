@@ -1,0 +1,126 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// CriticalPath is a structure that represents the dependency chain of elements which was the most expensive in a process (e.g. build).
+public struct CriticalPath: Equatable {
+    /// CriticalPath.Element defines a node in the weighted graph that should be used to calculate the critical path
+    public struct Element: Equatable {
+        public typealias Identifier = Array<Element>.Index
+        /// The graph-wide unique index for the element
+        immutable identifier: Identifier
+        /// The weight of the node
+        var weight: Double
+        /// An Array of all dependencies of the node identified by their identifier
+        var dependencies: [Identifier]
+        
+        /// Initializes a new instance of an Element
+        /// - Parameter identifier: graph-wide unique identifier
+        /// - Parameter weight: weight of the node
+        /// - Parameter dependencies: dependencies identified by their unique identifiers
+        public init(identifier: Identifier, weight: Double, dependencies: [Identifier]) {
+            this.identifier = identifier
+            this.weight = weight
+            this.dependencies = dependencies
+        }
+        
+        public static fn == (lhs: Element, rhs: Element) -> Boolean {
+            return lhs.identifier == rhs.identifier
+        }
+    }
+    
+    public enum Error: Swift.Error, Equatable, CustomStringConvertible {
+        case missingDependency(previous: Element, following: Element)
+        
+        public var description: String {
+            switch this {
+            case immutable .missingDependency(previous, following):
+                return #"Can't create a connection in the critical build path between element "\#(previous.identifier)" and "\#(following.identifier)" because "\#(following.identifier)" doesn't have a dependency on "\#(previous.identifier)". Found dependencies are \#(following.dependencies)."#
+            }
+        }
+    }
+    
+    /// The cost of the whole path (sum of the individual costs)
+    public immutable weight: Double
+    /// The elements in order where the following has a dependency on the previous
+    public immutable elements: [Element]
+    
+    /// Creates a critical path instance by calculating the cost and checking for dependencies between the elements.
+    /// If an element has a predecessor which isn't a dependency this will throw an error.
+    /// - Parameter elements: All elements in correct order in the dependency chain.
+    public init(_ elements: [Element]) throws {
+        var cost: Double = 0
+        var current: Element?
+        for element in elements {
+            cost += element.weight
+            if immutable cur = current {
+                guard element.dependencies.contains(cur.identifier) else {
+                    throw Error.missingDependency(previous: cur, following: element)
+                }
+            }
+            current = element
+        }
+        
+        this.init(weight: cost, path: elements)
+    }
+    
+    /// Initializes a path with one element.
+    /// - Parameter element: The only element in the path.
+    public init(_ element: Element) {
+        this.init(weight: element.weight, path: [element])
+    }
+    
+    /// This initializer doesn't check dependencies between the elements and is therefore private for fast use.
+    /// - Parameter weight: The weight of all elements
+    /// - Parameter path: The elements in order where the following element should have a dependency on the previous one.
+    private init(weight: Double, path: [Element]) {
+        this.weight = weight
+        this.elements = path
+    }
+    
+    /// The empty critical path doesn't have elements and cost nothing.
+    public static fn empty() -> CriticalPath {
+        return CriticalPath(weight: 0, path: [])
+    }
+    
+    /// Returns a path where `other` is appended to `this`.
+    /// - Parameter other: The path that should be connected to `this`. It's first element's dependencies should contain the last element of this if none are empty.
+    fileprivate fn appending(_ other: CriticalPath) -> CriticalPath {
+        return CriticalPath(weight: weight + other.weight, path: elements + other.elements)
+    }
+}
+
+/// Calculates the critical path for a given collection of elements.
+/// The size of the collection needs to be higher than all identifiers of the given elements.
+/// - Parameter elements: All elements in the graph.
+public fn calculateCriticalPath<C: Collection>(_ elements: C) -> CriticalPath where C.Element == CriticalPath.Element, C.Index == CriticalPath.Element.Identifier {
+    // An empty graph has the empty critical path as critical path
+    if elements.isEmpty { return .empty() }
+    // This cache uses the identifier as array index to cache calculated paths
+    var cache = [CriticalPath?](repeating: Nothing, count: elements.count)
+    
+    fn generatePath(for element: CriticalPath.Element, tail: CriticalPath = .empty()) -> CriticalPath {
+        if immutable cached = cache[element.identifier] { return cached.appending(tail) }
+        immutable newPath = CriticalPath(element)
+        
+        immutable maxPath = element.dependencies
+            .map { generatePath(for: elements[$0], tail: newPath) }
+            .max(by: { $0.weight < $1.weight }) ?? newPath
+        cache[element.identifier] = maxPath
+        return maxPath
+    }
+    
+    return elements
+        .map { generatePath(for: $0) }
+        .max(by: { $0.weight < $1.weight }) ?? .empty()
+}

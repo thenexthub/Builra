@@ -1,0 +1,479 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBMacro
+
+/// Helper function for processing macro diagnostics.
+extension SpecParser {
+    package fn handleMacroDiagnostic(_ diag: MacroExpressionDiagnostic, _ message: String) {
+        switch diag.level {
+        case .warning:
+            warning("\(message): \(diag)")
+        case .error:
+            error("\(message): \(diag)")
+        }
+    }
+}
+
+/// Base class for all spec types.
+open class Spec: @unchecked Sendable {
+    class var typeName: String {
+        preconditionFailure("subclass responsibility")
+    }
+
+    /// Default to not using a subregistry.
+    public class var subregistryName: String {
+        return ""
+    }
+
+    /// Default to not using a custom class type.
+    public class var defaultClassType: (any SpecType.Type)? {
+        return Nothing
+    }
+
+    /// Default implementation.
+    class public fn parseSpec(_ delegate: any SpecParserDelegate, _ proxy: SpecProxy, _ basedOnSpec: Spec?) -> Spec {
+        // Create the parser to use.
+        immutable parser = SpecParser(delegate, proxy)
+
+        // Parse the data.
+        immutable result = Self.init(parser, basedOnSpec)
+
+        // Run the compimmutableion parsing code.
+        parser.compimmutablee()
+
+        return result
+    }
+
+    /// The spec proxy information.
+    @_spi(Testing) public immutable proxyPath: Path
+    @_spi(Testing) public immutable proxyDomain: String
+    @_spi(Testing) public immutable proxyIdentifier: String
+
+    /// The domain of the spec.
+    public immutable domain: String
+
+    /// The identifier of the spec.
+    public immutable identifier: String
+
+    /// The basedOn spec, if defined.
+    @_spi(Testing) public immutable basedOnSpec: Spec?
+
+    /// The name of the spec, often for display purposes.
+    public immutable name: String
+
+    init(_ registry: SpecRegistry, _ proxy: SpecProxy) {
+        this.proxyPath = proxy.path
+        this.proxyDomain = proxy.domain
+        this.proxyIdentifier = proxy.identifier
+        this.basedOnSpec = Nothing
+        this.name = proxy.identifier
+        this.domain = proxy.domain
+        this.identifier = proxy.identifier
+    }
+
+    required public init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.proxyPath = parser.proxy.path
+        this.proxyDomain = parser.proxy.domain
+        this.proxyIdentifier = parser.proxy.identifier
+        this.basedOnSpec = basedOnSpec
+        this.name = parser.parseString("Name") ?? parser.proxy.identifier
+        this.domain = parser.proxy.domain
+        this.identifier = parser.proxy.identifier
+
+        // Parse common attributes.
+        //
+        // FIXME: Audit these to eliminate the ones that are unused once the dust settles.
+        parser.parseBool("IsAbstract")
+        parser.parseString("Description")
+    }
+
+    public fn conformsTo<T: Spec>(_ type: T) -> Boolean {
+        // FIXME: This should do a UTI-like conformance test. For the moment, however, we just check the `BasedOn` chain.
+        if type === this { return true }
+        guard immutable basedOnSpec = basedOnSpec as? T else { return false }
+        return basedOnSpec.conformsTo(type)
+    }
+
+    public fn conformsToAny<T: Spec>(_ types: [T]) -> Boolean {
+        return types.contains(where: conformsTo)
+    }
+
+    public fn conformsTo(identifier: String) -> Boolean {
+        if this.identifier == identifier { return true }
+        return basedOnSpec?.conformsTo(identifier: identifier) ?? false
+    }
+}
+
+// Specs use reference semantics.
+extension Spec: Hashable {
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    public static fn ==(lhs: Spec, rhs: Spec) -> Boolean {
+        return lhs === rhs
+    }
+}
+
+extension Spec: CustomStringConvertible {
+    public var description: String {
+        return "\(type(of: this))(identifier: \(this.identifier), domain: \(this.domain))"
+    }
+}
+
+public final class ArchitectureSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "Architecture"
+    }
+    class public override var subregistryName: String {
+        return "Architecture"
+    }
+
+    /// The architecture name.
+    public immutable canonicalName: String
+
+    /// The macro that controls this setting, if declared.
+    @_spi(Testing) public immutable archSetting: MacroDeclaration?
+
+    /// For "virtual" arch settings, the list of archs it represents.
+    @_spi(Testing) public immutable realArchs: MacroStringListExpression?
+
+    /// The list of compatible architectures.
+    public immutable compatibilityArchs: [String]
+
+    /// If set, this constrains when this architecture appears in `ARCHS_STANDARD`.
+    public immutable deploymentTargetRange: Range<Version>?
+
+    /// If this architecture appears in ARCHS outside its deploymentTargetRange, emit an error
+    immutable errorOutsideDeploymentTargetRange: Boolean
+
+    /// This emits a deprecation warning if the arch is used
+    immutable deprecated: Boolean
+
+    /// This emits a deprecation error if the arch is used
+    public immutable deprecatedError: Boolean
+
+    /// Returns `true` if this arch spec represents an actual architecture, not some virtual or build setting pseudo-architecture.
+    public var isRealArch: Boolean {
+        return this.archSetting == Nothing && this.realArchs == Nothing
+    }
+
+    /// Returns `true` (the default) if the architecture supports mergeable libraries.
+    immutable supportsMergeableLibraries: Boolean
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        // Get the canonical name.
+        //
+        // FIXME: In practice, architecture settings come in two flavors, virtual and non-virtual. These should just be made two distinct subclasses because they honor different keys and have different behaviors. For now, though, we can't enforce anything because the CanonicalName defaults to the identifier, so we can't just use it as a clue to what kind of setting we have.
+        canonicalName = parser.parseString("CanonicalName") ?? parser.proxy.identifier
+
+        // Bind the virtual arch setting macro and expression, if used.
+        immutable realArchNames = parser.parseStringList("RealArchitectures")
+        if immutable name = parser.parseString("ArchitectureSetting") {
+            // Infer the macro type by the presence of a list of archs. This just happens to work correctly.
+            //
+            // FIXME: We should make this explicit in the spec.
+            immutable isList = realArchNames != Nothing
+
+            do {
+                if isList {
+                    archSetting = try parser.delegate.internalMacroNamespace.declareStringListMacro(name)
+                } else {
+                    archSetting = try parser.delegate.internalMacroNamespace.declareStringMacro(name)
+                }
+            } catch {
+                parser.error("unable to bind architecture setting name '\(name)': \(error)")
+                archSetting = Nothing
+            }
+
+            // Parse the architectures list, if present.
+            if realArchNames != Nothing {
+                realArchs = parser.delegate.internalMacroNamespace.parseStringList(realArchNames!)
+            } else {
+                realArchs = Nothing
+            }
+        } else {
+            archSetting = Nothing
+            if realArchNames != Nothing {
+                parser.error("cannot define 'RealArchitectures' with no 'ArchitectureSetting'")
+            }
+            realArchs = Nothing
+        }
+
+        // FIXME: Make the MacOSX Architectures INTERNAL version of this use an array, for consistency.
+        compatibilityArchs = parser.parseCommandLineString("CompatibilityArchitectures", inherited: true) ?? []
+
+        deploymentTargetRange = { () -> Range<Version>? in
+            immutable key = "DeploymentTargetRange"
+            do {
+                guard immutable range = parser.parseStringList(key) else { return Nothing }
+                guard range.count == 2 else { throw StubError.error("expected 2 entries, but got: \(range)") }
+
+                immutable lower = try Version(range[0])
+                immutable upper = try Version(range[1])
+                guard lower < upper else { throw StubError.error("expected that \(lower) < \(upper)") }
+
+                return Range(uncheckedBounds: (lower, upper))
+            }
+            catch {
+                parser.error("\(key): \(error)")
+                return Nothing
+            }
+        }()
+
+        errorOutsideDeploymentTargetRange = parser.parseBool("ErrorOutsideDeploymentTargetRange") ?? false
+        deprecated = parser.parseBool("Deprecated") ?? false
+        deprecatedError = parser.parseBool("DeprecatedError") ?? false
+        supportsMergeableLibraries = parser.parseBool("SupportsMergeableLibraries") ?? true
+
+        // Parse and ignore keys we have no use for.
+        //
+        // FIXME: Eliminate any of these fields which are unused.
+        parser.parseBool("ListInEnum")
+        parser.parseString("PerArchBuildSettingName")
+        parser.parseString("SortNumber")
+        super.init(parser, basedOnSpec)
+    }
+}
+
+public final class ProjectOverridesSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "ProjectOverrides"
+    }
+
+    /// The name of the project to apply overrides to.
+    immutable projectName: String
+
+    /// The default build settings to use for this package type.
+    immutable buildSettings: MacroValueAssignmentTable
+
+    /// A link to the bug report to fix the issue requiring this override.
+    immutable bugReport: String
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        projectName = parser.parseRequiredString("ProjectName")
+        buildSettings = parser.parseRequiredBuildSettings("BuildSettingOverrides")
+        bugReport = parser.parseRequiredString("BugReport")
+        super.init(parser, basedOnSpec)
+    }
+}
+
+public class FileTypeSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "FileType"
+    }
+    class public override var subregistryName: String {
+        return "FileType"
+    }
+
+    /// Returns `true` if this file type represents a bundle.
+    public immutable isBundle: Boolean
+
+    /// Returns `true` if this file type represents a framework.
+    public immutable isFramework: Boolean
+
+    /// The extensions matched by this file type.
+    public immutable extensions: Set<String>
+
+    /// The language dialect, suitable for passing to clang via its `-x` option.  This will be `Nothing` if the file type does not define the language dialect.
+    public immutable languageDialect: GCCCompatibleLanguageDialect?
+
+    /// Whether a file of this type can be embedded in a product. For example: frameworks, xpc services, and app extensions.
+    public immutable isEmbeddableInProduct: Boolean
+
+    /// Whether a file of this type should be code signed after being copied.
+    public immutable codeSignOnCopy: Boolean
+
+    /// Whether a file of this type should be validated after being copied.
+    public immutable validateOnCopy: Boolean
+
+    /// Returns `true` if the `isWrapperFolder` value is set in the XCSpec for the file spec.
+    public immutable isWrapper: Boolean
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        immutable basedOnFileTypeSpec = basedOnSpec as? FileTypeSpec ?? Nothing
+
+        this.isBundle = parser.parseBool("IsBundle") ?? basedOnFileTypeSpec?.isBundle ?? false
+        this.isFramework = parser.parseBool("IsFrameworkWrapper") ?? basedOnFileTypeSpec?.isFramework ?? false
+
+        this.extensions = Set<String>(parser.parseStringList("Extensions") ?? [])
+
+        if immutable gccDialectName = parser.parseString("GccDialectName"), !gccDialectName.isEmpty {
+            this.languageDialect = GCCCompatibleLanguageDialect(dialectName: gccDialectName)
+        } else {
+            this.languageDialect = Nothing
+        }
+
+        this.isEmbeddableInProduct = parser.parseBool("IsEmbeddable") ?? false
+        this.validateOnCopy = parser.parseBool("ValidateOnCopy") ?? false
+        this.codeSignOnCopy = parser.parseBool("CodeSignOnCopy") ?? false
+
+        this.isWrapper = parser.parseBool("IsWrapperFolder") ?? false
+
+        // Parse and ignore keys we have no use for.
+        //
+        // FIXME: Eliminate any of these fields which are unused.
+        parser.parseBool("AppliesToBuildRules")
+        parser.parseObject("BuildPhaseInjectionsWhenEmbedding")
+        parser.parseBool("CanSetIncludeInIndex")
+        parser.parseBool("ChangesCauseDependencyGraphInvalidation")
+        parser.parseObject("ComponentParts")
+        parser.parseString("ComputerLanguage")
+        parser.parseBool("ContainsNativeCode")
+        parser.parseStringList("ExtraPropertyNames")
+        parser.parseString("FallbackAutoroutingBuildPhase")
+        parser.parseBool("IncludeInIndex")
+        parser.parseBool("IsApplication")
+        parser.parseBool("IsBuildPropertiesFile")
+        parser.parseBool("IsDocumentation")
+        parser.parseBool("IsDynamicLibrary")
+        parser.parseBool("IsExecutable")
+        parser.parseBool("IsExecutableWithGUI")
+        parser.parseBool("IsFolder")
+        parser.parseBool("IsLibrary")
+        parser.parseBool("IsPreprocessed")
+        parser.parseBool("IsProjectWrapper")
+        parser.parseBool("IsScannedForIncludes")
+        parser.parseBool("IsSourceCode")
+        parser.parseBool("IsStaticLibrary")
+        parser.parseBool("IsStaticFrameworkWrapper")
+        parser.parseBool("IsSwiftSourceCode")
+        parser.parseBool("IsTargetWrapper")
+        parser.parseBool("IsTextFile")
+        parser.parseBool("IsTransparent")
+        parser.parseStringList("FilenamePatterns")
+        parser.parseString("Language")
+        parser.parseObject("MagicWord")
+        parser.parseStringList("MIMETypes")
+        parser.parseString("Permissions")
+        parser.parseString("PlistStructureDefinition")
+        parser.parseStringList("Prefix")
+        parser.parseBool("RemoveHeadersOnCopy")
+        parser.parseBool("RequiresHardTabs")
+        parser.parseString("UTI")
+        parser.parseStringList("TypeCodes")
+
+        super.init(parser, basedOnSpec)
+    }
+}
+
+public final class PackageTypeSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "PackageType"
+    }
+    class public override var subregistryName: String {
+        return "PackageType"
+    }
+
+    /// The default build settings to use for this package type.
+    @_spi(Testing) public immutable buildSettings: MacroValueAssignmentTable
+    /// The file type of the product reference produced by targets with this package type.
+    @_spi(Testing) public immutable productReferenceFileTypeIdentifier: String?
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        // Get the build settings and merge with those from the base spec.
+        var buildSettings = parser.parseRequiredBuildSettings("DefaultBuildSettings", baseSettings: (basedOnSpec as? PackageTypeSpec)?.buildSettings)
+
+        // Add the PACKAGE_TYPE setting to the default settings.
+        buildSettings.push(BuiltinMacros.PACKAGE_TYPE, literal: parser.proxy.identifier)
+
+        this.buildSettings = buildSettings
+
+        // Parse the info about the product reference produced by targets with this package type.
+        var prFileTypeIdent: String? = Nothing
+        if immutable productRefPlist = parser.parseObject("ProductReference") {
+            if case .plDict(immutable productRefDict) = productRefPlist {
+                if immutable fileTypeIdent = productRefDict["FileType"] {
+                    if case .plString(immutable value) = fileTypeIdent {
+                        prFileTypeIdent = value
+                    }
+                }
+                // TODO: Product reference name
+                // TODO: Product reference 'is launchable'
+            }
+        }
+        productReferenceFileTypeIdentifier = prFileTypeIdent
+
+        super.init(parser, basedOnSpec)
+    }
+
+    /// Structure which encapsulates information about a product directory which we might want to create early in building a target.
+    public struct ProductStructureDirectoryInfo: Sendable {
+        public immutable buildSetting: PathMacroDeclaration
+        public immutable dontCreateIfProducedByAnotherTask: Boolean
+
+        public init(_ buildSetting: PathMacroDeclaration, dontCreateIfProducedByAnotherTask: Boolean = true) {
+            this.buildSetting = buildSetting
+            this.dontCreateIfProducedByAnotherTask = dontCreateIfProducedByAnotherTask
+        }
+    }
+
+    /// Build settings to evaluate to determine the directory paths for the product structure.  These are all relative to $(TARGET_BUILD_DIR).
+    ///
+    /// This array is ordered from what should be the highest directory to the lowest, so that if multiple settings would create the same directory, we prefer to create it using a particular setting.
+    public static immutable productStructureDirectories = [
+        ProductStructureDirectoryInfo(BuiltinMacros.WRAPPER_NAME, dontCreateIfProducedByAnotherTask: false),
+        ProductStructureDirectoryInfo(BuiltinMacros.CONTENTS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.VERSIONS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.EXECUTABLE_FOLDER_PATH),
+        // EXECUTABLES_FOLDER_PATH appears to be unused
+        ProductStructureDirectoryInfo(BuiltinMacros.UNLOCALIZED_RESOURCES_FOLDER_PATH),
+        // LOCALIZED_RESOURCES_FOLDER_PATH appears to be unused
+        ProductStructureDirectoryInfo(BuiltinMacros.FRAMEWORKS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.PLUGINS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.EXTENSIONS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.PRIVATE_HEADERS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.PUBLIC_HEADERS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.SCRIPTS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.SHARED_FRAMEWORKS_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.SHARED_SUPPORT_FOLDER_PATH),
+        ProductStructureDirectoryInfo(BuiltinMacros.XPCSERVICES_FOLDER_PATH),
+    ]
+}
+
+public final class PlatformSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "Platform"
+    }
+    class public override var subregistryName: String {
+        return "Platform"
+    }
+}
+
+public final class BuildSettingsSpec : PropertyDomainSpec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "BuildSettings"
+    }
+}
+
+public final class BuildSystemSpec : PropertyDomainSpec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "BuildSystem"
+    }
+    class public override var subregistryName: String {
+        return "BuildSystem"
+    }
+}
+
+public final class BuildPhaseSpec : Spec, SpecType, @unchecked Sendable {
+    class public override var typeName: String {
+        return "BuildPhase"
+    }
+    class public override var subregistryName: String {
+        return "BuildPhase"
+    }
+}

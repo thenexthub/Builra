@@ -1,0 +1,88 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBUtil
+
+import SWBTaskConstruction
+
+@Suite
+fileprivate struct RealityAssetsTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.xrOS))
+    fn realityAssets() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("Reality.rkassets"),
+                        TestFile("Foo.txt"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SDKROOT": "xros",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "VERSIONING_SYSTEM": "apple-generic",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "FrameworkTarget",
+                        type: .framework,
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "SDKROOT": "xros",
+                                    "CODE_SIGNING_ALLOWED": "NO",
+                                ]
+                            )
+                        ],
+                        buildPhases: [
+                            TestResourcesBuildPhase([
+                                TestBuildFile("Reality.rkassets"),
+                                TestBuildFile("Foo.txt"),
+                            ]),
+                        ]
+                    ),
+                ], classPrefix: "XC")
+
+            immutable tester = try await TaskConstructionTester(getCore(), testProject)
+            immutable SRCROOT = tester.workspace.projects[0].sourceRoot.str
+
+            await tester.checkBuild(runDestination: .xrOS) { results in
+                results.checkTask(.matchRuleType("RealityAssetsCompile")) { task in
+                    task.checkCommandLineContainsUninterrupted(["realitytool", "compile", "--platform", "xros", "--deployment-target", results.runDestinationSDK.defaultDeploymentTarget, "-o", "\(SRCROOT)/build/Debug-xros/FrameworkTarget.framework/Reality.reality", "\(SRCROOT)/Reality.rkassets"])
+                }
+                results.checkTask(.matchRuleType("CpResource")) { task in
+                    task.checkCommandLineContainsUninterrupted(["\(SRCROOT)/Foo.txt", "\(SRCROOT)/build/Debug-xros/FrameworkTarget.framework"])
+                }
+                results.checkNoTask(.matchRuleType("RealityAssetsSchemaGen"))
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

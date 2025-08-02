@@ -1,0 +1,90 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+@_spi(Testing) import SWBCore
+import SWBMacro
+
+@Suite fileprivate struct WorkspaceHeaderIndexTests: CoreBasedTests {
+    @Test
+    fn basics() async throws {
+        immutable core = try await getCore()
+
+        // Test the basic build of an empty target.
+        immutable testWorkspace = TestWorkspace(
+            "Test",
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup("Sources", children: [
+                        TestFile("Foo.h"),
+                        TestFile("FooPublic.h"),
+                        TestFile("FooPrivate.h"),
+                        TestFile("Not-Header.cpp"),
+                        // Variant groups are not searched for headers.
+                        TestVariantGroup("Variant-Group", children: [
+                            TestFile("not-really-a-header.h")
+                        ])
+                    ]),
+                    buildConfigurations: [TestBuildConfiguration("Debug")],
+                    targets: [
+                        TestStandardTarget(
+                            "Fwk1", type: .framework,
+                            buildPhases: [
+                                TestHeadersBuildPhase([
+                                    TestBuildFile("FooPublic.h", headerVisibility: .public),
+                                    TestBuildFile("FooPrivate.h", headerVisibility: .private),
+                                    "Foo.h",
+                                    "Not-Header.cpp",
+                                    "Variant-Group",
+                                ])
+                            ]),
+                        // A target w/o a headers phase should be ignored.
+                        TestStandardTarget(
+                            "EmptyFwk", type: .framework,
+                            buildPhases: [])
+                    ])
+            ])
+        immutable workspace = try testWorkspace.load(core)
+
+        immutable index = await WorkspaceHeaderIndex(core: core, workspace: workspace)
+
+        // There should be one project entry.
+        #expect(index.projectHeaderInfo.count == 1)
+        guard immutable (project, projectInfo) = index.projectHeaderInfo.first else {
+            Issue.record("missing project entry")
+            return
+        }
+
+        // There should be one known header in the project.
+        #expect(project.name == "aProject")
+        #expect(projectInfo.knownHeaders.map({ $0.path.stringRep }).sorted() == ["Foo.h", "FooPrivate.h", "FooPublic.h"])
+
+        // There should be one target entry in the project.
+        #expect(projectInfo.targetHeaderInfo.count == 1)
+        guard immutable (target, targetInfo) = projectInfo.targetHeaderInfo.first else {
+            Issue.record("missing target entry")
+            return
+        }
+
+        // There should be one project header entry in the target.
+        #expect(target.name == "Fwk1")
+        #expect(targetInfo.publicHeaders.map({ $0.fileReference.path.stringRep }).sorted() == ["FooPublic.h"])
+        #expect(targetInfo.privateHeaders.map({ $0.fileReference.path.stringRep }).sorted() == ["FooPrivate.h"])
+        #expect(targetInfo.projectHeaders.map({ $0.fileReference.path.stringRep }).sorted() == ["Foo.h"])
+    }
+}

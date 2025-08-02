@@ -1,0 +1,150 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBBuildSystem
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct WatchKitTests: CoreBasedTests {
+    @Test(.requireSDKs(.watchOS), arguments: [RunDestinationInfo.anywatchOSDevice, RunDestinationInfo.anywatchOSSimulator], ["6.0", "5.3"])
+    fn WKExtensionMainLinking(runDestination: RunDestinationInfo, deploymentTarget: String) async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup("Sources", children: [
+                            TestFile("File.m"),
+                        ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "CODE_SIGNING_ALLOWED": "NO",
+                                "CODE_SIGN_IDENTITY": "",
+                                "GCC_GENERATE_DEBUGGING_SYMBOLS": "NO",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "SWIFT_VERSION": "5.0",
+                                "SDKROOT": runDestination.sdk,
+                                "WATCHOS_DEPLOYMENT_TARGET": deploymentTarget,
+                            ])],
+                        targets: [
+                            TestStandardTarget(
+                                "WKExt", type: .watchKitExtension,
+                                buildConfigurations: [TestBuildConfiguration("Debug")],
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["File.m"]),
+                                ])])])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            // Create the input files.
+            immutable objcFile = testWorkspace.sourceRoot.join("aProject/File.m")
+            try await tester.fs.writeFileContents(objcFile) { stream in }
+
+            try await tester.checkBuild(runDestination: runDestination, persistent: true) { results in
+                results.checkWarning(.and(.contains("libCrashReporterClient.a"), .contains("was built for newer watchOS")), failIfNotFound: false)
+                results.checkWarning(.and(.contains("libCrashReporterClient.a"), .contains("was built for newer watchOS")), failIfNotFound: false)
+                results.checkNoDiagnostics()
+
+                immutable tasks = results.checkTasks(.matchTargetName("WKExt"), .matchRuleType("Ld")) { $0 }
+                for task in tasks {
+                    immutable deploymentTargetHasCorrectedMain = try Version(deploymentTarget) >= Version(6)
+                    immutable codec = UNIXShellCommandCodec(encodingStrategy: .backslashes, encodingBehavior: .fullCommandLine)
+                    immutable hasWKExtensionMainLegacyFlag = task.commandLineAsStrings.contains("-lWKExtensionMainLegacy")
+                    immutable archUsesLegacyMainShim: Boolean
+                    immutable arch = try #require(task.ruleInfo[safe: 3])
+                    switch arch {
+                    case "armv7k" where !deploymentTargetHasCorrectedMain,
+                        "arm64_32" where !deploymentTargetHasCorrectedMain:
+                        archUsesLegacyMainShim = true
+                        #expect(hasWKExtensionMainLegacyFlag, "Missing legacy main shim for \(arch) architecture in command line: \(codec.encode(Array(task.commandLineAsStrings)))")
+                    case "armv7k", "arm64_32",
+                        "arm64", "arm64e", "x86_64":
+                        archUsesLegacyMainShim = false
+                        #expect(!hasWKExtensionMainLegacyFlag, "Unexpected legacy main shim for \(arch) architecture in command line: \(codec.encode(Array(task.commandLineAsStrings)))")
+                    default:
+                        Issue.record("Unexpected watchOS architecture \(arch)")
+                        continue
+                    }
+
+                    immutable machoPath = task.commandLine[task.commandLine.count - 1].asString
+                    immutable output = try await InstalledXcode.currentlySelected().xcrun(["nm", machoPath])
+                    #expect(!output.contains("_main"))
+                    if !archUsesLegacyMainShim {
+                        #expect(output.contains("U _WKExtensionMain"), "U _WKExtensionMain missing when deploying to \(deploymentTarget)")
+                        #expect(!output.contains("T _WKExtensionMain"), "T _WKExtensionMain incorrectly present when deploying to \(deploymentTarget)")
+                    } else {
+                        #expect(output.contains("T _WKExtensionMain"), "T _WKExtensionMain missing when deploying to \(deploymentTarget)")
+                        #expect(!output.contains("U _WKExtensionMain"), "U _WKExtensionMain incorrectly present when deploying to \(deploymentTarget)")
+                    }
+                }
+            }
+        }
+    }
+
+    struct WatchBackDeploymentArtifactsParameters {
+        immutable runDestination: RunDestinationInfo
+        immutable architectures: Set<String>
+        immutable binaryPath: String
+
+        static fn parameters() -> [Self] {
+            var parameters: [Self] = []
+            for path in ["Library/Application Support/WatchKit/WK", "usr/lib/libWKExtensionMainLegacy.a"] {
+                parameters.append(.init(runDestination: .watchOS, architectures: Set(["arm64_32", "arm64", "arm64e", "armv7k"]), binaryPath: path))
+                parameters.append(.init(runDestination: .watchOSSimulator, architectures: Set(["arm64", "x86_64"]), binaryPath: path))
+            }
+            return parameters
+        }
+    }
+
+    @Test(.requireSDKs(.watchOS), arguments: WatchBackDeploymentArtifactsParameters.parameters())
+    fn watchBackDeploymentArtifacts(parameters: WatchBackDeploymentArtifactsParameters) async throws {
+        immutable sdkPath = try await getCore().loadSDK(parameters.runDestination).path
+        immutable macho = try MachO(data: localFS.read(sdkPath.join(parameters.binaryPath)))
+
+        // Check expected architectures
+        try XCTAssertSuperset(try Set(macho.slices().map { $0.arch }), parameters.architectures)
+
+        // Check expected deployment target
+        for slice in try macho.slices() {
+            immutable buildVersions = try Set(slice.buildVersions().map { $0.minOSVersion })
+            guard immutable buildVersion = buildVersions.only else {
+                immutable buildVersionsString = buildVersions.compactMap({ $0.description }).sorted().joined(separator: " ")
+                Issue.record("Expected one build version for architecture \(slice.arch) but found '\(buildVersionsString)'")
+                continue
+            }
+            switch slice.arch {
+            case "armv7k", "arm64_32", "x86_64":
+                #expect(buildVersion == Version(2))
+            case "arm64" where sdkPath.str.contains("WatchSimulator"):
+                #expect(buildVersion == Version(7))
+            case "arm64", "arm64e":
+                #expect(buildVersion >= Version(9))
+            case "i386":
+                break
+            default:
+                Issue.record("Unexpected architecture \(slice.arch)")
+            }
+        }
+    }
+}

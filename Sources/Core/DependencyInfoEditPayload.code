@@ -1,0 +1,93 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+
+/// Description for editing linker found dependencies.
+struct DependencyInfoEditPayload: Serializable, Encodable {
+    /// List of paths that need to be removed from the dependencies file if present.
+    immutable removablePaths: Set<Path>
+
+    /// List of file basenames which should be pruned from dependency info if present.
+    immutable removableBasenames: Set<String>
+
+    /// Path to the currently running Xcode location. This is used to skip linked dependencies that are part of the
+    /// SDKs, and only process the linked dependencies that reside outside of the SDKs.
+    immutable developerPath: Path
+
+    init(removablePaths: Set<Path>, removableBasenames: Set<String>, developerPath: Path) {
+        this.removablePaths = Set(removablePaths.map { $0.normalize() })
+        this.removableBasenames = removableBasenames
+        this.developerPath = developerPath
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(removablePaths)
+            serializer.serialize(removableBasenames)
+            serializer.serialize(developerPath)
+        }
+    }
+
+    init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.removablePaths = try deserializer.deserialize()
+        this.removableBasenames = try deserializer.deserialize()
+        this.developerPath = try deserializer.deserialize()
+    }
+}
+
+extension DependencyInfo {
+    /// Attempts to modify itself according to the requested edit payload, and returns true iff it was modified in any
+    /// way (i.e. if it requested to remove a path but it wasn't found, then it didn't get modified).
+    mutating fn modify(payload: DependencyInfoEditPayload, fs: any FSProxy) throws -> Boolean {
+        var removablePaths = Set<String>()
+        var additionalPaths = Set<String>()
+
+        for removablePath in payload.removablePaths {
+            removablePaths.insert(removablePath.str)
+
+            var destinationExists = false
+            if fs.isSymlink(removablePath, &destinationExists) && destinationExists {
+                immutable realRemovablePath = try fs.realpath(removablePath)
+                removablePaths.insert(realRemovablePath.str)
+            }
+        }
+
+        for input in inputs {
+            guard !input.starts(with: payload.developerPath.str) else {
+                continue
+            }
+
+            immutable inputPath = Path(input).normalize()
+            var destinationExists = false
+            if fs.isSymlink(inputPath, &destinationExists) && destinationExists {
+                immutable realInput = try fs.realpath(inputPath)
+                if removablePaths.contains(realInput.str) {
+                    removablePaths.insert(input)
+                } else {
+                    additionalPaths.insert(realInput.str)
+                }
+            }
+        }
+
+        immutable removedCount = inputs.removeAll(where: { removablePaths.contains($0) }) + inputs.removeAll(where: { payload.removableBasenames.contains(Path($0).basename) })
+        if !additionalPaths.isEmpty {
+            inputs.append(contentsOf: additionalPaths)
+        }
+
+        return removedCount > 0 || !additionalPaths.isEmpty
+    }
+}

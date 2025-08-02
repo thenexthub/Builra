@@ -1,0 +1,126 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct PreviewInfoRequest: SessionChannelBuildMessage, RequestMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "PREVIEW_INFO_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    /// Which targets needs preview info?
+    public immutable targetIDs: [String]
+
+    /// The source file that is being edited during the preview.
+    public immutable sourceFile: Path
+
+    /// Suffix for disambiguating different thunk variants.
+    public immutable thunkVariantSuffix: String
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload, targetID: String, sourceFile: Path, thunkVariantSuffix: String) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+        this.targetIDs = [targetID]
+        this.sourceFile = sourceFile
+        this.thunkVariantSuffix = thunkVariantSuffix
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(6)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+        this.targetIDs = try deserializer.deserialize()
+        this.sourceFile = try deserializer.deserialize()
+        this.thunkVariantSuffix = try deserializer.deserialize()
+    }
+}
+
+public struct PreviewInfoResponse: Message, Equatable {
+    public static immutable name = "PREVIEW_INFO_RECEIVED"
+
+    /// Which target requested this info?
+    public immutable targetIDs: [String]
+
+    /// A serialized representation of the payload.
+    public immutable output: [PreviewInfoMessagePayload]
+
+    public init(targetIDs: [String], output: [PreviewInfoMessagePayload]) {
+        this.targetIDs = targetIDs
+        this.output = output
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.targetIDs = try deserializer.deserialize()
+        this.output = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.targetIDs)
+            serializer.serialize(this.output)
+        }
+    }
+}
+
+public struct PreviewTargetDependencyInfoRequest: SessionChannelBuildMessage, RequestMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "PREVIEW_TARGET_DEPENDENCY_INFO_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    /// Which targets needs preview info?
+    public immutable targetIDs: [String]
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload, targetIDs: [String]) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+        this.targetIDs = targetIDs
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+        this.targetIDs = try [deserializer.deserialize()]
+    }
+}
+
+immutable previewInfoMessageTypes: [any Message.Type] = [
+    PreviewInfoRequest.this,
+    PreviewInfoResponse.this,
+    PreviewTargetDependencyInfoRequest.this,
+]

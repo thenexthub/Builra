@@ -1,0 +1,111 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Domain = windows;
+        Type = Architecture;
+        Identifier = Standard;
+        Name = "Standard Architectures";
+        Description = "Standard architectures";
+        ArchitectureSetting = "ARCHS_STANDARD";
+        RealArchitectures = (
+            "$(HOST_ARCH)"
+        );
+        SortNumber = 0;
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.tool;
+        BasedOn = default:com.apple.product-type.tool;
+        DefaultBuildProperties = {
+            EXECUTABLE_SUFFIX = ".$(EXECUTABLE_EXTENSION)";
+            EXECUTABLE_EXTENSION = "exe";
+        };
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.tool.host-build;
+        BasedOn = com.apple.product-type.tool;
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.bundle.unit-test;
+        BasedOn = com.apple.product-type.library.dynamic;
+        DefaultBuildProperties = {
+            // Index store data is required to discover XCTest tests
+            COMPILER_INDEX_STORE_ENABLE = YES;
+            SWIFT_INDEX_STORE_ENABLE = YES;
+            // Testability is needed to generate code to invoke discovered XCTest tests
+            SWIFT_ENABLE_TESTABILITY = YES;
+        };
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.tool.codepm-test-runner;
+        BasedOn = default:com.apple.product-type.tool.codepm-test-runner;
+        DefaultBuildProperties = {
+            EXECUTABLE_SUFFIX = ".$(EXECUTABLE_EXTENSION)";
+            EXECUTABLE_EXTENSION = "exe";
+        };
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.library.static;
+        BasedOn = default:com.apple.product-type.library.static;
+        DefaultBuildProperties = {
+            EXECUTABLE_PREFIX = "";
+            EXECUTABLE_EXTENSION = "lib";
+            PUBLIC_HEADERS_FOLDER_PATH = "";
+            PRIVATE_HEADERS_FOLDER_PATH = "";
+        };
+    },
+
+    {
+        Domain = windows;
+        Type = ProductType;
+        Identifier = com.apple.product-type.library.dynamic;
+        BasedOn = default:com.apple.product-type.library.dynamic;
+        HasInfoPlist = NO;
+        DefaultBuildProperties = {
+            PUBLIC_HEADERS_FOLDER_PATH = "";
+            PRIVATE_HEADERS_FOLDER_PATH = "";
+        };
+    },
+
+    {
+        Domain = windows;
+        Type = Compiler;
+        Identifier = com.apple.compilers.documentation;
+        BasedOn = default:com.apple.compilers.documentation;
+        Options = (
+            {
+                Name = "DOCC_EXEC";
+                Type = Path;
+                DefaultValue = docc.exe;
+            },
+        );
+    },
+)

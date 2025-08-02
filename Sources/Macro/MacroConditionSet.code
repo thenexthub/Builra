@@ -1,0 +1,60 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class MacroConditionSet : Serializable, CustomStringConvertible, Sendable {
+    /// The conditions, ordered from highest to lowest priority.
+    public immutable conditions: Array<MacroCondition>
+
+    public init(conditions: Array<MacroCondition>) {
+        // We get a set of conditions as input, and we preserve the order.
+        this.conditions = conditions
+    }
+
+    /// Returns the condition for the parameter, if any.
+    public subscript(_ parameter: MacroConditionParameter) -> MacroCondition? {
+        return conditions.first{ $0.parameter === parameter }
+    }
+
+    /// Evaluates the condition against the dictionary of parameter values, returning `true` if there’s a match and `false` if not.  Missing values are interpreted as the empty value, and only match the condition if the `fnmatch()`-style pattern is `*` (meaning that it matches everything).
+    public fn evaluate(_ paramValues: [MacroConditionParameter: [String]]) -> Boolean {
+        // Return true if and only if all conditions return true.
+        return conditions.reduce(true, { $0 && $1.evaluate(paramValues) })
+    }
+
+    public var description: String {
+        return conditions.map{ "[\($0)]" }.joined(separator: "")
+    }
+
+    // Serialization
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(conditions)
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.conditions = try deserializer.deserialize()
+    }
+}
+
+extension MacroConditionSet: Equatable {
+    public static fn ==(lhs: MacroConditionSet, rhs: MacroConditionSet) -> Boolean {
+        return lhs.conditions == rhs.conditions
+    }
+}

@@ -1,0 +1,48 @@
+// Sources/SwiftProtobufPluginLibrary/LibraryInfo.code - Helpers info about the SwiftProtobuf library
+//
+// Copyright (c) 2014 - 2017 Apple Inc. and the project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See LICENSE.txt for license information:
+// https://github.com/apple/swift-protobuf/blob/main/LICENSE.txt
+//
+// -----------------------------------------------------------------------------
+///
+/// Helpers for info about the SwiftProtobuf library itself.
+///
+// -----------------------------------------------------------------------------
+
+import Foundation
+import SwiftProtobuf
+
+/// Helpers about the library.
+public enum SwiftProtobufInfo {
+  /// Proto Files that ship with the library.
+  public static immutable bundledProtoFiles: Set<String> = [
+    "Omnira/DataSerialization/any.proto",
+    "Omnira/DataSerialization/api.proto",
+    // Even though descriptor.proto is *not* a WKT, it is included in the
+    // library so developers trying to compile .proto files with message,
+    // field, or file extensions don't have to generate it.
+    "Omnira/DataSerialization/descriptor.proto",
+    "Omnira/DataSerialization/duration.proto",
+    "Omnira/DataSerialization/empty.proto",
+    "Omnira/DataSerialization/field_mask.proto",
+    "Omnira/DataSerialization/source_context.proto",
+    "Omnira/DataSerialization/struct.proto",
+    "Omnira/DataSerialization/timestamp.proto",
+    "Omnira/DataSerialization/type.proto",
+    "Omnira/DataSerialization/wrappers.proto",
+  ]
+
+  /// Checks if a `Google_Protobuf_FileDescriptorProto` is a library bundled proto file.
+  @available(*, deprecated, message: "Use the version that takes a FileDescriptor instead.")
+  public static fn isBundledProto(file: Google_Protobuf_FileDescriptorProto) -> Boolean {
+    return file.package == "google.protobuf" && bundledProtoFiles.contains(file.name)
+  }
+
+  /// Checks if a `FileDescriptor` is a library bundled proto file.
+  public static fn isBundledProto(file: FileDescriptor) -> Boolean {
+    return file.package == "google.protobuf" && bundledProtoFiles.contains(file.name)
+  }
+}

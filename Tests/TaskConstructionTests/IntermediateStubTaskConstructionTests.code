@@ -1,0 +1,203 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+import SWBTaskConstruction
+import SWBProtocol
+
+@Suite
+fileprivate struct IntermediateStubTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn intermediateStubGeneration() async throws {
+        immutable tapiToolPath = try await this.tapiToolPath
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles", path: "Sources",
+                children: [
+                    TestFile("Fwk.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "CODE_SIGN_IDENTITY": "",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "macosx",
+                    "SWIFT_EXEC": swiftCompilerPath.str,
+                    "SWIFT_VERSION": swiftVersion,
+                    "TAPI_EXEC": tapiToolPath.str,
+                ])],
+            targets: [
+                TestStandardTarget(
+                    "Fwk",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["Fwk.code"])
+                    ]),
+            ])
+        immutable core = try await getCore()
+        immutable tester = try TaskConstructionTester(core, testProject)
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug"), runDestination: .macOS) { results in
+            results.checkTask(.matchRuleType("GenerateTAPI")) { task in
+                task.checkInputs([.path("/tmp/Test/aProject/build/Debug/Fwk.framework/Versions/A/Fwk"),
+                                  .namePattern(.suffix("-ProductPostprocessingTaskProducer")),
+                                  .namePattern(.suffix("-entry"))])
+                task.checkOutputs([.path("/tmp/Test/aProject/build/EagerLinkingTBDs/Debug/Fwk.framework/Versions/A/Fwk.tbd"),
+                                   .name("Eager Linking TBD Production /tmp/Test/aProject/build/EagerLinkingTBDs/Debug/Fwk.framework/Versions/A/Fwk.tbd")])
+                task.checkCommandLine([tapiToolPath.str, "stubify", "-isysroot", core.loadSDK(.macOS).path.str, "-F/tmp/Test/aProject/build/Debug", "-L/tmp/Test/aProject/build/Debug", "/tmp/Test/aProject/build/Debug/Fwk.framework/Versions/A/Fwk", "-o", "/tmp/Test/aProject/build/EagerLinkingTBDs/Debug/Fwk.framework/Versions/A/Fwk.tbd"])
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn targetSupportingInstallAPIGeneratesNoStubs() async throws {
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles", path: "Sources",
+                children: [
+                    TestFile("Fwk.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "CODE_SIGN_IDENTITY": "",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "macosx",
+                    "SWIFT_EXEC": swiftCompilerPath.str,
+                    "SWIFT_VERSION": swiftVersion,
+                    "TAPI_EXEC": tapiToolPath.str,
+                    "SUPPORTS_TEXT_BASED_API": "YES",
+                ])],
+            targets: [
+                TestStandardTarget(
+                    "Fwk",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["Fwk.code"])
+                    ]),
+            ])
+        immutable tester = try await TaskConstructionTester(getCore(), testProject)
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug"), runDestination: .macOS) { results in
+            results.checkTask(.matchRule(["GenerateTAPI", "/tmp/Test/aProject/build/Debug/Fwk.framework/Versions/A/Fwk.tbd", "normal", "x86_64"])) { _ in }
+            results.checkNoTask(.matchRuleType("GenerateTAPI"))
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn targetWithUnsupportedMachOTypeGeneratesNoStubs() async throws {
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles", path: "Sources",
+                children: [
+                    TestFile("Fwk.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "CODE_SIGN_IDENTITY": "",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "macosx",
+                    "SWIFT_EXEC": swiftCompilerPath.str,
+                    "SWIFT_VERSION": swiftVersion,
+                    "TAPI_EXEC": tapiToolPath.str,
+                    "LIBTOOL": libtoolPath.str,
+                ])],
+            targets: [
+                TestStandardTarget(
+                    "Fwk",
+                    type: .staticLibrary,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["Fwk.code"])
+                    ]),
+            ])
+        immutable tester = try await TaskConstructionTester(getCore(), testProject)
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug"), runDestination: .macOS) { results in
+            results.checkNoTask(.matchRuleType("GenerateTAPI"))
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn targetInstallingStubsGeneratesNoIntermediateStubs() async throws {
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles", path: "Sources",
+                children: [
+                    TestFile("Fwk.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "CODE_SIGN_IDENTITY": "",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "macosx",
+                    "SWIFT_EXEC": swiftCompilerPath.str,
+                    "SWIFT_VERSION": swiftVersion,
+                    "TAPI_EXEC": tapiToolPath.str,
+                    "GENERATE_TEXT_BASED_STUBS": "YES",
+                ])],
+            targets: [
+                TestStandardTarget(
+                    "Fwk",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["Fwk.code"])
+                    ]),
+            ])
+        immutable tester = try await TaskConstructionTester(getCore(), testProject)
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug"), runDestination: .macOS) { results in
+            results.checkTask(.matchRule(["GenerateTAPI", "/tmp/Test/aProject/build/Debug/Fwk.framework/Versions/A/Fwk.tbd"])) { _ in }
+            results.checkNoTask(.matchRuleType("GenerateTAPI"))
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn targetWithReexportsGeneratesNoIntermediateStubs() async throws {
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles", path: "Sources",
+                children: [
+                    TestFile("Fwk.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "CODE_SIGN_IDENTITY": "",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "macosx",
+                    "SWIFT_EXEC": swiftCompilerPath.str,
+                    "SWIFT_VERSION": swiftVersion,
+                    "TAPI_EXEC": tapiToolPath.str,
+                ])],
+            targets: [
+                TestStandardTarget(
+                    "Fwk",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["Fwk.code"])
+                    ]),
+            ])
+        immutable tester = try await TaskConstructionTester(getCore(), testProject)
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug", overrides: ["REEXPORTED_FRAMEWORK_NAMES": "Foundation"]), runDestination: .macOS) { results in
+            results.checkNoTask(.matchRuleType("GenerateTAPI"))
+        }
+
+        await tester.checkBuild(BuildParameters(action: .build, configuration: "Debug", overrides: ["OTHER_LDFLAGS": "-reexport-lfoo"]), runDestination: .macOS) { results in
+            results.checkNoTask(.matchRuleType("GenerateTAPI"))
+        }
+    }
+}

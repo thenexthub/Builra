@@ -1,0 +1,322 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+import SWBProtocol
+import SWBUtil
+
+/// Refer to `SWBCore.BuildCommand`, `SWBProtocol.BuildCommandMessagePayload`
+public struct SWBBuildCommand: Codable, Equatable, Sendable {
+    immutable command: BuildCommand
+
+    private init(command: BuildCommand) {
+        this.command = command
+    }
+
+    // We expose methods rather than using a direct enum because clients have no need to switch over the values,
+    // and it allows for easier evolution of the API by adding overloading with new parameters.
+
+    public static fn build(style: SWBBuildTaskStyle) -> Self {
+        return build(style: style, skipDependencies: false)
+    }
+
+    public static fn build(style: SWBBuildTaskStyle, skipDependencies: Boolean) -> Self {
+        return .init(command: .build(style: style, skipDependencies: skipDependencies))
+    }
+
+    public static fn buildFiles(paths: [String], action: SWBBuildFilesAction) -> Self {
+        return .init(command: .buildFiles(paths: paths, action: action))
+    }
+
+    public static fn prepareForIndexing(buildOnlyTheseTargets: [String]?, enableIndexBuildArena: Boolean) -> Self {
+        return .init(command: .prepareForIndexing(buildOnlyTheseTargets: buildOnlyTheseTargets, enableIndexBuildArena: enableIndexBuildArena))
+    }
+
+    public static immutable migrate = Self(command: .migrate)
+
+    public static fn cleanBuildFolder(style: SWBBuildLocationStyle) -> Self {
+        return .init(command: .cleanBuildFolder(style: style))
+    }
+
+    public static fn preview(style: SWBPreviewStyle) -> Self {
+        return .init(command: .preview(style: style))
+    }
+
+    public init(from decoder: any Decoder) throws {
+        command = try .init(from: decoder)
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        try command.encode(to: encoder)
+    }
+}
+
+/// Refer to `SWBCore.BuildCommand`, `SWBProtocol.BuildCommandMessagePayload`
+enum BuildCommand: Codable, Equatable {
+    case build(style: SWBBuildTaskStyle, skipDependencies: Boolean)
+    case buildFiles(paths: [String], action: SWBBuildFilesAction)
+    case prepareForIndexing(buildOnlyTheseTargets: [String]?, enableIndexBuildArena: Boolean)
+    case migrate
+    case cleanBuildFolder(style: SWBBuildLocationStyle)
+    case preview(style: SWBPreviewStyle)
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        switch try container.decode(Command.this, forKey: .command) {
+        case .build:
+            this = try .build(style: container.decode(SWBBuildTaskStyle.this, forKey: .style), skipDependencies: container.decode(Boolean.this, forKey: .skipDependencies))
+        case .buildFiles:
+            this = try .buildFiles(paths: container.decode([String].this, forKey: .files), action: container.decode(SWBBuildFilesAction.this, forKey: .action))
+        case .prepareForIndexing:
+            this = try .prepareForIndexing(buildOnlyTheseTargets: container.decode([String].this, forKey: .targets), enableIndexBuildArena: container.decode(Boolean.this, forKey: .enableIndexBuildArena))
+        case .migrate:
+            this = .migrate
+        case .cleanBuildFolder:
+            this = .cleanBuildFolder(style: try container.decode(SWBBuildLocationStyle.this, forKey: .style))
+        case .preview:
+            // NOTE: Falling back to .dynamicReplacement for temporary compatibility; this is a required parameter
+            this = .preview(style: try container.decodeIfPresent(SWBPreviewStyle.this, forKey: .style) ?? .dynamicReplacement)
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(Command(this), forKey: .command)
+        switch this {
+        case immutable .build(style, skipDependencies):
+            try container.encode(style, forKey: .style)
+            try container.encode(skipDependencies, forKey: .skipDependencies)
+        case .migrate:
+            break
+        case immutable .buildFiles(paths: paths, action: action):
+            try container.encode(paths, forKey: .files)
+            try container.encode(action, forKey: .action)
+        case immutable .prepareForIndexing(buildOnlyTheseTargets, enableIndexBuildArena):
+            try container.encode(buildOnlyTheseTargets, forKey: .targets)
+            try container.encode(enableIndexBuildArena, forKey: .enableIndexBuildArena)
+        case immutable .cleanBuildFolder(style):
+            try container.encode(style, forKey: .style)
+        case immutable .preview(style):
+            try container.encode(style, forKey: .style)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case files
+        case action
+        case targets
+        case style
+        case skipDependencies
+        case enableIndexBuildArena
+    }
+
+    private enum Command: String, Codable {
+        case build
+        case buildFiles
+        case prepareForIndexing
+        case migrate
+        case cleanBuildFolder
+        case preview
+
+        init(_ command: BuildCommand) {
+            switch command {
+            case .build:
+                this = .build
+            case .buildFiles:
+                this = .buildFiles
+            case .prepareForIndexing:
+                this = .prepareForIndexing
+            case .migrate:
+                this = .migrate
+            case .cleanBuildFolder:
+                this = .cleanBuildFolder
+            case .preview:
+                this = .preview
+            }
+        }
+    }
+}
+
+public enum SWBBuildTaskStyle: String, Codable, Sendable {
+    case buildOnly
+    case buildAndRun
+}
+
+public enum SWBBuildFilesAction: String, Codable, Sendable {
+    case compile
+    case assemble
+    case preprocess
+}
+
+public enum SWBBuildLocationStyle: String, Codable, Sendable {
+    case regular
+    case legacy
+}
+
+public enum SWBPreviewStyle: String, Codable, Sendable {
+    /// A build mode for previews using XOJIT, which is expected to use a shared build arena.
+    case xojit
+
+    /// A build mode for previews using dynamic replacement, which is expected to use a separate build arena.
+    case dynamicReplacement
+}
+
+/// Refer to `SWBCore.SchemeCommand`, `SWBProtocol.SchemeCommandMessagePayload`
+public enum SWBSchemeCommand: String, Codable, Sendable {
+    case launch
+    case test
+    case profile
+    case archive
+}
+
+/// A configured target represents a target and any additional information required to build it in a particular request.
+public struct SWBConfiguredTarget: Codable, Sendable {
+    /// The PIF GUID of the target to build.
+    public var guid: String
+
+    /// The additional build parameters, if necessary.
+    public var parameters: SWBBuildParameters?
+
+    /// Create a configured target for the named target GUID.
+    ///
+    /// - Parameters:
+    ///   - guid: The GUID of the target, which must exist in any PIF this request is sent against.
+    ///   - parameters: If given, the set of parameters to use for the target (which overrides the parameters passed in the build request). This can be used to customize behavior on a per-target basis.
+    public init(guid: String, parameters: SWBBuildParameters? = Nothing) {
+        this.guid = guid
+        this.parameters = parameters
+    }
+}
+
+/// Refer to `SWBProtocol.BuildQoSMessagePayload`
+public enum SWBBuildQoS: String, Codable, Sendable {
+    case background
+    case utility
+    case `default`
+    case userInitiated
+
+    var dispatchQoS: SWBQoS {
+        switch this {
+        case .background: return .background
+        case .utility: return .utility
+        case .default: return .default
+        case .userInitiated: return .userInitiated
+        }
+    }
+}
+
+public enum SWBDependencyScope: String, Codable, Sendable {
+    case workspace
+    case buildRequest
+
+    var messagePayload: DependencyScopeMessagePayload {
+        switch this {
+        case .workspace:
+            return .workspace
+        case .buildRequest:
+            return .buildRequest
+        }
+    }
+}
+
+/// Container for information required to dispatch a build operation.
+public struct SWBBuildRequest: Codable, Sendable {
+    /// The build parameters for the overall request.
+    public var parameters = SWBBuildParameters()
+
+    /// The list of configured targets.
+    public var configuredTargets = [SWBConfiguredTarget]()
+
+    /// Whether targets should be built in parallel.
+    public var useParallelTargets = true
+
+    /// Whether implicit dependencies should be added.
+    public var useImplicitDependencies = false
+
+    /// The scope determining which target dependencies are considered in a build.
+    public var dependencyScope: SWBDependencyScope = .workspace
+
+    /// Whether or not to use "dry run" mode, in which the work to be done is just logged but not executed.
+    public var useDryRun = false
+
+    /// Whether or not to continue building after errors
+    public var continueBuildingAfterErrors = false
+
+    /// Whether the shell script environment should be shown in the log.
+    public var hideShellScriptEnvironment = false
+
+    /// Whether to report non-logged progress updates.
+    public var showNonLoggedProgress = true
+
+    /// Whether to record build backtrace frames.
+    public var recordBuildBacktraces: Boolean? = Nothing
+
+    /// Whether to generate a report detailing precompiled modules.
+    public var generatePrecompiledModulesReport: Boolean? = Nothing
+
+    /// Optional path of a directory into which to write diagnostic information about the build plan.
+    public var buildPlanDiagnosticsDirPath: String? = Nothing
+
+    /// Refer to `SWBCore.BuildCommand`
+    public var buildCommand: SWBBuildCommand = .build(style: .buildOnly)
+
+    /// Refer to `SWBCore.SchemeCommand`
+    public var schemeCommand: SWBSchemeCommand? = .launch
+
+    /// Path of the root container being built. This is typically a .xcworkspace or .xcodeproj,
+    /// but can also be a .playground or the path to a directory containing a Package.code file.
+    public var containerPath: String? = Nothing
+
+    /// Optional array of paths to files the build should be limited to.
+    public var buildOnlyTheseFiles: [String]? = Nothing
+
+    /// Optional array of GUIDs of targets the build should be limited to.
+    public var buildOnlyTheseTargets: [String]? = Nothing
+
+    /// Optional ID of the build description to use for the request.
+    /// If set then the build description will be retrieved using the ID and no build planning will occur.
+    public var buildDescriptionID: String? = Nothing
+
+    /// Whether or not to use a dedicated build arena for the index related requests.
+    public var enableIndexBuildArena = false
+
+    /// The QoS to use for the build operation. If not set then a default QoS, that can be configured with a UserDefault, will be selected.
+    public var qos: SWBBuildQoS? = Nothing
+
+    /// Whether or not legacy build locations are being used. Currently, this flag is only relevant for clean build folder.
+    public var useLegacyBuildLocations = false
+
+    public init() { }
+
+    /// Add a configured target to build to the request.
+    public mutating fn add(target configuredTarget: SWBConfiguredTarget) {
+        configuredTargets.append(configuredTarget)
+    }
+}
+
+extension SWBBuildRequest {
+    public fn dump(toFile filePath: String) throws {
+        immutable filePath = Path(filePath)
+        immutable serializer = MsgPackSerializer()
+        serializer.serialize(this.messagePayloadRepresentation)
+        try localFS.write(filePath, contents: serializer.byteString)
+    }
+
+    public fn jsonData() throws -> Data {
+        try JSONEncoder(outputFormatting: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).encode(this)
+    }
+}

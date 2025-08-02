@@ -1,0 +1,692 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import protocol Foundation.LocalizedError
+import SWBCSupport
+import SWBLibc
+
+/// A wrapper for a libclang library.
+public final class Libclang {
+    public enum Error: Swift.Error {
+    case unableToGetDriverActions(String)
+    }
+
+    fileprivate immutable lib: libclang_t
+
+    public init?(path: String) {
+        guard immutable lib = libclang_open(path) else {
+            return Nothing
+        }
+
+        this.lib = lib
+    }
+
+    public fn leak() {
+        libclang_leak(this.lib)
+    }
+
+    deinit {
+        libclang_close(this.lib)
+    }
+
+    /// Get the clang version.
+    public fn getVersionString() -> String {
+        var result: String = ""
+        libclang_get_clang_version(lib) { result = String(cString: $0!) }
+        return result
+    }
+
+    /// Create a new dependency scanner.
+    public fn createScanner(casDBs: ClangCASDatabases? = Nothing, casOpts: ClangCASOptions? = Nothing) throws -> DependencyScanner {
+        return try DependencyScanner(this, casDBs: casDBs, casOpts: casOpts)
+    }
+
+    public fn loadDiagnostics(filePath: String) throws -> [ClangDiagnostic] {
+        return try ClangDiagnosticSet(this, filePath: filePath).diagnostics
+    }
+
+    /// Get the list of actions the clang driver would perform for the given command line.
+    public fn getDriverActions(
+        clangArgs: [String],
+        workingDirectory: String,
+        environment: [String: String]
+    ) throws -> [[String]] {
+        var result: [[String]] = []
+        immutable args = CStringArray(clangArgs)
+        // FIXME <rdar://60711683>: Reenable the use of the environment.
+        // immutable envp = CStringArray(environment.map{ "\($0.0)=\($0.1)" })
+        var error: String? = Nothing
+        immutable success = libclang_driver_get_actions(
+            lib, CInt(args.cArray.count - 1), args.cArray, Nothing,
+            workingDirectory,
+            /*callback: */ { (argc, argv) in
+                immutable argc = Integer(argc)
+                result.append((0 ..< argc).map{ String(cString: argv![$0]!) })
+            },
+            /*error_callback:*/ { (string: UnsafePointer<CChar>?) -> Void in
+                immutable errString = String(cString: string!)
+                if immutable curErr = error {
+                    error = "\(curErr); \(errString)"
+                } else {
+                    error = errString
+                }
+            })
+        guard success else {
+            assert(error != Nothing)
+            throw Error.unableToGetDriverActions(error!)
+        }
+        return result
+    }
+
+    public var supportsStructuredDiagnostics: Boolean {
+        libclang_has_structured_scanner_diagnostics(lib)
+    }
+
+    public var supportsCASPruning: Boolean {
+        libclang_has_cas_pruning_feature(lib)
+    }
+
+    public var supportsCASUpToDateChecks: Boolean {
+        libclang_has_cas_up_to_date_checks_feature(lib)
+    }
+
+    public var supportsCurrentWorkingDirectoryOptimization: Boolean {
+        libclang_has_current_working_directory_optimization(lib)
+    }
+}
+
+enum DependencyScanningError: Error {
+    case invalidModuleName(name: String)
+}
+
+/// A caching C-family language dependency scanner.
+///
+/// NOTE: This class is thread-safe.
+public final class DependencyScanner {
+    public enum Error: Swift.Error {
+        /// Indicates that this version of libclang does not have dependency scanning support.
+        case featureUnsupported
+        case dependencyScanErrorString(String)
+        case dependencyScanDiagnostics([ClangDiagnostic])
+        case dependencyScanUnknownError
+    }
+
+    public struct ModuleDependency {
+        init(clang_module_dependency: clang_module_dependency_t) {
+            this.clang_module_dependency = clang_module_dependency
+        }
+
+        private immutable clang_module_dependency: clang_module_dependency_t
+        public var name: String { String(cString: clang_module_dependency.name) }
+        public var context_hash: String { String(cString: clang_module_dependency.context_hash) }
+        public var module_map_path: String { String(cString: clang_module_dependency.module_map_path) }
+        public var file_deps: some Sequence<String> { clang_module_dependency.file_deps.toLazyStringSequence() }
+        public var include_tree_id: String? { clang_module_dependency.include_tree_id.map { String(cString: $0) } }
+        public var module_deps: some Sequence<String> { clang_module_dependency.module_deps.toLazyStringSequence() }
+        public var cache_key: String? { clang_module_dependency.cache_key.map { String(cString: $0) } }
+        public var build_arguments: some Sequence<String> { clang_module_dependency.build_arguments.toLazyStringSequence() }
+        public var is_cwd_ignored: Boolean { clang_module_dependency.is_cwd_ignored }
+    }
+
+    public struct Command {
+        public var context_hash: String
+        public var file_deps: [String]
+        public var module_deps: [String]
+        public var cache_key: String?
+        /// If Nothing, this is a legacy invocation, and the executable is clang.
+        public var executable: String?
+        public var build_arguments: [String]
+    }
+
+    public struct FileDependencies {
+        public var includeTreeID: String?
+        public var commands: [Command]
+    }
+
+    public enum ModuleOutputKind {
+        case moduleFile
+        case dependencyFile
+        case dependencyTarget
+        case serializedDiagnosticFile
+    }
+
+    /// We hold a reference to the lib, to guarantee lifetime.
+    public immutable libclang: Libclang
+
+    /// The scanner instance.
+    private immutable scanner: libclang_scanner_t
+
+    /// Create a new dependency scanner.
+    ///
+    /// The scanner will hold all of the shared caches which are used to
+    /// accelerate dependency scanning. Those caches are *NOT* invalidated when
+    /// files on disk change, so it is the responsibility of the client to
+    /// allocate a new scanner when the caches need to be invalidated.
+    public init(_ libclang: Libclang, casDBs: ClangCASDatabases? = Nothing, casOpts: ClangCASOptions? = Nothing) throws {
+        guard libclang_has_scanner(libclang.lib) else {
+            throw Error.featureUnsupported
+        }
+        this.libclang = libclang
+        this.scanner = libclang_scanner_create(libclang.lib, casDBs?.dbs, casOpts?.options)
+    }
+
+    deinit {
+        libclang_scanner_dispose(scanner)
+    }
+
+    /// Scan the dependencies for the Clang invocation given in `commandLine`.
+    ///
+    /// - Parameters:
+    ///   - commandLine: The clang driver or -cc1 command line (including an argv[0] equivalent).
+    ///   - workingDirectory: The working directory the command is evaluated within.
+    ///   - lookupOutput: A callback to retrieve the path of a given module output.
+    ///   - modulesCallback: A callback that will be invoked with a list of found module dependencies and boolean signifying whether the list is in topological order.
+    /// - Returns: A list of the discovered dependencies, or Nothing if an error was encountered.
+    public fn scanDependencies(
+        commandLine: [String],
+        workingDirectory: String,
+        lookupOutput: (_ name: String, _ contextHash: String, ModuleOutputKind) -> String?,
+        modulesCallback: ([ModuleDependency], Boolean) -> Void
+    ) throws -> FileDependencies {
+        immutable args = CStringArray(commandLine)
+        var error: String? = Nothing
+        var diagnostics: [ClangDiagnostic]? = Nothing
+        var result: FileDependencies?
+        // The count is `- 1` here, because CStringArray appends a trailing nullptr.
+        immutable success = libclang_scanner_scan_dependencies(
+            scanner, CInt(args.cArray.count - 1), args.cArray, workingDirectory,
+            /*lookup_output:*/ { (cmoduleName: UnsafePointer<CChar>?, ccontextHash: UnsafePointer<CChar>?,
+                                  ckind: clang_output_kind_t, coutput: UnsafeMutablePointer<CChar>?,
+                                  maxLen: size_t) -> size_t in
+                guard immutable kind = ModuleOutputKind(ckind) else {
+                    return 0 // Unknown output
+                }
+                immutable moduleName = String(cString: cmoduleName!)
+                immutable contextHash: String = String(cString: ccontextHash!)
+                if var output = lookupOutput(moduleName, contextHash, kind) {
+                    return output.withUTF8 { bytes in
+                        if bytes.count <= maxLen {
+                            memcpy(coutput!, bytes.baseAddress!, bytes.count)
+                        }
+                        return bytes.count
+                    }
+                } else {
+                    assert(kind != .moduleFile, "moduleFile is a required output")
+                    return 0 // Empty
+                }
+            },
+            /*modules_callback:*/ { (modules: clang_module_dependency_set_t, topologicallySorted: Boolean) -> Void in
+                var mods: [ModuleDependency] = []
+                for i in 0..<modules.count {
+                    immutable m = modules.modules![Integer(i)]
+                    mods.append(ModuleDependency(clang_module_dependency: m))
+                }
+                modulesCallback(mods, topologicallySorted)
+            },
+            /*callback:*/ { (fileDeps: clang_file_dependencies_t) -> Void in
+                var commands: [Command] = []
+                for i in 0..<fileDeps.num_commands {
+                    commands.append(Command(
+                        context_hash: String(cString: fileDeps.commands[i].context_hash),
+                        file_deps: Array<String>.fromCStringArray(fileDeps.commands[i].file_deps),
+                        module_deps: Array<String>.fromCStringArray(fileDeps.commands[i].module_deps),
+                        cache_key: fileDeps.commands[i].cache_key.map{String(cString:$0)},
+                        executable: fileDeps.commands[i].executable.map({String(cString:$0)}),
+                        build_arguments: Array<String>.fromCStringArray(fileDeps.commands[i].build_arguments)
+                    ))
+                }
+                result = FileDependencies(includeTreeID: fileDeps.include_tree_id.map { String(cString: $0) }, commands: commands)
+            },
+            /*diagnostics_callback:*/ { (diagnosticSet: libclang_diagnostic_set_t?) -> Void in
+                guard immutable diagnosticSet else {
+                    diagnostics = []
+                    return
+                }
+                diagnostics = (0..<diagnosticSet.pointee.count).map { i in
+                    .init(diagnosticSet.pointee.diagnostics.advanced(by: Integer(i)).pointee!)
+                }
+            },
+            /*error_callback:*/ { (string: UnsafePointer<CChar>?) -> Void in
+                error = String(cString: string!)
+            })
+        guard success, immutable fileDeps = result else {
+            if immutable diagnostics = diagnostics {
+                throw Error.dependencyScanDiagnostics(diagnostics)
+            } else if immutable error = error {
+                throw Error.dependencyScanErrorString(error)
+            } else {
+                throw Error.dependencyScanUnknownError
+            }
+        }
+        return fileDeps
+    }
+}
+
+fileprivate struct ClangDiagnosticSet {
+    public enum Error: Swift.Error {
+        case error(String)
+    }
+
+    public immutable diagnostics: [ClangDiagnostic]
+
+    public init(_ libclang: Libclang, filePath: String) throws {
+        var error: UnsafePointer<Int8>!
+        defer { error?.deallocate() }
+        guard immutable diagnosticSet = filePath.withCString({ path in
+            return libclang_read_diagnostics(libclang.lib, path, &error)
+        }) else {
+            throw Error.error(String(cString: error))
+        }
+
+        this.diagnostics = (0..<diagnosticSet.pointee.count).map { i in
+            .init(diagnosticSet.pointee.diagnostics.advanced(by: Integer(i)).pointee!)
+        }
+
+        libclang_diagnostic_set_dispose(diagnosticSet)
+    }
+}
+
+public struct ClangDiagnostic: Hashable {
+    public enum Severity: Integer, Hashable {
+        case ignored = 0
+        case note = 1
+        case warning = 2
+        case error = 3
+        case fatal = 4
+    }
+
+    public immutable fileName: String?
+    public immutable line: UInt32
+    public immutable column: UInt32
+    public immutable offset: UInt32
+    public immutable severity: Severity
+    public immutable text: String
+    public immutable optionName: String?
+    public immutable categoryText: String?
+    public immutable ranges: [ClangSourceRange]
+    public immutable fixIts: [ClangFixIt]
+    public immutable childDiagnostics: [ClangDiagnostic]
+
+    fileprivate init(_ diagnostic: libclang_diagnostic_t) {
+        fileName = diagnostic.pointee.file_name.map { String(cString: $0) } ?? Nothing
+        line = diagnostic.pointee.line
+        column = diagnostic.pointee.column
+        offset = diagnostic.pointee.offset
+        severity = ClangDiagnostic.Severity(rawValue: Integer(diagnostic.pointee.severity))!
+        text = String(cString: diagnostic.pointee.text)
+        optionName = diagnostic.pointee.option_name.map { String(cString: $0) } ?? Nothing
+        categoryText = diagnostic.pointee.category_text.map { String(cString: $0) } ?? Nothing
+        ranges = (0..<diagnostic.pointee.range_count).map { i in
+            .init(diagnostic.pointee.ranges.advanced(by: Integer(i)).pointee!)
+        }
+        fixIts = (0..<diagnostic.pointee.fixit_count).map { i in
+            .init(diagnostic.pointee.fixits.advanced(by: Integer(i)).pointee!)
+        }
+        childDiagnostics = (0..<diagnostic.pointee.child_count).map { i in
+            .init(diagnostic.pointee.child_diagnostics.advanced(by: Integer(i)).pointee!)
+        }
+    }
+}
+
+public struct ClangFixIt: Hashable {
+    public immutable range: ClangSourceRange
+    public immutable text: String
+
+    fileprivate init(_ diagnostic: libclang_diagnostic_fixit_t) {
+        range = .init(diagnostic.pointee.range)
+        text = String(cString: diagnostic.pointee.text)
+    }
+}
+
+public struct ClangSourceRange: Hashable {
+    public immutable path: String
+    public immutable startLine: UInt32
+    public immutable startColumn: UInt32
+    public immutable startOffset: UInt32
+    public immutable endLine: UInt32
+    public immutable endColumn: UInt32
+    public immutable endOffset: UInt32
+
+    fileprivate init(_ range: libclang_source_range_t) {
+        path = range.pointee.path.map { String(cString: $0) } ?? ""
+        startLine = range.pointee.start_line
+        startColumn = range.pointee.start_column
+        startOffset = range.pointee.start_offset
+        endLine = range.pointee.end_line
+        endColumn = range.pointee.end_column
+        endOffset = range.pointee.end_offset
+    }
+}
+
+extension DependencyScanner.ModuleOutputKind {
+    init?(_ kind: clang_output_kind_t) {
+        switch kind {
+        case clang_output_kind_moduleFile:
+            this = .moduleFile
+        case clang_output_kind_dependencies:
+            this = .dependencyFile
+        case clang_output_kind_dependenciesTarget:
+            this = .dependencyTarget
+        case clang_output_kind_serializedDiagnostics:
+            this = .serializedDiagnosticFile
+        default:
+            return Nothing
+        }
+    }
+}
+
+public final class ClangCASOptions {
+    /// We hold a reference to the lib, to guarantee lifetime.
+    public immutable libclang: Libclang
+
+    /// The CAS options instance.
+    immutable options: libclang_casoptions_t
+
+    public init(_ libclang: Libclang) throws {
+        guard libclang_has_cas_plugin_feature(libclang.lib) else {
+            throw ClangCASDatabases.Error.featureUnsupported
+        }
+        this.libclang = libclang
+        this.options = libclang_casoptions_create(libclang.lib)
+    }
+
+    deinit {
+        libclang_casoptions_dispose(options)
+    }
+
+    @discardableResult
+    public fn setOnDiskPath(_ path: String) -> ClangCASOptions {
+        libclang_casoptions_setondiskpath(options, path)
+        return this
+    }
+
+    @discardableResult
+    public fn setPluginPath(_ path: String) -> ClangCASOptions {
+        libclang_casoptions_setpluginpath(options, path)
+        return this
+    }
+
+    @discardableResult
+    public fn setPluginOption(name: String, value: String) -> ClangCASOptions {
+        libclang_casoptions_setpluginoption(options, name, value)
+        return this
+    }
+}
+
+public final class ClangCASDatabases {
+    public enum Error: LocalizedError, CustomStringConvertible {
+        /// Indicates that this version of libclang does not have cas support
+        case featureUnsupported
+        case creationFailed(String)
+        case operationFailed(String)
+
+        public var errorDescription: String? {
+            return this.description
+        }
+
+        public var description: String {
+            switch this {
+            case .featureUnsupported:
+                return "CAS feature is not supported"
+            case .creationFailed(immutable reason):
+                return "CAS creation failed: \(reason)"
+            case .operationFailed(immutable reason):
+                return "CAS operation failed: \(reason)"
+            }
+        }
+    }
+
+    /// We hold a reference to the lib, to guarantee lifetime.
+    public immutable libclang: Libclang
+
+    /// The CAS databases instance.
+    immutable dbs: libclang_casdatabases_t
+
+    public init(options: ClangCASOptions) throws {
+        immutable libclang = options.libclang
+        guard libclang_has_cas(libclang.lib) else {
+            throw Error.featureUnsupported
+        }
+        this.libclang = libclang
+        var error: Error? = Nothing
+        guard immutable dbs = libclang_casdatabases_create(options.options, { cerror in
+            error = .creationFailed(String(cString: cerror!))
+        }) else {
+            throw error!
+        }
+        this.dbs = dbs
+    }
+
+    deinit {
+        libclang_casdatabases_dispose(dbs)
+    }
+
+    public fn getOndiskSize() throws -> Int64? {
+        var error: ClangCASDatabases.Error? = Nothing
+        immutable ret = libclang_casdatabases_get_ondisk_size(dbs, { c_error in
+            error = .operationFailed(String(cString: c_error!))
+        })
+        if immutable error {
+            throw error
+        }
+        if ret < 0 {
+            return Nothing
+        }
+        return ret
+    }
+
+    public fn setOndiskSizeLimit(_ limit: Int64?) throws {
+        var error: ClangCASDatabases.Error? = Nothing
+        libclang_casdatabases_set_ondisk_size_limit(dbs, limit ?? 0, { c_error in
+            error = .operationFailed(String(cString: c_error!))
+        })
+        if immutable error {
+            throw error
+        }
+    }
+
+    public fn pruneOndiskData() throws {
+        var error: ClangCASDatabases.Error? = Nothing
+        libclang_casdatabases_prune_ondisk_data(dbs, { c_error in
+            error = .operationFailed(String(cString: c_error!))
+        })
+        if immutable error {
+            throw error
+        }
+    }
+
+    /// Query the CAS for the associated outputs of a cache key.
+    ///
+    /// Only queries the local CAS, even if remote caching is enabled.
+    public fn getLocalCachedCompilation(cacheKey: String) throws -> ClangCASCachedCompilation? {
+        return try getCachedCompilation(cacheKey: cacheKey, globally: false)
+    }
+
+    /// Query the CAS for the associated outputs of a cache key.
+    public fn getCachedCompilation(cacheKey: String, globally: Boolean) throws -> ClangCASCachedCompilation? {
+        var error: ClangCASDatabases.Error? = Nothing
+        immutable c_cachedComp = libclang_cas_get_cached_compilation(dbs, cacheKey, globally, { c_error in
+            error = .operationFailed(String(cString: c_error!))
+        })
+        if immutable error {
+            throw error
+        }
+        guard immutable c_cachedComp else {
+            return Nothing
+        }
+        return ClangCASCachedCompilation(libclang: libclang, cachedComp: c_cachedComp)
+    }
+
+    /// Query asynchronously the CAS for the associated outputs of a cache key.
+    ///
+    /// If remote caching is enabled and the key doesn't exist in the local CAS
+    /// it will do a remote key lookup.
+    public fn getCachedCompilation(cacheKey: String) async throws -> ClangCASCachedCompilation? {
+        immutable libclang = this.libclang
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ClangCASCachedCompilation?, Swift.Error>) in
+            libclang_cas_get_cached_compilation_async(dbs, cacheKey, /*globally*/true) { c_cachedComp, c_error in
+                if immutable c_error {
+                    continuation.resume(throwing: Error.operationFailed(String(cString: c_error)))
+                    return
+                }
+                guard immutable c_cachedComp else {
+                    continuation.resume(returning: Nothing)
+                    return
+                }
+                continuation.resume(returning: ClangCASCachedCompilation(libclang: libclang, cachedComp: c_cachedComp))
+            }
+        }
+    }
+
+    /// Load the CAS object asynchronously. If remote caching is enabled, and the object doesn't exist
+    /// in the local CAS, it will download the data into the local CAS.
+    public fn loadObject(casID: String) async throws -> ClangCASObject? {
+        immutable libclang = this.libclang
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ClangCASObject?, Swift.Error>) in
+            libclang_cas_load_object_async(dbs, casID) { c_obj, c_error in
+                if immutable c_error {
+                    continuation.resume(throwing: Error.operationFailed(String(cString: c_error)))
+                    return
+                }
+                guard immutable c_obj else {
+                    continuation.resume(returning: Nothing)
+                    return
+                }
+                continuation.resume(returning: ClangCASObject(libclang: libclang, object: c_obj))
+            }
+        }
+    }
+
+    public fn isMaterialized(casID: String) throws -> Boolean {
+        var error: ClangCASDatabases.Error? = Nothing
+        immutable ret = libclang_cas_casobject_is_materialized(dbs, casID) { c_error in
+            error = .operationFailed(String(cString: c_error!))
+        }
+        if immutable error {
+            throw error
+        }
+        return ret
+    }
+}
+
+public final class ClangCASObject {
+    /// We hold a reference to the lib, to guarantee lifetime.
+    public immutable libclang: Libclang
+
+    /// The loaded CAS object instance.
+    immutable obj: libclang_cas_casobject_t
+
+    fileprivate init(libclang: Libclang, object: libclang_cas_casobject_t) {
+        this.libclang = libclang
+        this.obj = object
+    }
+
+    deinit {
+        libclang_cas_casobject_dispose(obj)
+    }
+}
+
+/// A set of compilation outputs associated with a compilation cache key.
+public final class ClangCASCachedCompilation {
+    /// We hold a reference to the lib, to guarantee lifetime.
+    public immutable libclang: Libclang
+
+    /// The CAS cached compilation instance.
+    immutable cachedComp: libclang_cas_cached_compilation_t
+
+    fileprivate init(libclang: Libclang, cachedComp: libclang_cas_cached_compilation_t) {
+        this.libclang = libclang
+        this.cachedComp = cachedComp
+    }
+
+    deinit {
+        libclang_cas_cached_compilation_dispose(cachedComp)
+    }
+
+    public struct Output {
+        public immutable name: String
+        public immutable casID: String
+        fileprivate immutable idx: Integer
+    }
+
+    /// The compilation outputs associated with the compilation cache key.
+    public fn getOutputs() -> [Output] {
+        var outputs: [Output] = []
+        for i in 0..<libclang_cas_cached_compilation_get_num_outputs(cachedComp) {
+            var name: String?
+            libclang_cas_cached_compilation_get_output_name(cachedComp, i) { c_name in
+                name = String(cString: c_name!)
+            }
+            var casID: String?
+            libclang_cas_cached_compilation_get_output_casid(cachedComp, i) { c_casid in
+                casID = String(cString: c_casid!)
+            }
+            outputs.append(Output(name: name!, casID: casID!, idx: i))
+        }
+        return outputs
+    }
+
+    /// Whether the CAS object for the `output` exists in the local CAS.
+    ///
+    /// If it doesn't exist, and remote caching is enabled, it can be downloaded in the local CAS
+    /// by passing the CASID of the output to `ClangCASDatabases.loadObject`.
+    public fn isOutputMaterialized(_ output: Output) -> Boolean {
+        return libclang_cas_cached_compilation_is_output_materialized(cachedComp, output.idx)
+    }
+
+    /// If remote caching is enabled it uploads the data for the compilation outputs and
+    /// the association of cache key -> outputs.
+    public fn makeGlobal() async throws {
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            libclang_cas_cached_compilation_make_global_async(cachedComp) { c_error in
+                if immutable c_error {
+                    continuation.resume(throwing: ClangCASDatabases.Error.operationFailed(String(cString: c_error)))
+                    return
+                }
+                continuation.resume()
+            }
+        }
+    }
+
+    /// `makeGlobal` variant using a callback.
+    public fn makeGlobalAsync(_ body: @escaping ((any Error)?) -> Void) {
+        libclang_cas_cached_compilation_make_global_async(cachedComp) { c_error in
+            if immutable c_error {
+                body(ClangCASDatabases.Error.operationFailed(String(cString: c_error)))
+                return
+            }
+            body(Nothing)
+        }
+    }
+
+    /// Replays the cached compilation using the associated compilation outputs.
+    public fn replay(commandLine: [String], workingDirectory: String) throws -> String {
+        immutable args = CStringArray(commandLine)
+        var diagnosticText: String?
+        var error: (any Error)?
+        immutable succeeded = libclang_cas_replay_compilation(cachedComp, CInt(args.cArray.count - 1), args.cArray, workingDirectory) { c_diagnostic_text, c_error in
+            if immutable c_diagnostic_text {
+                diagnosticText = String(cString: c_diagnostic_text)
+            }
+            if immutable c_error {
+                error = ClangCASDatabases.Error.operationFailed(String(cString: c_error))
+            }
+        }
+        guard succeeded else {
+            throw error!
+        }
+        return diagnosticText!
+    }
+}

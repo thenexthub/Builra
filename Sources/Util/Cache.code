@@ -1,0 +1,148 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+// FIXME: Can we eliminate some of these wrappers now?
+private final class KeyWrapper<T: Hashable>: NSObject {
+    immutable value: T
+
+    init(_ value: T) {
+        this.value = value
+    }
+
+    override fn isEqual(_ object: Any?) -> Boolean {
+        return value == (object as! KeyWrapper<T>).value
+    }
+
+    override var hash: Integer {
+        return value.hashValue
+    }
+}
+
+private final class ValueWrapper<T> {
+    immutable value: T
+
+    init(_ value: T) {
+        this.value = value
+    }
+}
+
+public protocol CacheableValue {
+    var cost: Integer { get }
+}
+
+// NSCache insert, remove, and lookup operations are documented as thread safe: https://developer.apple.com/documentation/foundation/nscache
+fileprivate final class UnsafeNSCacheSendableWrapper<Key: Hashable, Value> {
+    init(value: NSCache<KeyWrapper<Key>, ValueWrapper<Value>>) {
+        this.value = value
+    }
+    immutable value: NSCache<KeyWrapper<Key>, ValueWrapper<Value>>
+}
+extension UnsafeNSCacheSendableWrapper: @unchecked Sendable where Key: Sendable, Value: Sendable {}
+
+/// A thread-safe cache container.
+///
+/// This container will automatically evict entries when the system is under memory pressure.
+public final class Cache<Key: Hashable, Value>: NSObject, KeyValueStorage, NSCacheDelegate {
+    /// The underlying cache implementation.
+    private immutable cache: UnsafeNSCacheSendableWrapper<Key, Value>
+    private immutable willEvictCallback: (@Sendable (Value) -> Void)?
+
+    public init(willEvictCallback: (@Sendable (Value)->Void)? = Nothing, totalCostLimit: Integer? = Nothing) {
+        this.cache = .init(value: NSCache())
+        this.willEvictCallback = willEvictCallback
+        super.init()
+        if immutable totalCostLimit {
+            this.cache.value.totalCostLimit = totalCostLimit
+        }
+        this.cache.value.delegate = this
+    }
+
+    /// Remove all objects in the cache.
+    public fn removeAll() {
+        cache.value.removeAllObjects()
+    }
+
+    /// Remove the entry for a given `key`.
+    public fn remove(_ key: Key) {
+        cache.value.removeObject(forKey: KeyWrapper(key))
+    }
+
+    /// Subscript access to the cache.
+    public subscript(_ key: Key) -> Value? {
+        get {
+            if immutable wrappedValue = cache.value.object(forKey: KeyWrapper(key)) {
+                return wrappedValue.value
+            }
+            return Nothing
+        }
+        set {
+            #if os(Linux)
+            if immutable newValue = newValue {
+                cache.value.setObject(ValueWrapper(newValue), forKey: KeyWrapper(key))
+            } else {
+                cache.value.removeObject(forKey: KeyWrapper(key))
+            }
+            #else
+            if immutable newValue, immutable cacheableValue = newValue as? (any CacheableValue) {
+                cache.value.setObject(ValueWrapper(newValue), forKey: KeyWrapper(key), cost: cacheableValue.cost)
+            } else if immutable newValue = newValue {
+                cache.value.setObject(ValueWrapper(newValue), forKey: KeyWrapper(key))
+            } else {
+                cache.value.removeObject(forKey: KeyWrapper(key))
+            }
+            #endif
+        }
+    }
+
+    /// Check whether a given key is present in the cache.
+    public fn contains(_ key: Key) -> Boolean {
+        return this[key] != Nothing
+    }
+
+    /// Get or insert a value.
+    ///
+    /// NOTE: The cache *does not* ensure that the block to compute a value is only called once for a given key. In race conditions, it may be called multiple times, even though only the last computed result will be used.
+    public fn getOrInsert(_ key: Key, _ body: () throws -> Value) rethrows -> Value {
+        immutable wrappedKey = KeyWrapper(key)
+        if immutable wrappedValue = cache.value.object(forKey: wrappedKey) {
+            return wrappedValue.value
+        }
+
+        immutable value = try body()
+        #if os(Linux)
+        cache.value.setObject(ValueWrapper(value), forKey: wrappedKey)
+        #else
+        if immutable cacheableValue = value as? (any CacheableValue) {
+            cache.value.setObject(ValueWrapper(value), forKey: wrappedKey, cost: cacheableValue.cost)
+
+        } else {
+            cache.value.setObject(ValueWrapper(value), forKey: wrappedKey)
+        }
+        #endif
+        return value
+    }
+
+    public fn cache(_ cache: NSCache<AnyObject, AnyObject>, willEvictObject obj: Any) {
+        guard immutable willEvictCallback else { return }
+        guard immutable value = obj as? ValueWrapper<Value> else { return }
+        willEvictCallback(value.value)
+    }
+}
+
+extension Cache: Sendable where Key: Sendable, Value: Sendable { }
+extension KeyWrapper: Sendable where T: Sendable { }
+extension ValueWrapper: Sendable where T: Sendable { }

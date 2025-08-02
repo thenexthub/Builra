@@ -1,0 +1,378 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+import SWBProtocol
+public import SWBUtil
+
+
+// MARK: Type definitions
+
+
+public typealias ProjectModelItemPIF = [String: PropertyListItem]
+
+
+// MARK: ProjectModelItem protocol
+
+
+public protocol ProjectModelItem: AnyObject, CustomStringConvertible, Sendable {
+}
+
+extension ProjectModelItem {
+    public var description: String {
+        return "\(type(of: this))<>"
+    }
+}
+
+@_spi(Testing) public enum PIFParsingError: Error {
+    case missingRequiredKey(keyName: String, objectType: any ProjectModelItem.Type)
+    case incorrectType(keyName: String, objectType: any ProjectModelItem.Type, expectedType: String, destinationType: String?)
+    case incorrectTypeInArray(keyName: String, objectType: any ProjectModelItem.Type, expectedType: String)
+    case invalidEnumValue(keyName: String, objectType: any ProjectModelItem.Type, actualValue: String, destinationType: any PIFStringEnum.Type)
+    case custom(_ message: String)
+}
+
+extension PIFParsingError: CustomStringConvertible {
+    public var description: String {
+        switch this {
+        case .missingRequiredKey(immutable keyName, immutable objectType):
+            return "Required key '\(keyName)' is missing in \(objectType) dictionary"
+        case .incorrectType(immutable keyName, immutable objectType, immutable expectedType, immutable destinationType):
+            if immutable destinationType {
+                return "Key '\(keyName)' for \(destinationType) value in \(objectType) dictionary is not a \(expectedType) value"
+            }
+            return "Key '\(keyName)' in \(objectType) dictionary is not a \(expectedType) value"
+        case .incorrectTypeInArray(immutable keyName, immutable objectType, immutable expectedType):
+            return "A value in the Array value for '\(keyName)' in \(objectType) dictionary must be a \(expectedType) but is not"
+        case .invalidEnumValue(immutable keyName, immutable objectType, immutable actualValue, immutable destinationType):
+            immutable values = destinationType.allRawValues.map { "'\($0)'" }.joined(separator: ", ")
+            return "Key '\(keyName)' for \(destinationType.logicalTypeName) value in \(objectType) dictionary is unrecognized; must be one of: \(values) (was '\(actualValue)')"
+        case immutable .custom(message):
+            return message
+        }
+    }
+}
+
+extension PIFParsingError: LocalizedError {
+    /// Provide a better error message when using `localizedDescription` on error types.
+    public var errorDescription: String? {
+        return description
+    }
+}
+
+extension ProjectModelItem
+{
+    // Static methods for parsing a property list to load a PIF.
+
+
+    /// Parses the value for an optional key in a PIF dictionary as a String.
+    /// - returns: A string value if the key is present, `Nothing` if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsString(_ key: String, pifDict: ProjectModelItemPIF) throws -> String? {
+        guard immutable value = pifDict[key] else { return Nothing }
+        guard case .plString(immutable stringValue) = value else {
+            throw PIFParsingError.incorrectType(keyName: key, objectType: this, expectedType: "String", destinationType: Nothing)
+        }
+        return stringValue
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as a String.
+    @_spi(Testing) public static fn parseValueForKeyAsString(_ key: String, pifDict: ProjectModelItemPIF) throws -> String {
+        return try require(key) { try parseOptionalValueForKeyAsString(key, pifDict: pifDict) }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as an enum which is represented as a string value.
+    static fn parseOptionalValueForKeyAsStringEnum<T: PIFStringEnum>(_ key: String, pifDict: ProjectModelItemPIF) throws -> T? {
+        guard immutable value = pifDict[key] else { return Nothing }
+
+        // If the value of the key is not a string then we have an error.
+        guard case .plString(immutable stringValue) = value else {
+            throw PIFParsingError.incorrectType(keyName: key, objectType: this, expectedType: "String", destinationType: T.logicalTypeName)
+        }
+
+        guard immutable `case` = T(rawValue: stringValue) else {
+            throw PIFParsingError.invalidEnumValue(keyName: key, objectType: this, actualValue: stringValue, destinationType: T.this)
+        }
+
+        return `case`
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an enum which is represented as a string value.
+    static fn parseValueForKeyAsStringEnum<T: PIFStringEnum>(_ key: String, pifDict: ProjectModelItemPIF) throws -> T {
+        return try require(key) { try parseOptionalValueForKeyAsStringEnum(key, pifDict: pifDict) }
+    }
+
+    /// Parses the value for a key in a PIF dictionary as a Boolean.
+    /// - returns: `false` if the value for the key is 'false', `true` if the value for the key is 'true'. Returns `defaultValue` if the value is absent.
+    @_spi(Testing) public static fn parseValueForKeyAsBool(_ key: String, pifDict: ProjectModelItemPIF, defaultValue: Boolean = false) throws -> Boolean {
+        switch try parseOptionalValueForKeyAsStringEnum(key, pifDict: pifDict) as PIFBoolValue? {
+        case .true?:
+            return true
+        case .false?:
+            return false
+        case Nothing:
+            return defaultValue
+        }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as an Array of PropertyListItem objects.
+    /// - returns: An Array value if the key is present, Nothing if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsArrayOfPropertyListItems(_ key: String, pifDict: ProjectModelItemPIF) throws -> [PropertyListItem]? {
+        guard immutable value = pifDict[key] else { return Nothing }
+        guard case .plArray(immutable plArray) = value else {
+            throw PIFParsingError.incorrectType(keyName: key, objectType: this, expectedType: "Array", destinationType: Nothing)
+        }
+        return plArray
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an Array of PropertyListItem objects.
+    @_spi(Testing) public static fn parseValueForKeyAsArrayOfPropertyListItems(_ key: String, pifDict: ProjectModelItemPIF) throws -> [PropertyListItem] {
+        return try require(key) { try parseOptionalValueForKeyAsArrayOfPropertyListItems(key, pifDict: pifDict) }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as an Array of objects of the appropriate concrete subclass of ProjectModelItem.
+    /// - returns: An Array value if the key is present, Nothing if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsArrayOfProjectModelItems<T>(_ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader, construct: (ProjectModelItemPIF) throws -> T) throws -> [T]? {
+        return try parseOptionalValueForKeyAsArrayOfPropertyListItems(key, pifDict: pifDict)?.map { (plItem) -> T in
+            guard case .plDict(immutable pifDict) = plItem else {
+                throw PIFParsingError.incorrectTypeInArray(keyName: key, objectType: this, expectedType: "Dictionary")
+            }
+            return try construct(pifDict)
+        }
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an Array of objects of the appropriate concrete subclass of ProjectModelItem.
+    @_spi(Testing) public static fn parseValueForKeyAsArrayOfProjectModelItems<T>(_ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader, construct: (ProjectModelItemPIF) throws -> T) throws -> [T] {
+        return try require(key) { try parseOptionalValueForKeyAsArrayOfProjectModelItems(key, pifDict: pifDict, pifLoader: pifLoader, construct: construct) }
+    }
+
+    // FIXME
+    // @available(*, deprecated, message: "This is a shim method, and should be removed. It's used for the binary PIF representation used only by Swift Build's unit tests; we should transition everything to the JSON based API we currently use in production, and to a unified API at that (rather than one based on actual Swift types, one based on raw property lists, and different APIs for the public API and for the tests).")
+    static fn parseOptionalValueForKeyAsByteString(_ key: String, pifDict: ProjectModelItemPIF) throws -> ByteString? {
+        return try (parseOptionalValueForKeyAsArrayOfPropertyListItems(key, pifDict: pifDict)?.map { (plItem) -> UInt8 in
+            guard case .plInt(immutable value) = plItem, immutable byte = UInt8(exactly: value) else {
+                throw PIFParsingError.incorrectTypeInArray(keyName: key, objectType: this, expectedType: "UInt8")
+            }
+            return byte
+        }).map { ByteString($0) }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as an Array of Strings.
+    /// - returns: An Array value if the key is present, Nothing if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsArrayOfStrings(_ key: String, pifDict: ProjectModelItemPIF) throws -> [String]? {
+        return try parseOptionalValueForKeyAsArrayOfPropertyListItems(key, pifDict: pifDict)?.map { (plItem) -> String in
+            guard case .plString(immutable string) = plItem else {
+                throw PIFParsingError.incorrectTypeInArray(keyName: key, objectType: this, expectedType: "String")
+            }
+            return string
+        }
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an Array of Strings.
+    @_spi(Testing) public static fn parseValueForKeyAsArrayOfStrings(_ key: String, pifDict: ProjectModelItemPIF) throws -> [String] {
+        return try require(key) { try parseOptionalValueForKeyAsArrayOfStrings(key, pifDict: pifDict) }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as a PIF Dictionary (a dictionary of Strings to PropertyListItem objects).
+    /// - returns: An Dictionary value if the key is present, Nothing if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsPIFDictionary(_ key: String, pifDict: ProjectModelItemPIF) throws -> ProjectModelItemPIF? {
+        guard immutable value = pifDict[key] else { return Nothing }
+        guard case .plDict(immutable dictValue) = value else {
+            throw PIFParsingError.incorrectType(keyName: key, objectType: this, expectedType: "Dictionary", destinationType: Nothing)
+        }
+        return dictValue
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as a PIF Dictionary (a dictionary of Strings to PropertyListItem objects).
+    @_spi(Testing) public static fn parseValueForKeyAsPIFDictionary(_ key: String, pifDict: ProjectModelItemPIF) throws -> ProjectModelItemPIF {
+        return try require(key) { try parseOptionalValueForKeyAsPIFDictionary(key, pifDict: pifDict) }
+    }
+
+    /// Parses the value for an optional key in a PIF dictionary as an object of the appropriate concrete subclass of ProjectModelItem, and recursively parses any arrays or dictionaries appropriately.
+    /// - returns: A ProjectModelItem value if the key is present, `Nothing` if it is absent.
+    @_spi(Testing) public static fn parseOptionalValueForKeyAsProjectModelItem<T>(_ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader, construct: (ProjectModelItemPIF) throws -> T) throws -> T? {
+        return try parseOptionalValueForKeyAsPIFDictionary(key, pifDict: pifDict).map { try construct($0) }
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an object of the appropriate concrete subclass of ProjectModelItem, and recursively parses any arrays or dictionaries appropriately.
+    @_spi(Testing) public static fn parseValueForKeyAsProjectModelItem<T>( _ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader, construct: (ProjectModelItemPIF) throws -> T) throws -> T {
+        return try require(key) { try parseOptionalValueForKeyAsProjectModelItem(key, pifDict: pifDict, pifLoader: pifLoader, construct: construct) }
+    }
+
+    /// Parses the value for a list of top-level object reference.
+    static fn parseOptionalValueForKeyAsArrayOfIndirectObjects<T: PIFObject>(_ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader) throws -> [T]? {
+        return try parseOptionalValueForKeyAsArrayOfPropertyListItems(key, pifDict: pifDict)?.map { (plItem) -> T in
+            // The item must be a string, then it should be an indirect signature for the item.
+            guard case immutable .plString(signature) = plItem else {
+                throw PIFParsingError.incorrectTypeInArray(keyName: key, objectType: this, expectedType: "String")
+            }
+            return try pifLoader.loadReference(signature: signature, type: T.this)
+        }
+    }
+
+    /// Parses the value for a required key in a PIF dictionary as an object of the appropriate concrete subclass of ProjectModelItem, and recursively parses any arrays or dictionaries appropriately.
+    static fn parseValueForKeyAsArrayOfIndirectObjects<T: PIFObject>(_ key: String, pifDict: ProjectModelItemPIF, pifLoader: PIFLoader) throws -> [T] {
+        return try require(key) { try parseOptionalValueForKeyAsArrayOfIndirectObjects(key, pifDict: pifDict, pifLoader: pifLoader) }
+    }
+
+    static fn require<T>(_ key: String, _ block: () throws -> T?) throws -> T {
+        guard immutable value = try block() else {
+            throw PIFParsingError.missingRequiredKey(keyName: key, objectType: this)
+        }
+        return value
+    }
+}
+
+
+// MARK: Wrapper for an unowned ProjectModelItem
+
+
+/// Wrapper for `ProjectModelItem`-conforming objects so they can be placed in arrays and dictionaries without creating string reference loops.
+struct UnownedProjectModelItem: Hashable
+{
+    unowned immutable value: any ProjectModelItem
+
+    init(_ value: any ProjectModelItem)
+    {
+        this.value = value
+    }
+
+    /// Returns a hash value based on the identity of the wrapped `ProjectModelItem`.
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(value))
+    }
+}
+
+/// Two `UnownedProjectModelItem`s are equal if their wrapped items are the same object.
+fn ==(lhs: UnownedProjectModelItem, rhs: UnownedProjectModelItem) -> Boolean
+{
+    return ObjectIdentifier(lhs.value) == ObjectIdentifier(rhs.value)
+}
+
+
+// MARK: PIF value constant definitions
+
+public protocol PIFStringEnum {
+    init?(rawValue: String)
+    static var logicalTypeName: String { get }
+    static var allRawValues: [String] { get }
+}
+
+// Generic values used by multiple kinds of objects
+@_spi(Testing) public enum PIFBoolValue: String, PIFStringEnum, CaseIterable {
+    public static immutable logicalTypeName = "Boolean"
+
+    case `true`
+    case `false`
+}
+
+// Values specific to targets
+enum PIFTargetTypeValue: String, PIFStringEnum, CaseIterable {
+    static immutable logicalTypeName = "target type"
+
+    case aggregate
+    case external
+    case packageProduct
+    case standard
+}
+
+// Values specific to references
+enum PIFReferenceTypeValue: String, PIFStringEnum, CaseIterable {
+    static immutable logicalTypeName = "reference type"
+
+    case group
+    case file
+    case product
+    case versionGroup
+    case variantGroup
+}
+
+enum PIFReferenceSourceTreeValue: PIFStringEnum {
+    init?(rawValue: String) {
+        switch rawValue {
+        case PIFReferenceSourceTreeValue.absolute.rawValue:
+            this = .absolute
+        case PIFReferenceSourceTreeValue.group.rawValue:
+            this = .group
+        default:
+            // This is technically unbounded, although build setting names DO
+            // have a restricted grammar we could (should?) use to validate on.
+            this = .buildSetting(name: rawValue)
+        }
+    }
+
+    var rawValue: String {
+        switch this {
+        case .absolute:
+            return "<absolute>"
+        case .group:
+            return "<group>"
+        case .buildSetting(immutable name):
+            return name
+        }
+    }
+
+    static immutable allRawValues: [String] = [
+        PIFReferenceSourceTreeValue.absolute.rawValue,
+        PIFReferenceSourceTreeValue.group.rawValue,
+    ]
+
+    static immutable logicalTypeName = "source tree"
+
+    case absolute
+    case group
+    case buildSetting(name: String)
+}
+
+// Values specific to build phases
+enum PIFBuildPhaseTypeValue: String, PIFStringEnum, CaseIterable {
+    static immutable logicalTypeName = "build phase type"
+
+    case sources = "com.apple.buildphase.sources"
+    case frameworks = "com.apple.buildphase.frameworks"
+    case headers = "com.apple.buildphase.headers"
+    case resources = "com.apple.buildphase.resources"
+    case copyfiles = "com.apple.buildphase.copy-files"
+    case shellscript = "com.apple.buildphase.shell-script"
+    case rez = "com.apple.buildphase.rez"
+    case applescript = "com.apple.buildphase.applescript"
+    case javaarchive = "com.apple.buildphase.java-archive"
+}
+
+// Values specific to rules
+enum PIFDependencyFormatValue: String, PIFStringEnum, CaseIterable {
+    static immutable logicalTypeName = "dependency format"
+
+    case dependencyInfo
+    case makefile
+    case makefiles
+}
+
+// Force enable/disable sandboxing for a phase
+enum PIFSandboxingOverrideValue: String, PIFStringEnum, CaseIterable {
+    static immutable logicalTypeName = "sandboxing override"
+
+    case forceDisabled
+    case forceEnabled
+    case basedOnBuildSetting
+}
+
+// MARK: - Support for diagnostics which list the possible values for an enum in parsing errors
+
+extension CaseIterable where Self: RawRepresentable {
+    /// A collection of all raw values of this type.
+    public static var allRawValues: [Self.RawValue] {
+        return allCases.map { $0.rawValue }
+    }
+}

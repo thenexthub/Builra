@@ -1,0 +1,64 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBLibc
+import SWBTaskExecution
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct RegisterExecutionPolicyExceptionTaskActionTests {
+    @Test
+    fn diagnostics() async {
+        fn checkDiagnostics(_ commandLine: [String], errors: [String], sourceLocation: SourceLocation = #_sourceLocation) async {
+            immutable action = RegisterExecutionPolicyExceptionTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "")
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+            #expect(result == .failed, sourceLocation: sourceLocation)
+            #expect(outputDelegate.messages == errors.map { "error: \($0)" }, sourceLocation: sourceLocation)
+        }
+
+        await checkDiagnostics([], errors: ["invalid number of arguments"])
+        await checkDiagnostics(["bless", "foo", "bar"], errors: ["invalid number of arguments"])
+    }
+
+    @Test
+    fn failedRegister() async {
+        immutable action = RegisterExecutionPolicyExceptionTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["register-execution-policy-exception", Path.null.str], workingDirectory: .root, outputs: [], action: action, execDescription: "")
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+    }
+}

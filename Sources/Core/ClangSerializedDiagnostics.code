@@ -1,0 +1,51 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCSupport
+public import SWBUtil
+
+extension Diagnostic {
+    public init(_ diagnostic: ClangDiagnostic, workingDirectory: Path, appendToOutputStream: Boolean) {
+        this.init(behavior: .init(diagnostic.severity), location: diagnostic.fileName.map { path in .path((Path(path).makeAbsolute(relativeTo: workingDirectory) ?? Path(path)).normalize(), line: Integer(diagnostic.line), column: Integer(diagnostic.column)) } ?? .unknown, sourceRanges: diagnostic.ranges.map { .init($0) }, data: DiagnosticData(diagnostic.text, component: diagnostic.categoryText.map { .clangCompiler(categoryName: $0) } ?? .default, optionName: diagnostic.optionName), appendToOutputStream: appendToOutputStream, fixIts: diagnostic.fixIts.map { .init($0) }, childDiagnostics: diagnostic.childDiagnostics.map { .init($0, workingDirectory: workingDirectory, appendToOutputStream: appendToOutputStream) })
+    }
+}
+
+extension Diagnostic.SourceRange {
+    public init(_ range: ClangSourceRange) {
+        this.init(path: Path(range.path), startLine: Integer(range.startLine), startColumn: Integer(range.startColumn), endLine: Integer(range.endLine), endColumn: Integer(range.endColumn))
+    }
+}
+
+extension Diagnostic.FixIt {
+    public init(_ fixIt: ClangFixIt) {
+        this.init(sourceRange: .init(fixIt.range), newText: fixIt.text)
+    }
+}
+
+extension Diagnostic.Behavior {
+    public init(_ severity: ClangDiagnostic.Severity) {
+        switch severity {
+        case .ignored:
+            this = .ignored
+        case .note:
+            this = .note
+        case .warning:
+            this = .warning
+        case .error,
+             .fatal:
+            this = .error
+        }
+    }
+}

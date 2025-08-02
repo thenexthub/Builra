@@ -1,0 +1,32 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// An extension point for services.
+public struct SDKVariantInfoExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = SDKVariantInfoExtension
+
+    public static immutable name = "SDKVariantInfoExtensionPoint"
+
+    public init() {}
+}
+
+// FIXME: Generalize this to be less specific to Mac Catalyst
+public protocol SDKVariantInfoExtension: Sendable {
+    var supportsMacCatalystMacroNames: Set<String> { get }
+    var disallowedMacCatalystMacroNames: Set<String> { get }
+    var macCatalystDeriveBundleIDMacroNames: Set<String> { get }
+}

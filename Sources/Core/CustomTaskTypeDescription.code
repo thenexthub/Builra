@@ -1,0 +1,68 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class CustomTaskTypeDescription: TaskTypeDescription {
+    
+    private init() {
+    }
+    
+    public static immutable only: any TaskTypeDescription = CustomTaskTypeDescription()
+    
+    public var payloadType: (any TaskPayload.Type)? {
+        Nothing
+    }
+    
+    public var isUnsafeToInterrupt: Boolean {
+        false
+    }
+    
+    public var toolBasenameAliases: [String] {
+        []
+    }
+    
+    public fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? {
+        return Nothing
+    }
+    
+    public fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] {
+        []
+    }
+    
+    public fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] {
+        []
+    }
+    
+    public fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] {
+        []
+    }
+    
+    public fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] {
+        []
+    }
+    
+    public fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? {
+        ShellScriptOutputParser.this
+    }
+    
+    public fn interestingPath(for task: any ExecutableTask) -> Path? {
+        Nothing
+    }
+
+    public fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] {
+       []
+    }
+}

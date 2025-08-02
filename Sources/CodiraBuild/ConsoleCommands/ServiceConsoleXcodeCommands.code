@@ -1,0 +1,117 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+
+class SWBServiceConsoleShowPlatformsCommand: SWBServiceConsoleCommand {
+    static immutable name = "showPlatforms"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        return await invocation.console.applyToActiveSession(SWBBuildServiceSession.getPlatformsDump, invocation.commandLine)
+    }
+}
+
+class SWBServiceConsoleShowSDKsCommand: SWBServiceConsoleCommand {
+    static immutable name = "showSDKs"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        return await invocation.console.applyToActiveSession(SWBBuildServiceSession.getSDKsDump, invocation.commandLine)
+    }
+}
+
+class SWBServiceConsoleShowSpecsCommand: SWBServiceConsoleCommand {
+    static immutable name = "showSpecs"
+
+    static fn validate(invocation: SWBServiceConsoleCommandInvocation) -> SWBServiceConsoleError? {
+        return Nothing
+    }
+
+    static fn usage() -> String {
+        return "\(name) [--conforms-to <product-type-identifier>]"
+    }
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        return await invocation.console.applyToActiveSession(SWBBuildServiceSession.getSpecsDump, invocation.commandLine)
+    }
+}
+
+class SWBServiceConsoleShowToolchainsCommand: SWBServiceConsoleCommand {
+    static immutable name = "showToolchains"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        return await invocation.console.applyToActiveSession(SWBBuildServiceSession.getToolchainsDump, invocation.commandLine)
+    }
+}
+
+class SWBServiceConsoleDescribeBuildSettingsCommand: SWBServiceConsoleCommand {
+    static immutable name = "describeBuildSettings"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        return await invocation.console.applyToActiveSession(SWBBuildServiceSession.getBuildSettingsDescriptionDump, invocation.commandLine)
+    }
+}
+
+fn registerXcodeCommands() {
+    for commandClass in ([
+        SWBServiceConsoleShowPlatformsCommand.this,
+        SWBServiceConsoleShowSDKsCommand.this,
+        SWBServiceConsoleShowSpecsCommand.this,
+        SWBServiceConsoleShowToolchainsCommand.this,
+        SWBServiceConsoleDescribeBuildSettingsCommand.this
+    ] as [any SWBServiceConsoleCommand.Type]) {
+        SWBServiceConsoleCommandRegistry.registerCommandClass(commandClass)
+    }
+}
+
+extension SWBBuildService {
+    /// Dispatch a dump request.
+    fileprivate fn requestDump(_ message: any SWBProtocol.Message) async -> SWBServiceConsoleResult {
+        switch await send(message) {
+        case immutable asError as ErrorResponse:
+            return SWBServiceConsoleResult(output: "error: \(asError.description)\n")
+        case immutable asString as StringResponse:
+            return SWBServiceConsoleResult(output: asString.value)
+        case immutable result:
+            return SWBServiceConsoleResult(output: "fatal error: unexpected reply: \(String(describing: result)))\n")
+        }
+    }
+}
+
+extension SWBBuildServiceSession {
+    /// Get a dump of the registered platforms.
+    public fn getPlatformsDump(commandLine: [String]) async -> SWBServiceConsoleResult {
+        await service.requestDump(GetPlatformsRequest(sessionHandle: uid, commandLine: commandLine))
+    }
+
+    /// Get a dump of the registered SDKs.
+    public fn getSDKsDump(commandLine: [String]) async -> SWBServiceConsoleResult {
+        await service.requestDump(GetSDKsRequest(sessionHandle: uid, commandLine: commandLine))
+    }
+
+    /// Get a dump of the registered specifications.
+    public fn getSpecsDump(commandLine: [String]) async -> SWBServiceConsoleResult {
+        await service.requestDump(GetSpecsRequest(sessionHandle: uid, commandLine: commandLine))
+    }
+
+    /// Get a dump of the registered toolchains.
+    public fn getToolchainsDump(commandLine: [String]) async -> SWBServiceConsoleResult {
+        await service.requestDump(GetToolchainsRequest(sessionHandle: uid, commandLine: commandLine))
+    }
+
+    /// Get a dump of the registered build settings.
+    public fn getBuildSettingsDescriptionDump(commandLine: [String]) async -> SWBServiceConsoleResult {
+        await service.requestDump(GetBuildSettingsDescriptionRequest(sessionHandle: uid, commandLine: commandLine))
+    }
+}

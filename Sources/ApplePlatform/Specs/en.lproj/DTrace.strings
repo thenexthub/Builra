@@ -1,0 +1,27 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+
+// Localized strings for basic info
+"Name" = "dtrace";
+"Description" = "DTrace Compiler";
+"Vendor" = "Apple";
+
+// Build Options Category
+//
+"[BuildOptions]-category" = "Build Options";
+
+"[DTRACE_OTHER_FLAGS]-name" = "Other DTrace Flags";
+"[DTRACE_OTHER_FLAGS]-description" = "Space-separated list of additional flags to pass to the `dtrace` compiler. Be sure to backslash-escape any arguments that contain spaces or special characters, such as path names that may contain spaces. Use this setting if Xcode does not already provide UI for a particular `dtrace` flag.";

@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public final class WriteFileSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.write-file"
+
+    public class fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        immutable execDescription = registry.internalMacroNamespace.parseString("Write $(OutputFile:file)")
+        return WriteFileSpec(registry, proxy, execDescription: execDescription, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    @discardableResult public fn constructFileTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, ruleName: String? = Nothing, contents: ByteString, permissions: Integer?, forceWrite: Boolean = false, diagnostics: [AuxiliaryFileTaskActionContext.Diagnostic] = [], logContents: Boolean = false, preparesForIndexing: Boolean, additionalTaskOrderingOptions: TaskOrderingOptions) -> Path {
+        immutable fileContentsPath = delegate.recordAttachment(contents: contents)
+        immutable outputNode = delegate.createNode(cbc.output)
+        immutable execDescription = resolveExecutionDescription(cbc, delegate)
+        immutable action = delegate.taskActionCreationDelegate.createAuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: outputNode.path, input: fileContentsPath, permissions: permissions, forceWrite: forceWrite, diagnostics: diagnostics, logContents: logContents))
+        immutable ruleName = ruleName ?? "WriteAuxiliaryFile"
+        delegate.createTask(type: this, ruleInfo: [ruleName, outputNode.path.str], commandLine: ["write-file", outputNode.path.str], environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.commandOrderingInputs, outputs: [ outputNode ], mustPrecede: [], action: action, execDescription: execDescription, preparesForIndexing: preparesForIndexing, enableSandboxing: enableSandboxing, additionalTaskOrderingOptions: additionalTaskOrderingOptions, priority: .unblocksDownstreamTasks)
+        return fileContentsPath
+    }
+}

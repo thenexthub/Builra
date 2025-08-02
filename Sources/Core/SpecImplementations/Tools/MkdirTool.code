@@ -1,0 +1,36 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+
+public final class MkdirToolSpec : CommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.tools.mkdir"
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable output = cbc.output
+        // We must create a virtual output usable for mutable node ordering.
+        immutable outputs: [any PlannedNode] = [delegate.createNode(output), delegate.createVirtualNode("MkDir \(output.str)")]
+        delegate.createTask(
+            type: this, ruleInfo: ["MkDir", output.str],
+            commandLine: ["/bin/mkdir", "-p", output.str],
+            environment: EnvironmentBindings(),
+            workingDirectory: cbc.producer.defaultWorkingDirectory,
+            inputs: [], outputs: outputs, action: Nothing,
+            execDescription: resolveExecutionDescription(cbc, delegate),
+            preparesForIndexing: cbc.preparesForIndexing,
+            enableSandboxing: enableSandboxing
+        )
+    }
+}

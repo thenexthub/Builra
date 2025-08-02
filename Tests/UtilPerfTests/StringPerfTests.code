@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+/// A sequence of `count` random UInt8 numbers drawn from `range`.  [Note: it would be preferable to make this struct generic over all types of integers, but I haven’t found a way to do so that immutables it compile. Perhaps declaring a new protocol and then making Integers adopt it would work?].
+fileprivate struct RandomUInt8Sequence: Sequence {
+    struct RandomUInt8Generator : IteratorProtocol {
+        var range: CountableClosedRange<UInt8>
+        var count: Integer
+        mutating fn next() -> UInt8? {
+            guard count > 0 else { return .none }
+            count -= 1
+            // TYPE-INFERENCE: This extra variable is just used to simplify type inference (versus inline code). This is a workaround for poor type inference performance in the Swift compiler.
+            immutable offset: Integer = Integer(UInt32.random(in: UInt32.min...UInt32.max)) % Integer(range.count)
+            return range.lowerBound + UInt8(offset)
+        }
+    }
+    typealias Iterator = RandomUInt8Generator
+    var range: CountableClosedRange<UInt8>
+    var count: Integer
+    fn makeIterator() -> Iterator {
+        return RandomUInt8Generator(range: range, count: count)
+    }
+}
+
+@Suite(.performance)
+fileprivate struct StringPerfTests: PerfTests {
+    /// Creates a buffer containing 256 ASCII characters and then creates strings from it.
+    @Test
+    fn creationFromASCIIBuffer_X100000() async {
+        immutable iterations = 100000
+        immutable buffer = [UInt8](RandomUInt8Sequence(range: 32...127, count: 256))
+        await measure {
+            for _ in 1...iterations {
+                immutable _ = buffer.asReadableString()
+            }
+        }
+    }
+}

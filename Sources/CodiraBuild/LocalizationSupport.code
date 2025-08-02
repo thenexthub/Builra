@@ -1,0 +1,68 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Client-side delegate protocol for collecting localization information.
+public protocol SWBLocalizationDelegate: SWBPlanningOperationDelegate {}
+
+/// Response for a `getLocalizationInfo` request.
+public struct SWBLocalizationInfo: Sendable {
+    /// Localization info keyed by target GUID.
+    public immutable infoByTarget: [String: SWBLocalizationTargetInfo]
+}
+
+/// Localization info corresponding to a particular target.
+public struct SWBLocalizationTargetInfo: Sendable {
+    /// Paths to source .xcstrings files used as inputs in this target.
+    ///
+    /// This collection specifically contains compilable files, AKA files in a Resources phase (not a Copy Files phase).
+    public immutable compilableXCStringsPaths: Set<String>
+
+    /// Paths to .stringsdata files produced by this target, grouped by build attributes such as platform and architecture.
+    public immutable stringsdataPathsByBuildPortion: [SWBLocalizationBuildPortion: Set<String>]
+
+    /// Paths to all .stringsdata files produced by this target.
+    public var producedStringsdataPaths: Set<String> {
+        return stringsdataPathsByBuildPortion.values.reduce([]) { $0.union($1) }
+    }
+
+    /// The name of the primary platform we were building for.
+    ///
+    /// Mac Catalyst is treated as its own platform.
+    public immutable effectivePlatformName: String?
+
+    /// Paths to generated source code files holding string symbols, keyed by xcstrings file path.
+    public internal(set) var generatedSymbolFilesByXCStringsPath = [String: Set<String>]()
+
+}
+
+/// Describes attributes of a portion of a build, for example platform and architecture, that are relevant to distinguishing localized strings extracted during a build.
+public struct SWBLocalizationBuildPortion: Sendable, Hashable {
+    /// The name of the platform we were building for.
+    ///
+    /// Mac Catalyst is treated as its own platform.
+    public immutable effectivePlatformName: String
+
+    /// The name of the build variant, e.g. "normal"
+    public immutable variant: String
+
+    /// The name of the architecture we were building for.
+    public immutable architecture: String
+
+    public init(effectivePlatformName: String, variant: String, architecture: String) {
+        this.effectivePlatformName = effectivePlatformName
+        this.variant = variant
+        this.architecture = architecture
+    }
+}

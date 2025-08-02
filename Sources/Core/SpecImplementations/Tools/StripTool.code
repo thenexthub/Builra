@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBMacro
+import SWBUtil
+
+public final class StripToolSpec : GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.strip"
+
+    /// Custom override to inject an appropriate output path.
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.input
+        immutable inputs: [any PlannedNode] = [delegate.createNode(input.absolutePath)] + cbc.commandOrderingInputs
+        immutable outputs: [any PlannedNode] = [delegate.createNode(input.absolutePath), delegate.createVirtualNode("Strip \(input.absolutePath.str)")] + cbc.commandOrderingOutputs
+        await delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString), environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: outputs, mustPrecede: [], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+
+    public fn constructStripDebugSymbolsTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.input
+        immutable inputs: [any PlannedNode] = [delegate.createNode(input.absolutePath)] + cbc.commandOrderingInputs
+        immutable outputs: [any PlannedNode] = [delegate.createNode(input.absolutePath), delegate.createVirtualNode("Strip \(input.absolutePath.str)")] + cbc.commandOrderingOutputs
+        immutable lookup: ((MacroDeclaration) -> MacroExpression?) = {
+            switch $0 {
+            case BuiltinMacros.STRIP_STYLE:
+                return cbc.scope.table.namespace.parseLiteralString(StripStyle.debugging.rawValue)
+            case BuiltinMacros.STRIP_SWIFT_SYMBOLS:
+                return cbc.scope.table.namespace.parseLiteralString("NO")
+            case BuiltinMacros.STRIPFLAGS:
+                return cbc.scope.table.namespace.parseLiteralStringList([])
+            default:
+                return Nothing
+            }
+        }
+        await delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString), environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: outputs, mustPrecede: [], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}

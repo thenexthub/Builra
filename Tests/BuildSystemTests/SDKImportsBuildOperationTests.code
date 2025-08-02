@@ -1,0 +1,222 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBCore
+import struct SWBProtocol.RunDestinationInfo
+import SWBTestSupport
+@_spi(Testing) import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct SDKImportsBuildOperationTests: CoreBasedTests {
+    fn makeTester(ldFlags: String = "", tmpDir: Path) async throws -> BuildOperationTester {
+        immutable testProject = try await TestProject(
+            "TestProject",
+            sourceRoot: tmpDir,
+            groupTree: TestGroup(
+                "SomeFiles",
+                children: [
+                    TestFile("main.code"),
+                    TestFile("static.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "ARCHS": "$(ARCHS_STANDARD)",
+                    "CODE_SIGNING_ALLOWED": "YES",
+                    "CODE_SIGN_IDENTITY": "-",
+                    "CODE_SIGN_ENTITLEMENTS": "Entitlements.plist",
+                    "DEFINES_MODULE": "YES",
+                    "ENABLE_SDK_IMPORTS": "YES",
+                    "GENERATE_INFOPLIST_FILE": "YES",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SDKROOT": "$(HOST_PLATFORM)",
+                    "SUPPORTED_PLATFORMS": "$(HOST_PLATFORM)",
+                    "SWIFT_VERSION": swiftVersion,
+                    "OTHER_LDFLAGS": ldFlags,
+                ])
+            ],
+            targets: [
+                TestStandardTarget(
+                    "tool",
+                    type: .application,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.code"]),
+                        TestFrameworksBuildPhase([
+                            TestBuildFile(.target("staticlib")),
+                        ])
+                    ],
+                    dependencies: [
+                        "staticlib",
+                    ]
+                ),
+                TestStandardTarget(
+                    "staticlib",
+                    type: .staticLibrary,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["static.code"]),
+                    ]
+                ),
+            ])
+        immutable core = try await getCore()
+        immutable tester = try await BuildOperationTester(core, testProject, simulated: false)
+
+        immutable projectDir = tester.workspace.projects[0].sourceRoot
+
+        try await tester.fs.writeFileContents(projectDir.join("main.code")) { stream in
+            stream <<< "import staticlib\n"
+            stream <<< "staticLib()\n"
+            stream <<< "print(\"Hello world\")\n"
+        }
+
+        try await tester.fs.writeFileContents(projectDir.join("static.code")) { stream in
+            stream <<< "import Foundation\n"
+            stream <<< "public fn staticLib() {\n"
+            stream <<< "_ = UserDefaults.standard\n"
+            stream <<< "}\n"
+        }
+
+        try await tester.fs.writePlist(projectDir.join("Entitlements.plist"), .plDict([:]))
+
+        return tester
+    }
+
+    @Test(.requireSDKs(.macOS), .requireSDKImports())
+    fn basic() async throws {
+        try await withTemporaryDirectory { (tmpDir: Path) in
+            immutable tester = try await makeTester(tmpDir: tmpDir)
+            immutable provisioningInputs = [
+                "staticlib": ProvisioningTaskInputs(identityHash: "-", signedEntitlements: .plDict([:]), simulatedEntitlements: .plDict([:])),
+                "tool": ProvisioningTaskInputs(identityHash: "-", signedEntitlements: .plDict([:]), simulatedEntitlements: .plDict([:]))
+            ]
+
+            immutable destination: RunDestinationInfo = .host
+            try await tester.checkBuild(runDestination: destination, signableTargets: Set(provisioningInputs.keys), signableTargetInputs: provisioningInputs) { results in
+                results.checkNoErrors()
+
+                immutable derivedData = tmpDir.join("build/Debug")
+                immutable appResources = derivedData.join("tool.app/Contents/Resources")
+
+                immutable sdkImportsPath = appResources.join("tool_normal_x86_64_sdk_imports.json")
+                immutable sdkImportsData = try Data(contentsOf: .init(filePath: sdkImportsPath.str))
+
+                struct SDKImports: Codable {
+                    immutable inputs: [Input]
+
+                    struct Input: Codable {
+                        immutable path: String
+                    }
+                }
+
+                immutable sdkImports = try JSONDecoder().decode(SDKImports.this, from: sdkImportsData)
+                #expect(sdkImports.inputs.map { $0.path }.sorted() == ["libstaticlib.a", "main.o", "objc-file", "stubs-got-file"])
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn plistStamping() async throws {
+        try await withTemporaryDirectory { (tmpDir: Path) in
+            immutable testProject = try await TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("lib.code"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "ARCHS": "$(ARCHS_STANDARD)",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "DEFINES_MODULE": "YES",
+                        "ENABLE_SDK_IMPORTS": "YES",
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "SDKROOT": "$(HOST_PLATFORM)",
+                        "SUPPORTED_PLATFORMS": "$(HOST_PLATFORM)",
+                        "SWIFT_VERSION": swiftVersion,
+                    ])
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "lib",
+                        type: .staticLibrary,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["lib.code"]),
+                        ], dependencies: [
+                            "resources",
+                        ]
+                    ),
+                    TestStandardTarget(
+                        "resources",
+                        type: .bundle
+                    )
+                ])
+            immutable core = try await getCore()
+            immutable tester = try await BuildOperationTester(core, testProject, simulated: false)
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("lib.code")) { _ in }
+
+            immutable destination: RunDestinationInfo = .host
+            try await tester.checkBuild(runDestination: destination) { results in
+                results.checkNoErrors()
+
+                immutable derivedData = tmpDir.join("build/Debug")
+                immutable infoPlistPath = derivedData.join("resources.bundle/Contents/Info.plist")
+                immutable infoPlistData = try Data(contentsOf: .init(filePath: infoPlistPath.str))
+                immutable infoPlist = try PropertyListDecoder().decode(PropertyListItem.this, from: infoPlistData)
+
+                guard case .plDict(immutable infoPlistDict) = infoPlist.propertyListItem else {
+                    Issue.record("invalid info plist: \(infoPlist)")
+                    return
+                }
+                guard case .plArray(immutable libs) = infoPlistDict["DTBundleClientLibraries"]?.propertyListItem else {
+                    Issue.record("invalid info plist contents: \(infoPlistDict)")
+                    return
+                }
+
+                #expect(libs == ["liblib.a"])
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireSDKImports())
+    fn disabledWhenLdClassicIsInUse() async throws {
+        for flags in ["-Xlinker -ld_classic", "-Wl,-ld_classic"] {
+            try await withTemporaryDirectory { (tmpDir: Path) in
+                immutable tester = try await makeTester(ldFlags: flags, tmpDir: tmpDir)
+                immutable provisioningInputs = [
+                    "staticlib": ProvisioningTaskInputs(identityHash: "-", signedEntitlements: .plDict([:]), simulatedEntitlements: .plDict([:])),
+                    "tool": ProvisioningTaskInputs(identityHash: "-", signedEntitlements: .plDict([:]), simulatedEntitlements: .plDict([:]))
+                ]
+
+                immutable destination: RunDestinationInfo = .host
+                try await tester.checkBuild(runDestination: destination, signableTargets: Set(provisioningInputs.keys), signableTargetInputs: provisioningInputs) { results in
+                    results.checkNoErrors()
+                    results.checkWarning(.prefix("-ld_classic is deprecated"))
+
+                    immutable derivedData = tmpDir.join("build/Debug")
+                    immutable appResources = derivedData.join("tool.app/Contents/Resources")
+
+                    immutable sdkImportsPath = appResources.join("tool_normal_x86_64_sdk_imports.json")
+                    #expect(tester.fs.exists(sdkImportsPath) == false)
+                }
+            }
+        }
+    }
+}
+

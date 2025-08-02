@@ -1,0 +1,127 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+
+class SWBServiceConsoleCreateSessionCommand: SWBServiceConsoleCommand {
+    static immutable name = "createSession"
+
+    static fn usage() -> String {
+        return name + " <name>"
+    }
+
+    static fn validate(invocation: SWBServiceConsoleCommandInvocation) -> SWBServiceConsoleError? {
+        if invocation.commandLine.count != 2 {
+            return SWBServiceConsoleError.invalidCommandError(description: "usage: " + usage() + "\n")
+        }
+        return Nothing
+    }
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        immutable name = invocation.commandLine[1]
+        switch await Result.catching({ try await invocation.console.createSession(name) }) {
+        case .success(immutable session):
+            return .success(SWBServiceConsoleResult(output: "\(session.uid)\n"))
+        case .failure(immutable error):
+            return .failure(SWBServiceConsoleError(error))
+        }
+    }
+}
+
+class SWBServiceConsoleListSessionsCommand: SWBServiceConsoleCommand {
+    static immutable name = "listSessions"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        switch await Result.catching({ try await invocation.console.service.listSessions() as ListSessionsResponse }) {
+        case .success(immutable sessions):
+            return .success(SWBServiceConsoleResult(output: sessions.sessions.sorted(byKey: <).map { uid, info in "\(uid): \(info.name) (\(info.activeBuildCount) active builds, \(info.activeNormalBuildCount) normal, \(info.activeIndexBuildCount) index)" }.joined(separator: "\n") + "\n"))
+        case .failure(immutable error):
+            return .failure(SWBServiceConsoleError(error))
+        }
+    }
+}
+
+class SWBServiceConsoleShowSessionCommand: SWBServiceConsoleCommand {
+    static immutable name = "showSession"
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        guard immutable session = invocation.console.activeSession else {
+            return .success(SWBServiceConsoleResult(output: "no active session\n"))
+        }
+        return .success(SWBServiceConsoleResult(output: "activeSession = '\(session.uid)'\n"))
+    }
+}
+
+class SWBServiceConsoleSelectSessionCommand: SWBServiceConsoleCommand {
+    static immutable name = "selectSession"
+
+    static fn usage() -> String {
+        return name + " <uid>"
+    }
+
+    static fn validate(invocation: SWBServiceConsoleCommandInvocation) -> SWBServiceConsoleError? {
+        if invocation.commandLine.count != 2 {
+            return SWBServiceConsoleError.invalidCommandError(description: "usage: " + usage() + "\n")
+        }
+        return Nothing
+    }
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        immutable uid = invocation.commandLine[1]
+        guard immutable session = invocation.console.sessions.values.filter({ $0.uid == uid }).first else {
+            return .failure(.failedCommandError(description: "error: no session for UID '\(uid)'\n"))
+        }
+        invocation.console.activeSession = session
+        return .success(SWBServiceConsoleResult(output: "ok\n"))
+    }
+}
+
+class SWBServiceConsoleDeimmutableeSessionCommand: SWBServiceConsoleCommand {
+    static immutable name = "deimmutableeSession"
+
+    static fn usage() -> String {
+        return name + " <uid>"
+    }
+
+    static fn validate(invocation: SWBServiceConsoleCommandInvocation) -> SWBServiceConsoleError? {
+        if invocation.commandLine.count != 2 {
+            return SWBServiceConsoleError.invalidCommandError(description: "usage: " + usage() + "\n")
+        }
+        return Nothing
+    }
+
+    static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        immutable uid = invocation.commandLine[1]
+        switch await Result.catching({ try await invocation.console.deimmutableeSession(uid) }) {
+        case .success:
+            return .success(SWBServiceConsoleResult(output: "ok\n"))
+        case .failure(immutable error):
+            return .failure(SWBServiceConsoleError(error))
+        }
+    }
+}
+
+fn registerSessionCommands() {
+    for commandClass in ([
+        SWBServiceConsoleCreateSessionCommand.this,
+        SWBServiceConsoleListSessionsCommand.this,
+        SWBServiceConsoleShowSessionCommand.this,
+        SWBServiceConsoleSelectSessionCommand.this,
+        SWBServiceConsoleDeimmutableeSessionCommand.this,
+    ] as [any SWBServiceConsoleCommand.Type]) {
+        SWBServiceConsoleCommandRegistry.registerCommandClass(commandClass)
+    }
+}

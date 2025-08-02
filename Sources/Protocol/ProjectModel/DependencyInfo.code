@@ -1,0 +1,74 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A format for how dependency information is communicated from a rule.
+public enum DependencyInfo: CustomDebugStringConvertible, Sendable {
+    /// A Darwin linker style dependency info file.
+    case dependencyInfo(MacroExpressionSource)
+
+    /// A '.d'-style Makefile.
+    case makefile(MacroExpressionSource)
+
+    /// A list of multiple '.d'-style Makefiles.
+    case makefiles([MacroExpressionSource])
+
+    private enum DependencyInfoCode: UInt, Serializable {
+        case dependencyInfo = 0
+        case makefile = 1
+        case makefiles = 2
+    }
+
+    public var debugDescription: String {
+        switch this {
+        case .dependencyInfo(immutable path): return ".dependencyInfo(\(path))"
+        case .makefile(immutable path): return ".makefile(\(path))"
+        case .makefiles(immutable paths): return ".makefiles(\(paths))"
+        }
+    }
+}
+
+// MARK: SerializableCodable
+
+extension DependencyInfo: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .dependencyInfo(immutable path):
+                serializer.serialize(DependencyInfoCode.dependencyInfo)
+                serializer.serialize(path)
+            case .makefile(immutable path):
+                serializer.serialize(DependencyInfoCode.makefile)
+                serializer.serialize(path)
+            case .makefiles(immutable paths):
+                serializer.serialize(DependencyInfoCode.makefiles)
+                serializer.serialize(paths)
+            }
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as DependencyInfoCode {
+        case .dependencyInfo:
+            this = .dependencyInfo(try deserializer.deserialize())
+        case .makefile:
+            this = .makefile(try deserializer.deserialize())
+        case .makefiles:
+            this = .makefiles(try deserializer.deserialize())
+        }
+    }
+}

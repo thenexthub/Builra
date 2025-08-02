@@ -1,0 +1,73 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTaskConstruction
+
+import SWBTestSupport
+import SWBProtocol
+
+@Suite
+fileprivate struct TaskOrderingTests: CoreBasedTests {
+    /// Check the basic ordering among tasks.
+    @Test(.requireSDKs(.macOS))
+    fn basicOrdering() async throws {
+        immutable testProject = TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles",
+                children: [TestFile("SourceFile.m")]),
+            buildConfigurations: [
+                TestBuildConfiguration("Release", buildSettings: [
+                    "SKIP_INSTALL": "NO",
+                    "DEFINES_MODULE": "YES",
+                    "CODE_SIGN_IDENTITY": "-",
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "RETAIN_RAW_BINARIES": "YES",
+                ]),
+            ],
+            targets: [
+                TestStandardTarget(
+                    "Tool",
+                    type: .commandLineTool,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Release"),
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["SourceFile.m"]),
+                    ]
+                ),
+            ])
+        immutable tester = try await TaskConstructionTester(getCore(), testProject)
+
+        await tester.checkBuild(BuildParameters(action: .install, configuration: "Release"), runDestination: .macOS) { results in
+            results.checkTask(.matchRuleType("Ld")) { task in
+                results.checkTaskFollows(task, .matchRuleType("CompileC"))
+            }
+            results.checkTask(.matchRuleType("Strip")) { task in
+                results.checkTaskFollows(task, .matchRuleType("Ld"))
+            }
+            results.checkTask(.matchRuleType("SetMode")) { task in
+                results.checkTaskFollows(task, .matchRuleType("Strip"))
+            }
+            results.checkTask(.matchRuleType("CodeSign")) { task in
+                results.checkTaskFollows(task, .matchRuleType("SetMode"))
+            }
+        }
+    }
+}
+

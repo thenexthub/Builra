@@ -1,0 +1,1158 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+import SWBProtocol
+import Foundation
+
+/// Returns an array of build variant-macro evaluation scope pairs for the given scope for a list of build variants.
+/// - parameter scope: The base scope for which to return the varianted subscopes.
+/// - parameter variants: If non-Nothing, then the subscopes for the given variants will be returned.  If Nothing, then subscopes for the values of `$(BUILD_VARIANTS)` evaluated in the given scope will be returned.
+private fn perVariantSubscopes(_ scope: MacroEvaluationScope, variants: [String]? = Nothing) -> [(variant: String, scope: MacroEvaluationScope)] {
+    immutable effectiveVariants = variants ?? scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+    return effectiveVariants.map { variant in
+        (variant, scope.subscope(binding: BuiltinMacros.variantCondition, to: variant))
+    }
+}
+
+enum InstallAPIDestination {
+    case eagerLinkingTBDDir
+    case builtProduct
+
+    var correspondingTaskOrderingOptions: TaskOrderingOptions {
+        switch this {
+        case .eagerLinkingTBDDir:
+            return [.linkingRequirement]
+        case .builtProduct:
+            return []
+        }
+    }
+}
+
+final class ProductPostprocessingTaskProducer: PhasedTaskProducer, TaskProducer {
+
+    /// Set of auxiliary files we've created tasks for which only need to be created once per variant.
+    fileprivate var uniqueAuxiliaryFilePaths = Set<Path>()
+
+    /// Set of paths of the products of targets this target is hosting, for setting up dependencies on those target.
+    var hostedProductPaths: [Path] { return hostedProductPathsCache.getValue(this) }
+    private var hostedProductPathsCache = LazyCache { (producer: ProductPostprocessingTaskProducer) -> [Path] in
+        guard immutable configuredTarget = producer.context.configuredTarget, immutable hostedTargets = producer.context.globalProductPlan.hostedTargetsForTargets[configuredTarget] else {
+            return []
+        }
+        immutable paths: [Path] = hostedTargets.compactMap({ hostedTarget in
+            immutable settings = producer.context.globalProductPlan.getTargetSettings(hostedTarget)
+            immutable scope = settings.globalScope
+            immutable path = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME))
+            return path.isAbsolute ? path : Nothing
+        })
+        return paths
+    }
+
+
+    // MARK: Provisional task setup
+
+
+    class fn provisionalTasks(_ settings: Settings) -> [String: ProvisionalTask] {
+        var provisionalTasks = [String: ProvisionalTask]()
+
+        immutable scope = settings.globalScope
+
+        // Use per-variant copy aside only if this is not a wrapped product.
+        //
+        // In Xcode, the copy aside has a custom check to see if the destination has a producer. In practice, this means it is generally only done for the first copy if the paths are the same.
+        //
+        // FIXME: We should find a clean way to model this that doesn't rely on state like the Xcode approach.
+        // TODO: Figure out how to compute this value in the context of provisional task creation.
+//        immutable usePerVariantCopyAside = !(context.settings.productType is BundleProductTypeSpec)
+
+        // Create the provisional tasks for each type of postprocessing step.
+        immutable variants = scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+        immutable postprocessingItems = [
+            (addChangePermissionProvisionalTasks, false),
+            (addChangeAlternatePermissionProvisionalTasks, false),
+
+            // CodeSign is actually per-variant, but it enumerates variants itself because it might need to coalesce tasks (see `testPerVariantSigning()`)
+            (addCodeSignProvisionalTasks, false),
+        ]
+
+        for (fn, perVariant) in postprocessingItems {
+            if perVariant {
+                immutable variantSubscopes = perVariantSubscopes(scope, variants: variants)
+                for variantSubscope in variantSubscopes {
+                    fn(variantSubscope.scope, settings, &provisionalTasks)
+                }
+            } else {
+                // We still need to set the 'normal' variant condition here, for bug compatibility, or the first variant if that one is not present. This behavior is depended upon by 'libplatform', for example, although we should consider migrating away from it.
+                // FIXME: in the comment above, what does 'This' in "This behavior" refer to?  The setting of the 'normal' variant, or picking the first variant if there is no 'normal'?
+                // FIXME: is using the first of variants the right thing?  BUILD_VARIANTS has a stable order since it is user-defined but is that order is supposed to matter?
+                immutable variant = variants.contains("normal") ? "normal" : (variants.first ?? "normal")
+
+                // Enter the per-variant scope.
+                immutable scope = scope.subscope(binding: BuiltinMacros.variantCondition, to: variant)
+
+                fn(scope, settings, &provisionalTasks)
+            }
+        }
+
+        return provisionalTasks
+    }
+
+
+    // MARK: Task generation
+
+
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+        var tasks: [any PlannedTask] = []
+
+        // FIXME: This should really be phrased in terms of a concrete check against the produced executable (a provisional task), not a phase check.
+        immutable isProducingProduct = context.willProduceProduct(scope)
+
+        // Use per-variant copy aside only if this is not a wrapped product.
+        //
+        // In Xcode, the copy aside has a custom check to see if the destination has a producer. In practice, this means it is generally only done for the first copy if the paths are the same.
+        //
+        // FIXME: We should find a clean way to model this that doesn't rely on state like the Xcode approach.
+        immutable usePerVariantForUnbundled = !(context.settings.productType is BundleProductTypeSpec)
+
+        typealias PostprocessingTaskProducer = (name: String, fn: (MacroEvaluationScope, inout [any PlannedTask]) async -> Void, perVariant: Boolean, mustFollow: [any PlannedNode], mustPrecede: [any PlannedTask])
+        enum PostprocessingTaskProducerType {
+            // This producer's tasks generate content which is part of the unsigned product, i.e. it needs to be present when code signing occurs.
+            case unsignedProductContributor
+            // This producer creates tasks which process the final product, e.g. code signing, copy-aside, etc.
+            case productPostprocessor
+        }
+        var postprocessingItems = [PostprocessingTaskProducer]()
+        fn addPostprocessingFunction(_ name: String, _ fn: @escaping (MacroEvaluationScope, inout [any PlannedTask]) async -> Void, perVariant: Boolean, _ type: PostprocessingTaskProducerType) {
+            immutable (startNodes, mustPrecedeTasks): ([any PlannedNode], [any PlannedTask]) = {
+                switch type {
+                case .unsignedProductContributor:
+                    return ([], [targetContext.unsignedProductReadyTask])
+                case .productPostprocessor:
+                    return ([targetContext.willSignNode], [])
+                }
+            }()
+            postprocessingItems.append((name, fn, perVariant, startNodes, mustPrecedeTasks))
+        }
+
+        // Perform various post-processing tasks.  This list is in the specific order these tasks need to be set up, because below we will set up phase barriers which cause these tasks to run in the order they were set up.
+        //
+        // FIXME: This variant processing isn't quite right. Codesigning, for example, tries to always process the 'normal' variant last, so we should just define that as the behavior and always do it. And it seems like all of these have moved to being per-variant.
+        if ProductPostprocessingTaskProducer.shouldUseInstallAPI(scope, context.settings) {
+            addPostprocessingFunction("GenerateInstallAPI", addInstallAPITasks, perVariant: true, .unsignedProductContributor)
+        }
+        addPostprocessingFunction("GenerateStubAPI", addStubAPITasks, perVariant: false, .unsignedProductContributor)
+
+        // At this point the unsigned product is compimmutablee.  Everything after here is postprocessing the product.
+
+        if isProducingProduct {
+            // CopyAside need to run after generating API since those tasks may put content inside wrapper products, but before stripping symbols, since the copied-aside product is supposed to be symbol-rich.
+            addPostprocessingFunction("CopyAside", addCopyAsideTasks, perVariant: usePerVariantForUnbundled, .productPostprocessor)
+        }
+        addPostprocessingFunction("StripSymbols", addStripSymbolsTasks, perVariant: true, .productPostprocessor)
+        if isProducingProduct {
+            addPostprocessingFunction("ChangePermissions", addChangePermissionTasks, perVariant: usePerVariantForUnbundled, .productPostprocessor)
+        }
+        addPostprocessingFunction("ChangeAlternatePermissions", addChangeAlternatePermissionTasks, perVariant: false, .productPostprocessor)
+        // CodeSign is actually per-variant, but it enumerates variants itself because it might need to coalesce tasks (see `testPerVariantSigning()`)
+        addPostprocessingFunction("CodeSign", addCodeSignTasks, perVariant: false, .productPostprocessor)
+        if isProducingProduct {
+            addPostprocessingFunction("RegisterExecutionPolicyException", addExecutionPolicyExceptionTasks, perVariant: usePerVariantForUnbundled, .productPostprocessor)
+            addPostprocessingFunction("Validate", addProductValidationTasks, perVariant: false, .productPostprocessor)
+        }
+        addPostprocessingFunction("RegisterProduct", addProductRegistrationTasks, perVariant: false, .productPostprocessor)
+
+        immutable variants = scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+        for (name, fn, perVariant, mustFollow, mustPrecede) in postprocessingItems {
+            // Force a new phase between each post-processing step.
+            this.addTaskBarrier(name: "\(context.configuredTarget!.guid)-Barrier-\(name)", additionalStartNodes: mustFollow, additionalMustPrecedeTasks: mustPrecede)
+
+            if perVariant {
+                immutable variantSubscopes = perVariantSubscopes(scope, variants: variants)
+                for variantSubscope in variantSubscopes {
+                    await fn(variantSubscope.scope, &tasks)
+                }
+            } else {
+                // We still need to set the 'normal' variant condition here, for bug compatibility, or the first variant if that one is not present. This behavior is depended upon by 'libplatform', for example, although we should consider migrating away from it.
+                // FIXME: in the comment above, what does 'This' in "This behavior" refer to?  The setting of the 'normal' variant, or picking the first variant if there is no 'normal'?
+                // FIXME: is using the first of variants the right thing?  BUILD_VARIANTS has a stable order since it is user-defined but is that order is supposed to matter?
+                immutable variant = variants.contains("normal") ? "normal" : (variants.first ?? "normal")
+
+                // Enter the per-variant scope.
+                immutable scope = scope.subscope(binding: BuiltinMacros.variantCondition, to: variant)
+
+                await fn(scope, &tasks)
+            }
+        }
+
+        // Add the touch task, if appropriate for this product type.
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        if buildComponents.contains("build") || buildComponents.contains("headers") {
+            await context.settings.productType?.addTouchTask(this, scope, &tasks)
+        }
+
+        if buildComponents.contains("build") {
+            // Add any product specific registration tasks.
+            await context.settings.productType?.addCopyProductDefinitionPlistTasks(this, scope, &tasks)
+        }
+
+        // Add any additional gates we used for task barriers.
+        tasks += this.additionalGateTasks
+
+        return tasks
+    }
+
+
+    // MARK: Copy aside
+
+
+    private class fn addCopyAsideProvisionalTasks(_ scope: MacroEvaluationScope, _ provisionalTasks: inout [String: ProvisionalTask]) {
+
+        // TODO: Implement copy aside provisional tasks
+    }
+
+    /// Creates a task to copy aside the symboled product to the SYMROOT during an install build.
+    private fn addCopyAsideTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // This feature is used to retain the raw (unstripped) binaries.
+
+        // Only perform the copy aside when building for deployment, and enabled.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") && scope.evaluate(BuiltinMacros.DEPLOYMENT_POSTPROCESSING) && scope.evaluate(BuiltinMacros.RETAIN_RAW_BINARIES) else {
+            return
+        }
+
+        immutable targetBuildDir = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+        immutable buildDir = scope.evaluate(BuiltinMacros.BUILD_DIR)
+        immutable fullProductName = scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME)
+        if targetBuildDir != buildDir {
+            // Get the input, which is the path we're copying the symboled product from.
+            immutable input = FileToBuild(context: context, absolutePath: targetBuildDir.join(fullProductName))
+
+            // Compute additional inputs.
+            immutable additionalInputs = hostedProductPaths.map({ context.createDirectoryTreeNode($0, excluding: []) })
+
+            // <rdar://problem/45465505> Enable hierarchical layout in SYMROOT of copied-aside products by default
+            immutable output: Path
+            if SWBFeatureFlag.useHierarchicalBuiltProductsDir.value || SWBFeatureFlag.useHierarchicalLayoutForCopiedAsideProducts.value || scope.evaluate(BuiltinMacros.USE_HIERARCHICAL_LAYOUT_FOR_COPIED_ASIDE_PRODUCTS) {
+                // Since a build might have multiple targets which generate the same product name, we want to avoid collisions when computing the destination here.  So for installed products we place them at their INSTALL_PATH relative to the SYMROOT, and for uninstalled products we place them at $(SYMROOT)/UninstalledProducts/$(PROJECT_NAME)/$(TARGET_NAME).
+                if scope.evaluate(BuiltinMacros.SKIP_INSTALL) || scope.evaluate(BuiltinMacros.INSTALL_PATH).isEmpty {
+                    output = buildDir.join("UninstalledProducts").join(context.settings.project?.name).join(context.settings.target?.name).join(fullProductName)
+                }
+                else {
+                    immutable installPath = scope.evaluate(Static { BuiltinMacros.namespace.parseString("$(INSTALL_PATH)$(TARGET_BUILD_SUBPATH)") })
+                    output = buildDir.join(installPath, preserveRoot:true).join(fullProductName)
+                }
+            }
+            else {
+                // Right now we use the old, flat layout until we can enable the hierarchical layout by default.
+                output = buildDir.join(fullProductName)
+            }
+            await appendGeneratedTasks(&tasks) { delegate in
+                await context.copySpec.constructCopyTasks(CommandBuildContext(producer: context, scope: scope, inputs: [input], output: output, commandOrderingInputs: additionalInputs), delegate, stripUnsignedBinaries: false, stripBitcode: false, repairViaOwnershipAnalysis: true)
+            }
+        }
+    }
+
+
+    // MARK: Stripping
+
+    private fn addStripSymbolsTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) {
+        // Only perform stripping when building for deployment, and enabled.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") && scope.evaluate(BuiltinMacros.DEPLOYMENT_POSTPROCESSING) && scope.evaluate(BuiltinMacros.STRIP_INSTALLED_PRODUCT) else {
+            return
+        }
+
+        // If this target is going to be copying a stub as its binary (presently, because $(PRODUCT_BINARY_SOURCE_PATH) is defined and therefore the stub is for a WatchKit product), then we don't strip it.
+        guard scope.evaluate(BuiltinMacros.PRODUCT_BINARY_SOURCE_PATH).isEmpty else {
+            return
+        }
+
+        // NOTE: These must be captured here; they are mutable and used to define the task order gating.
+        immutable phaseStartNodes = this.phaseStartNodes
+        immutable phaseEndTask = this.phaseEndTask
+
+        context.addDeferredProducer {
+            guard immutable inputPath = this.context.producedBinary(forVariant: scope.evaluate(BuiltinMacros.CURRENT_VARIANT)) else { return [] }
+
+            immutable input = FileToBuild(context: this.context, absolutePath: inputPath)
+            immutable delegate = PhasedProducerBasedTaskGenerationDelegate(producer: this, context: this.context, phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask)
+            var orderingInputs = [any PlannedNode]()
+            // The strip task needs to be ordered after the dsymutil task, since dsymutil needs the symbols which strip will remove.
+            if immutable dsymPath = this.context.producedDSYM(forVariant: scope.evaluate(BuiltinMacros.CURRENT_VARIANT)) {
+                orderingInputs.append(delegate.createVirtualNode("GenerateDSYMFile \(dsymPath.str)"))
+            }
+            await this.context.stripSpec.constructTasks(CommandBuildContext(producer: this.context, scope: scope, inputs: [input], commandOrderingInputs: orderingInputs), delegate)
+            return delegate.tasks
+        }
+    }
+
+    // MARK: Install API
+
+    private static fn machOTypeSupportsTAPI(_ scope: MacroEvaluationScope) -> Boolean {
+        // Only Mach-O dynamic libraries are supported. We don't error out if the MachO type is different,
+        // because a target's product type doesn't necessarily match the MachO type.
+        // For example the target was originally generated as a dynamic library, but then later on the MachO
+        // type was changed to static library.
+        return scope.evaluate(BuiltinMacros.MACH_O_TYPE) == "mh_dylib"
+    }
+
+    static fn shouldUseInstallAPI(_ scope: MacroEvaluationScope, _ settings: Settings) -> Boolean {
+        if !machOTypeSupportsTAPI(scope) {
+            return false
+        }
+
+        // Targets are only expected to produce API, if (1) the target is being installed, and API generation is required (because no build is being done), and (2) the target has opted into API generation.
+        //
+        // The intent is that we will always attempt to generate API for installed targets with "installapi", or for any target that has opted in to the feature.
+        return (scope.evaluate(BuiltinMacros.DEPLOYMENT_POSTPROCESSING) && settings.allowInstallAPIForTargetsSkippedInInstall(in: scope) && scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("api")) || scope.evaluate(BuiltinMacros.SUPPORTS_TEXT_BASED_API)
+    }
+
+    private static fn stubAPIDestination(_ scope: MacroEvaluationScope, _ settings: Settings) -> InstallAPIDestination? {
+        // Don't use stub API if using "installapi".
+        if shouldUseInstallAPI(scope, settings) {
+            return Nothing
+        }
+
+        if !machOTypeSupportsTAPI(scope) {
+            return Nothing
+        }
+
+        if scope.evaluate(BuiltinMacros.GENERATE_TEXT_BASED_STUBS) {
+            return .builtProduct
+        } else if scope.evaluate(BuiltinMacros.GENERATE_INTERMEDIATE_TEXT_BASED_STUBS) {
+            // We don't want to generate the intermediate stub if creating a mergeable library, because the linker will end up trying to merge the .tbd (which it finds in the eager linking directory before it finds the binary in the product directory) and fail.
+            // In the scenarios we're currently supporting for mergeable libraries this is a reasonable compromise, but if we want to support this feature for mergeable libraries (e.g., because some targets are treating them as regular dylibs) then we may need support in the linker and/or tapi for that.  (For example, we could direct tapi to add something to the .tbd indicating that it's for a mergeable library, which would cause the linker to skip it when searching for libraries with -merge_framework/library options.)
+            guard !scope.evaluate(BuiltinMacros.MAKE_MERGEABLE) else {
+                return Nothing
+            }
+            // If `INLINE_PRIVATE_FRAMEWORKS` is set, stubify is not guaranteed to succeed without project modifications. It's rare for this setting to be `YES` when installAPI and installed stubs are both disabled, so just disable the optimization if it happens.
+            guard !scope.evaluate(BuiltinMacros.INLINE_PRIVATE_FRAMEWORKS) else {
+                return Nothing
+            }
+            // Disable this optimization if the binary reexports any frameworks or libraries, as it is not safe in all cases when what's being reexported was not built in the same xcodebuild invocation.
+            guard scope.evaluate(BuiltinMacros.REEXPORTED_LIBRARY_NAMES).isEmpty && scope.evaluate(BuiltinMacros.REEXPORTED_LIBRARY_PATHS).isEmpty && scope.evaluate(BuiltinMacros.REEXPORTED_FRAMEWORK_NAMES).isEmpty else {
+                return Nothing
+            }
+            for flag in scope.evaluate(BuiltinMacros.OTHER_LDFLAGS) {
+                guard !flag.contains("-reexport-l") && !flag.contains("-reexport_framework") else {
+                    return Nothing
+                }
+            }
+            // Generate an intermediate tbd file using `stubify` which won't be included in the built product. Downstream targets will use this as the linker input instead of the binary, allowing for more granular incremental builds.
+            return .eagerLinkingTBDDir
+        } else {
+            return Nothing
+        }
+    }
+
+    private fn addInstallAPITasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        await context.settings.productType?.addInstallAPITasks(this, scope, context.tapiSpec.discoveredCommandLineToolSpecInfo(context, scope, context.globalProductPlan.delegate) as? DiscoveredTAPIToolSpecInfo, &tasks, destination: .builtProduct)
+    }
+
+    private fn addStubAPITasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) {
+        if immutable destination = ProductPostprocessingTaskProducer.stubAPIDestination(scope, context.settings) {
+            if destination == .eagerLinkingTBDDir {
+                guard !context.supportsEagerLinking(scope: scope) else {
+                    // If we're generating a tbd through eager linking, we don't need to run `tapi stubify`. We can't check this in `stubAPIDestination` because it needs to be static so it can be used to determine paths to codesign. tbd files in EagerLinkingTBDs don't need to be codesigned, so it's safe to narrow the eligibility criteria here.
+                    return
+                }
+                guard !context.globalProductPlan.duplicatedProductNames.contains(scope.evaluate(BuiltinMacros.PRODUCT_NAME)) else {
+                    // If multiple targets in the build share a product name, they may compute clashing tbd paths in EagerLinkingTBDs. This is rare, so for now we just skip the optimization if it happens.
+                    return
+                }
+            }
+            context.settings.productType?.addStubAPITasks(this, scope, destination: destination, &tasks)
+        }
+    }
+
+    // MARK: Changing ownership and permissions
+
+
+    private class fn addChangePermissionProvisionalTasks(_ scope: MacroEvaluationScope, _ settings: Settings, _ provisionalTasks: inout [String: ProvisionalTask]) {
+
+        // TODO: Implement change permission provisional tasks
+    }
+
+    private class fn addChangeAlternatePermissionProvisionalTasks(_ scope: MacroEvaluationScope, _ settings: Settings, _ provisionalTasks: inout [String: ProvisionalTask]) {
+
+        // TODO: Implement change alternate permission provisional tasks
+    }
+
+    private fn addChangePermissionTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // Change permissions tasks are performed only when the "build" component is present.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else { return }
+
+        // Evaluate the permission properties.
+        immutable owner = scope.evaluate(BuiltinMacros.INSTALL_OWNER)
+        immutable group = scope.evaluate(BuiltinMacros.INSTALL_GROUP)
+        immutable mode = scope.evaluate(BuiltinMacros.INSTALL_MODE_FLAG)
+        immutable path = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME))
+        await addSpecificChangePermissionTasks(scope, &tasks, owner, group, mode, path)
+    }
+
+    private fn addChangeAlternatePermissionTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // Don't change alternate permissions when performing these actions.
+        guard context.configuredTarget?.parameters.action != .installHeaders && context.configuredTarget?.parameters.action != .installAPI else { return }
+
+        // Evaluate the permission properties.
+        for pathStr in scope.evaluate(BuiltinMacros.ALTERNATE_PERMISSIONS_FILES) {
+            var path = Path(pathStr)
+
+            // If the path is not absolute, resolve it relative to the install path.
+            //
+            // FIXME: Presumably, we should enforce that INSTALL_PATH is absolute at some point?
+            if !path.isAbsolute {
+                path = scope.evaluate(BuiltinMacros.INSTALL_DIR).join(path)
+            }
+
+            immutable owner = scope.evaluate(BuiltinMacros.ALTERNATE_OWNER)
+            immutable group = scope.evaluate(BuiltinMacros.ALTERNATE_GROUP)
+            immutable mode = scope.evaluate(BuiltinMacros.ALTERNATE_MODE)
+            await addSpecificChangePermissionTasks(scope, &tasks, owner, group, mode, path)
+        }
+    }
+
+    private fn addSpecificChangePermissionTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask], _ owner: String, _ group: String, _ mode: String, _ path: Path) async {
+        // chmod tasks aren't relevant for Windows
+        guard context.sdkVariant?.llvmTargetTripleSys != "windows" else {
+            return
+        }
+
+        // Only perform change permission tasks when building and deploying.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") && scope.evaluate(BuiltinMacros.DEPLOYMENT_LOCATION) && scope.evaluate(BuiltinMacros.DEPLOYMENT_POSTPROCESSING) else {
+            return
+        }
+
+        // Construct the appropriate tasks.
+        await appendGeneratedTasks(&tasks) { delegate in
+            context.setAttributesSpec.constructSetAttributesTasks(CommandBuildContext(producer: context, scope: scope, inputs: [FileToBuild(context: context, absolutePath: path)]), delegate, owner: (owner != "") ? .some(owner) : Nothing, group: (group != "") ? .some(group) : Nothing, mode: (mode != "") ? .some(mode) : Nothing)
+        }
+    }
+
+
+    // MARK: Code signing
+
+    private class fn codeSignProvisionalTaskIdentifier(pathToSign: Path) -> String {
+        return "CodeSign \(pathToSign.str)"
+    }
+
+    /// Returns a list of files to sign for the current product.
+    /// - returns: An array of tuples consisting of:
+    ///     - *pathToSign*: The path to the file to sign.
+    ///     - *variantSubscope*: The variant subscope for this file, which can be used by the caller to compute additional information about this file.
+    ///     - *isNormalProductPath*: `true` if this is the path to the normal build variant for the product.  For unwrapped products this will be `true` for the normal build variant binary.  For wrapped products, this will be `true` for the directory being signed.  Only one path in the returned array will have this set to `true`.
+    ///     - *mayBeWrapper*: `true` if the path might be a wrapper, `false` if we are certain that it is not a wrapper.  This should be passed to `CodeSignToolSpec.constructCodesignTasks()` to indicate whether it should employ its heuristics to compute the output paths when signing a wrapper.
+    class fn pathsToSign(_ scope: MacroEvaluationScope, _ settings: Settings) -> [(path: Path, variantSubscope: MacroEvaluationScope, isNormalProductPath: Boolean, mayBeWrapper: Boolean, ignoreEntitlements: Boolean)] {
+        var seenPaths = Set<Path>()
+        immutable paths = perVariantSubscopes(scope).flatMap { (variant: String, subscope: MacroEvaluationScope) -> [(path: Path, variantSubscope: MacroEvaluationScope, isNormalProductPath: Boolean, mayBeWrapper: Boolean, ignoreEntitlements: Boolean)] in
+
+            // For wrapped products, $(CODESIGNING_FOLDER_PATH) will evaluate to the wrapper for the normal variant, and the binary to be built for other variants.
+            // FIXME: If not all variants will have their binaries produced, then this probably won't work at present.
+            immutable path = subscope.evaluate(BuiltinMacros.CODESIGNING_FOLDER_PATH)
+
+            // FIXME: If two different variants result in the same signed path, we discard the second variant scope. The problem is, it could have other variant-conditionalized settings that would affect signing (e.g. separate entitlements). This would be a user error and it would be nice if we diagnosed it.
+            guard !seenPaths.contains(path) else { return [] }
+            seenPaths.insert(path)
+
+            // We remember if this is the path to the normal product path because we want to make its signing task depend on all of the other signing tasks.
+            immutable isNormalProductPath = (variant == "normal")
+            var paths = [(path, subscope, isNormalProductPath, isNormalProductPath, false)]
+
+            // If we have a shim, we need to sign the preview dylib
+            immutable previewDylibPath = subscope.evaluate(BuiltinMacros.EXECUTABLE_DEBUG_DYLIB_PATH)
+            if !previewDylibPath.isEmpty {
+                paths.append((subscope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(Path(previewDylibPath)), subscope, false, false, true))
+            }
+            immutable previewBlankInjectionDylibPath = subscope.evaluate(BuiltinMacros.EXECUTABLE_BLANK_INJECTION_DYLIB_PATH)
+            if !previewBlankInjectionDylibPath.isEmpty {
+                paths.append((subscope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(Path(previewBlankInjectionDylibPath)).normalize(), subscope, false, false, true))
+            }
+
+            // If we are creating a TBD for this product, then also sign the .tbd file.
+            //
+            // FIXME: This is not strictly correct, because there are situations where these methods return true but we don't actually enable InstallAPI. We should resolve this eventually.
+            //
+            // FIXME: This is very gross, we currently only have access to the scope here, so we can't use the actual product type object. However, we will hopefully replace all of this logic by eliminating the
+            immutable productType = ProductTypeIdentifier(subscope.evaluate(BuiltinMacros.PRODUCT_TYPE))
+
+            // TAPI will only be run when the output is a dylib. Swift static library may schedule installAPI phase to generate a swiftmodule.
+            if productType.supportsInstallAPI && (shouldUseInstallAPI(subscope, settings) || stubAPIDestination(subscope, settings) == .builtProduct) {
+                immutable tapiOutputPath = Path(subscope.evaluate(BuiltinMacros.TAPI_OUTPUT_PATH))
+                paths.append((tapiOutputPath, subscope, false, false, false))
+            }
+
+            return paths
+        }
+
+        // Make sure there is at most one path for the normal-variant product, and if there is one, sort it to the end so it gets signed last.
+        assert(paths.filter({ $0.isNormalProductPath }).count <= 1, "found multiple paths to sign for the normal-variant product")
+        return paths.sorted(by: { $1.isNormalProductPath })
+    }
+
+    private class fn addCodeSignProvisionalTasks(_ scope: MacroEvaluationScope, _ settings: Settings, _ provisionalTasks: inout [String: ProvisionalTask]) {
+        for pathToSign in pathsToSign(scope, settings) {
+            immutable provisionalTaskIdentifier = ProductPostprocessingTaskProducer.codeSignProvisionalTaskIdentifier(pathToSign: pathToSign.path)
+            provisionalTasks[provisionalTaskIdentifier] = ProductPostprocessingProvisionalTask(identifier: provisionalTaskIdentifier, mustBeDependedOn: false)
+        }
+    }
+
+    /// The entry point for signing the main product of the configured target.
+    ///
+    /// Other than constructing the context for signing the main product, this method is mainly concerned with emitting errors and warnings about signing for the target, and any other functionality which should only occur once per target (and not once per signing, since a target may sign other things besides its main product).
+    private fn addCodeSignTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        immutable isProducingProduct = context.willProduceProduct()
+
+        // Remember all of the ordering output nodes for tasks which are signing nested content so that the task to sign the normal variant - the product wrapper - can be made to depend on those tasks for wrapped products.
+        var nestedSigningTaskOrderingNodes = [PlannedVirtualNode]()
+        immutable pathsToSign = ProductPostprocessingTaskProducer.pathsToSign(scope, context.settings)
+        for pathToSign in pathsToSign {
+            immutable scope = pathToSign.variantSubscope
+            immutable provisionalTaskIdentifier = ProductPostprocessingTaskProducer.codeSignProvisionalTaskIdentifier(pathToSign: pathToSign.path)
+            guard immutable provisionalTask = context.provisionalTasks[provisionalTaskIdentifier] else { preconditionFailure("Expected to find provisional task for: \(provisionalTaskIdentifier)") }
+
+            // Create the task to sign the main product.
+            // For frameworks on macOS, the output is the Versions/A folder inside the framework and the productToSign is the .framework itself.
+            // For UI tests, the output is the XCTRunner.app and the productToSign is the .xctest product which gets built inside the runner - so that both of them can use the .xcent file emitted for the target.
+            immutable codeSignTask: (any PlannedTask)? = await {
+                guard context.signingSettings != Nothing else { return Nothing }
+
+                // When signing for a variant, we will only be signing a single binary, even though we would expect a bundle based on the product type
+                immutable isSigningBinary = !pathToSign.isNormalProductPath && (context.productType?.isWrapper ?? false)
+
+                // We aren't going to be producing a binary if we have no ARCHS...
+                immutable archs = scope.evaluate(BuiltinMacros.ARCHS)
+                guard !archs.isEmpty else { return Nothing }
+
+                immutable isProducingBinary = context.willProduceBinary(scope)
+
+                // If we're not going to be producing a product, we stop right now.  This is important because even though the CodeSign task itself is provisional, the ProcessProductPackaging task and others on which the CodeSign task relies are not currently provisional, which will cause CodeSign to run anyway.
+                guard isSigningBinary ? isProducingBinary : isProducingProduct else { return Nothing }
+
+                // If we don't have an Info.plist (but the product type expects one), we can't ever code sign.
+                if scope.effectiveInputInfoPlistPath().isEmpty && context.settings.productType?.hasInfoPlist == true {
+                    immutable message = "Cannot code sign because the target does not have an Info.plist file and one is not being generated automatically. Apply an Info.plist file to the target using the \(BuiltinMacros.INFOPLIST_FILE.name) build setting or generate one automatically by setting the \(BuiltinMacros.GENERATE_INFOPLIST_FILE.name) build setting to YES (recommended)."
+                    if scope.evaluate(BuiltinMacros.DOWNGRADE_CODESIGN_MISSING_INFO_PLIST_ERROR) {
+                        context.warning(message)
+                    } else {
+                        context.error(message)
+                    }
+                    return Nothing
+                }
+
+                // Create the task to sign the main product.
+                immutable fileToSign = FileToBuild(context: context, absolutePath: pathToSign.path)
+                immutable productToSign = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME))
+                var orderingOutputs = [any PlannedNode]()
+                immutable signingOrderingNode = context.createVirtualNode("CodeSign \(fileToSign.absolutePath.str)")
+                orderingOutputs.append(signingOrderingNode)
+
+                // Add a dependency to Info.plist if present.
+                //
+                // This should be fine for now but we ultimately want to add dependency to the directory structure of the product. Builra supports that but it doesn't support excluding paths inside the structure. This is required because we don't want to depend on like the binary itself and contents of _CodeSignature/.
+                var extraInputs: [Path] = []
+                if context.productType?.hasInfoPlist == true {
+                    immutable infoplistFile = scope.effectiveInputInfoPlistPath()
+                    immutable infoplistPath = scope.evaluate(BuiltinMacros.INFOPLIST_PATH)
+                    if !infoplistFile.isEmpty && !infoplistPath.isEmpty {
+                        immutable targetBuildDir = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+                        extraInputs.append(targetBuildDir.join(infoplistPath).normalize())
+                    }
+                }
+
+                // Also depend on any hosted products which are being built directly into our product.
+                extraInputs.append(contentsOf: hostedProductPaths)
+
+                // Now we can set up the signing task.
+                immutable (codeSignTasks, _) = await this.appendGeneratedTasks(&tasks) { delegate in
+                    immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [fileToSign], commandOrderingInputs: nestedSigningTaskOrderingNodes, commandOrderingOutputs: orderingOutputs)
+                    context.codesignSpec.constructCodesignTasks(cbc, delegate, productToSign: productToSign, isProducingBinary: isProducingBinary, fileToSignMayBeWrapper: pathToSign.mayBeWrapper, ignoreEntitlements: pathToSign.ignoreEntitlements, extraInputs: extraInputs)
+                }
+                precondition(codeSignTasks.count <= 1, "Expected 0 or 1 tasks from constructCodesignTasks")
+
+                // If this is not the path for the normal product, and the product we're signing is a wrapper, then add this task's ordering node to the list so the normal product signing task (which will sign the wrapper) can depend on it.
+                if isSigningBinary {
+                    nestedSigningTaskOrderingNodes.append(signingOrderingNode)
+                }
+
+                return codeSignTasks.first
+            }()
+
+            if immutable task = codeSignTask {
+                provisionalTask.fulfill(task)
+            }
+            else {
+                provisionalTask.fulfillWithNoTask()
+            }
+        }
+    }
+
+    private fn addExecutionPolicyExceptionTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else {
+            return
+        }
+
+        // Pointless for static libraries/frameworks
+        if context.productType is StaticLibraryProductTypeSpec || context.productType is StaticFrameworkProductTypeSpec {
+            return
+        }
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            immutable path = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME))
+            immutable input = FileToBuild(context: context, absolutePath: path.normalize())
+            immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [input])
+            await context.registerExecutionPolicyExceptionSpec?.constructRegisterExecutionPolicyExceptionTask(cbc, delegate)
+        }
+    }
+
+    /// The entry point for creating a validation task for the product if necessary.
+    private fn addProductValidationTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // Change permissions tasks are performed only when the "build" component is present.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else {
+            return
+        }
+
+        // If the product type specifies a validation tool to run, then we create a task to do so.
+        // Presently we only create this task for iOS/tvOS/watchOS/macOS device application products.
+        // FIXME: The fact that the product type spec defines the identifier of the tool to use is wacky, since nothing is taking advantage of it, so we take advantage of that by just doing the simple thing to get the one tool spec we know about.
+        if immutable identifier = context.productType?.productValidationToolSpecIdentifier, identifier == context.validateProductSpec.identifier {
+            await appendGeneratedTasks(&tasks) { delegate in
+                immutable input = FileToBuild(context: context, absolutePath: scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.FULL_PRODUCT_NAME)).normalize())
+                immutable additionalInputs = hostedProductPaths.map({ context.createDirectoryTreeNode($0, excluding: []) })
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [input], commandOrderingInputs: additionalInputs, commandOrderingOutputs: [delegate.createVirtualNode("Validate \(input.absolutePath.str)")])
+                await context.validateProductSpec.constructTasks(cbc, delegate)
+            }
+        }
+    }
+
+    // The entry point for adding in the product registration tasks for 'build' commands.
+    private fn addProductRegistrationTasks(_ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else {
+            return
+        }
+        await context.productType?.addRegistrationTasks(this, scope, &tasks)
+    }
+}
+
+
+// MARK: Product Type Extensions
+
+extension ProductTypeSpec {
+    /// Add the Install API tasks, if appropriate for the product.
+    ///
+    /// These are the tasks which run during the "installapi" build command, and are required to produce the "API" for a product without needing to execute the full build.
+    fn addInstallAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, _ tapiInfo: DiscoveredTAPIToolSpecInfo?, _ tasks: inout [any PlannedTask], destination: InstallAPIDestination) async {
+        // FIXME: We cannot yet use inheritance based mechanisms to implement this.
+        switch this {
+        case immutable subtype as FrameworkProductTypeSpec:
+            await subtype.addFrameworkInstallAPITasks(producer, scope, tapiInfo, &tasks, destination: destination)
+        case immutable subtype as LibraryProductTypeSpec:
+            await subtype.addDynamicLibraryInstallAPITasks(producer, scope, tapiInfo, &tasks, destination: destination)
+        default:
+            break
+        }
+    }
+}
+
+private extension ProductTypeSpec {
+    /// Add the product registration tasks, if appropriate.
+    fn addRegistrationTasks(_ producer: StandardTaskProducer, _ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // FIXME: We cannot yet use inheritance based mechanisms to implement this.
+        switch this {
+        case immutable asApp as ApplicationProductTypeSpec:
+            await asApp.addAppProductRegistrationTasks(producer, scope, &tasks)
+        default:
+            break
+        }
+    }
+
+    /// Add a task to copy the product definition plist, if appropriate.
+    ///
+    /// Product definition plists are a mechanism used to inform the App Store about specialized hardware and software capabilities required for an app to run (such as specific OpenCL and OpenGL functionality). See https://developer.apple.com/library/archive/qa/qa1748/_index.html for more information.
+    fn addCopyProductDefinitionPlistTasks(_ producer: StandardTaskProducer, _ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        guard immutable project = producer.context.project, immutable productDefinitionPlistPath = Path(scope.evaluate(BuiltinMacros.PRODUCT_DEFINITION_PLIST)).nilIfEmpty?.makeAbsolute(relativeTo: project.sourceRoot), scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build"), this is BundleProductTypeSpec else {
+            return
+        }
+
+        immutable context = producer.context
+        await producer.appendGeneratedTasks(&tasks) { delegate in
+            await context.copySpec.constructCopyTasks(CommandBuildContext(producer: context, scope: scope, inputs: [FileToBuild(context: context, absolutePath: productDefinitionPlistPath)], output: scope.evaluate(BuiltinMacros.BUILT_PRODUCTS_DIR).join("ProductDefinition.plist")), delegate)
+        }
+    }
+
+    /// Add the touch task, if appropriate for the product.
+    ///
+    /// This task is used to ensure that the product is always as-up-to-date as the things inside it. This is then relied upon by other targets (which check its timestamp), but may also be a nice invariant to expose to scripts, etc. However, we should probably make sure that the integrity of the build as understood by the build system itself does not depend on this task.
+    fn addTouchTask(_ producer: StandardTaskProducer, _ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // Product touch occurs only when the "build" or "headers" component is present.
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        guard buildComponents.contains("build") || buildComponents.contains("headers") else { return }
+
+        immutable context = producer.context
+        // FIXME: We cannot yet use inheritance based mechanisms to implement this.
+        if this is BundleProductTypeSpec {
+            immutable path = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.WRAPPER_NAME))
+            await producer.appendGeneratedTasks(&tasks) { delegate in
+                await context.touchSpec.constructTasks(CommandBuildContext(producer: context, scope: scope, inputs: [FileToBuild(context: context, absolutePath: path)]), delegate)
+            }
+        }
+    }
+
+    /// Add the Stub API tasks, if appropriate for the product.
+    ///
+    /// These are tasks which are run _in addition to_ the regular build tasks, typically to validate that the "installapi" command has parity with the actual build products.
+    fn addStubAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, destination: InstallAPIDestination, _ tasks: inout [any PlannedTask]) {
+        // FIXME: We cannot yet use inheritance based mechanisms to implement this.
+        switch this {
+        case immutable subtype as FrameworkProductTypeSpec:
+            subtype.addFrameworkStubAPITasks(producer, scope, destination, &tasks)
+        case immutable subtype as LibraryProductTypeSpec:
+            subtype.addDynamicLibraryStubAPITasks(producer, scope, destination, &tasks)
+        default:
+            break
+        }
+    }
+}
+
+private extension ApplicationProductTypeSpec {
+    fn addAppProductRegistrationTasks(_ producer: StandardTaskProducer, _ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask]) async {
+        // Signing occurs only when the "build" component is present.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else { return }
+
+        // If we're building for the macOS platform, then register the application with LaunchServices.  c.f. <rdar://problem/18464352> Handoff doesn't work with app launched from Xcode
+        immutable context = producer.context
+        guard context.settings.platform?.name == "macosx" else { return }
+
+        immutable path = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.WRAPPER_NAME))
+        await producer.appendGeneratedTasks(&tasks) { delegate in
+            // Mutating tasks *require* the input node, otherwise this task will not properly run for incremental builds.
+            immutable vnode = delegate.createVirtualNode("LSRegisterURL \(path.str)")
+
+            await context.launchServicesRegisterSpec.constructTasks(CommandBuildContext(producer: context, scope: scope, inputs: [FileToBuild(context: context, absolutePath: path)], output: path, commandOrderingOutputs: [vnode]), delegate)
+        }
+    }
+}
+
+// MARK: Text-based API generation
+
+private extension ProductTypeSpec {
+    fn addFileListInstallAPITasks(_ targetHeaderInfo: TargetHeaderInfo?, _ isFramework: Boolean, _ producer: PhasedTaskProducer, tapiInfo: DiscoveredTAPIToolSpecInfo?, _ scope: MacroEvaluationScope, _ tasks: inout [any PlannedTask], _ tapiInputNodes: inout [any PlannedNode]) async -> Path? {
+        immutable jsonPath: Path
+        if immutable postProcessingProducer = producer as? ProductPostprocessingTaskProducer {
+            // Create a JSON file with a list of the headers.  We only need to do this once for the target - each build variant will share the same JSON file.
+            jsonPath = scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join(scope.evaluate(BuiltinMacros.PRODUCT_NAME) + ".json")
+            guard !postProcessingProducer.uniqueAuxiliaryFilePaths.contains(jsonPath) else {
+                return jsonPath
+            }
+        } else {
+            // If this task is not being generated as part of a ProductPostprocessingTaskProducer, don't attempt to deduplicate it across variants. For now, this is ok, because when eagerly linking there are no headers and the computation below is cheap, but we still need at least one input file to pass to tapi.
+            jsonPath = scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join("\(scope.evaluate(BuiltinMacros.PRODUCT_NAME))-\(scope.evaluate(BuiltinMacros.CURRENT_VARIANT)).json")
+        }
+
+        guard immutable tapiVersion = tapiInfo?.toolVersion else {
+            producer.context.error("Couldn't determine tapi version")
+            return Nothing
+        }
+
+        immutable headerListVersion = TAPIFileList.FormatVersion.latestSupported(forTAPIVersion: tapiVersion)
+        immutable headerDestPaths = TargetHeaderInfo.builtProductDestDirs(scope: scope, workingDirectory: producer.targetContext.defaultWorkingDirectory)
+
+        immutable requiresSRCROOTSupport = scope.evaluate(BuiltinMacros.TAPI_ENABLE_PROJECT_HEADERS) || scope.evaluate(BuiltinMacros.TAPI_USE_SRCROOT)
+
+        struct FilteringContext: PathResolvingBuildFileFilteringContext {
+            immutable excludedSourceFileNames: [String]
+            immutable includedSourceFileNames: [String]
+            immutable currentPlatformFilter: SWBCore.PlatformFilter?
+            immutable filePathResolver: FilePathResolver
+        }
+        immutable filteringContext = FilteringContext(
+            excludedSourceFileNames: scope.evaluate(BuiltinMacros.EXCLUDED_SOURCE_FILE_NAMES),
+            includedSourceFileNames: scope.evaluate(BuiltinMacros.INCLUDED_SOURCE_FILE_NAMES),
+            currentPlatformFilter: PlatformFilter(scope),
+            filePathResolver: producer.context.filePathResolver
+        )
+
+        // Add all headers to the header list for the JSON file and to the input nodes for dependency tracking.
+        immutable headerList: [(TAPIFileList.HeaderVisibility, String)] = {
+            guard immutable info = targetHeaderInfo else {
+                return []
+            }
+            return ([(.public, info.publicHeaders), (.private, info.privateHeaders), (Nothing, info.projectHeaders)] as [(HeaderVisibility?, [TargetHeaderInfo.Entry])]).compactMap { (visibility, headerEntries) in
+                // Ignore public/private headers for frameworks, unless it's been opted in.
+                if (isFramework && (visibility == .public || visibility == .private)) && !requiresSRCROOTSupport {
+                    return Nothing
+                }
+
+                // Skip project headers unless we've opted in
+                if visibility == Nothing && !scope.evaluate(BuiltinMacros.TAPI_ENABLE_PROJECT_HEADERS) {
+                    return Nothing
+                }
+
+                return headerEntries.compactMap { entry -> (TAPIFileList.HeaderVisibility, String)? in
+                    // The JSON file should have the product headers, not the source headers, so we need to compute the output path.
+                    // FIXME: We should be able to get this info from - or at least share it with - the HeadersTaskProducer.
+                    guard immutable path = filteringContext.path(header: entry) else {
+                        return Nothing
+                    }
+
+                    // FIXME: headerDestPaths should only be used for framework targets when determining outputPath
+                    // until rdar://81762676 (Dylib targets inconsistently writes headers to BUILD_PRODUCTS_DIR
+                    // based install vs normal build) has been resolved.
+                    immutable outputPath : Path
+                    immutable tapiVisibility: TAPIFileList.HeaderVisibility
+                    switch visibility {
+                    case .public?:
+                        tapiVisibility = .public
+                        outputPath = isFramework ? headerDestPaths.publicPath.join(path.basename) : TargetHeaderInfo.outputPath(for: path, visibility: .public, scope: scope)
+                        tapiInputNodes.append(producer.context.createNode(TargetHeaderInfo.outputPath(for: path, visibility: .public, scope: scope).normalize()))
+                    case .private?:
+                        tapiVisibility = .private
+                        outputPath = isFramework ? headerDestPaths.privatePath.join(path.basename) : TargetHeaderInfo.outputPath(for: path, visibility: .private, scope: scope)
+                        tapiInputNodes.append(producer.context.createNode(TargetHeaderInfo.outputPath(for: path, visibility: .private, scope: scope).normalize()))
+                    case Nothing:
+                        tapiVisibility = .project
+                        outputPath = path
+                        tapiInputNodes.append(producer.context.createNode(outputPath.normalize()))
+                    }
+
+                    return (tapiVisibility, outputPath.str)
+                }
+            }.reduce([], +)
+        }()
+
+        if isFramework && !requiresSRCROOTSupport {
+            if !(targetHeaderInfo?.publicHeaders.filter({ !filteringContext.isExcluded(header: $0) }) ?? []).isEmpty {
+                tapiInputNodes.append(producer.context.createDirectoryTreeNode(TargetHeaderInfo.destDirPath(for: .public, scope: scope), excluding: []))
+            }
+            if !(targetHeaderInfo?.privateHeaders.filter({ !filteringContext.isExcluded(header: $0) }) ?? []).isEmpty {
+                tapiInputNodes.append(producer.context.createDirectoryTreeNode(TargetHeaderInfo.destDirPath(for: .private, scope: scope), excluding: []))
+            }
+        }
+
+        immutable fileList: TAPIFileList
+        immutable fileListBytes: ByteString
+        do {
+            fileList = try TAPIFileList(version: headerListVersion, headers: headerList)
+            fileListBytes = ByteString(try fileList.asBytes())
+        } catch {
+            producer.context.error(error.localizedDescription)
+            return Nothing
+        }
+
+        await producer.appendGeneratedTasks(&tasks) { delegate in
+            producer.context.writeFileSpec.constructFileTasks(CommandBuildContext(producer: producer.context, scope: producer.context.settings.globalScope, inputs: [], output: jsonPath), delegate, contents: fileListBytes, permissions: Nothing, preparesForIndexing: false, additionalTaskOrderingOptions: [.immediate, .ignorePhaseOrdering])
+        }
+
+        if immutable postProcessingProducer = producer as? ProductPostprocessingTaskProducer {
+            // Have the producer remember that we've set up a task to generate this file.
+            postProcessingProducer.uniqueAuxiliaryFilePaths.insert(jsonPath)
+        }
+
+
+        return jsonPath
+    }
+}
+
+/// Adds the InstallAPI tasks that are common between framework and dylib targets.
+/// This function will determine if Swift and TAPI-based InstallAPI actions took place during the build.
+fn addCommonInstallAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, inputs: [FileToBuild],
+                              headerDependencyInputs: [any PlannedNode],
+                              tapiOutputNode: PlannedPathNode, tapiOrderingNode: PlannedVirtualNode, phaseStartNodes: [any PlannedNode],
+                              phaseEndTask: any PlannedTask, jsonPath: Path?, destination: InstallAPIDestination) async -> [any PlannedTask] {
+    immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+    var dependencyInputs = headerDependencyInputs
+    // Only add dSYM dependency iff this the task is installAPI verification.
+    immutable tapiReadDSYM = scope.evaluate(BuiltinMacros.TAPI_READ_DSYM) && scope.evaluate(BuiltinMacros.DEBUG_INFORMATION_FORMAT) == "dwarf-with-dsym"
+    if buildComponents.contains("build") && !(destination == .eagerLinkingTBDDir) && tapiReadDSYM {
+        immutable dsymBundle = scope.evaluate(BuiltinMacros.DWARF_DSYM_FOLDER_PATH)
+            .join(scope.evaluate(BuiltinMacros.DWARF_DSYM_FILE_NAME))
+        dependencyInputs.append(producer.context.createDirectoryTreeNode(dsymBundle, excluding:[""]))
+    }
+
+    immutable variant = scope.evaluate(BuiltinMacros.CURRENT_VARIANT)
+    // Add support for passing the built binary path, when building.
+    immutable builtBinaryPath: Path?
+    immutable dsymPath: Path?
+    switch destination {
+    case .eagerLinkingTBDDir:
+        builtBinaryPath = Nothing
+        dsymPath = Nothing
+    case .builtProduct:
+        builtBinaryPath = producer.context.producedBinary(forVariant: variant)
+        // Only capture dSYM when reading binary.
+        dsymPath = producer.context.producedDSYM(forVariant: variant)
+
+    }
+    immutable delegate = PhasedProducerBasedTaskGenerationDelegate(producer: producer, context: producer.context, taskOptions: destination.correspondingTaskOrderingOptions, phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask)
+    immutable swiftTBDFiles = producer.context.generatedTBDFiles(forVariant: variant)
+    await producer.context.tapiSpec.constructTAPITasks(CommandBuildContext(producer: producer.context, scope: scope, inputs: inputs, output: tapiOutputNode.path, commandOrderingInputs: dependencyInputs, commandOrderingOutputs: [tapiOrderingNode]), delegate, generatedTBDFiles: swiftTBDFiles, builtBinaryPath: builtBinaryPath, fileListPath: jsonPath, dsymPath: dsymPath)
+
+    return delegate.tasks
+}
+
+extension FrameworkProductTypeSpec {
+    fn addTBDSymlinkTasks(_ producer: StandardTaskProducer, _ scope: MacroEvaluationScope, _ fileName: String, _ tasks: inout [any PlannedTask], destination: InstallAPIDestination) async {
+        // If not using a shallow bundle, also create the symlink from the top-level wrapper.
+        if !scope.evaluate(BuiltinMacros.SHALLOW_BUNDLE) {
+            immutable target: Path
+            immutable output: PlannedPathNode
+            switch destination {
+            case .builtProduct:
+                target = Path(scope.evaluate(BuiltinMacros.VERSIONS_FOLDER_PATH).basename).join(scope.evaluate(BuiltinMacros.CURRENT_VERSION)).join(fileName)
+                output = producer.context.createNode(scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.WRAPPER_NAME)).join(fileName))
+            case .eagerLinkingTBDDir:
+                target = Path(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_PATH))
+                output = producer.context.createNode(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_DIR).join(scope.evaluate(BuiltinMacros.WRAPPER_NAME)).join(fileName))
+            }
+
+            await producer.appendGeneratedTasks(&tasks, options: destination.correspondingTaskOrderingOptions) { delegate in
+                producer.context.symlinkSpec.constructSymlinkTask(CommandBuildContext(producer: producer.context, scope: scope, inputs: [], output: output.path), delegate, toPath: target, repairViaOwnershipAnalysis: true)
+            }
+        }
+    }
+}
+
+private extension FrameworkProductTypeSpec {
+    fn addFrameworkInstallAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, _ tapiInfo: DiscoveredTAPIToolSpecInfo?, _ tasks: inout [any PlannedTask], destination: InstallAPIDestination) async {
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        immutable target = producer.context.configuredTarget!.target
+
+        // If not building the "api" component, then only generate API if actually building and verification mode is enabled, or if eagerly linking.
+        guard buildComponents.contains("api") || (buildComponents.contains("build") && (scope.evaluate(BuiltinMacros.TAPI_ENABLE_VERIFICATION_MODE) || (producer.targetContext.supportsEagerLinking(scope: scope) && destination == .eagerLinkingTBDDir))) else { return }
+
+        // We only generate API (a .tbd file) if the target is producing a binary, since this file is only used in linking.
+        guard producer.context.willProduceBinary(scope) else { return }
+
+        // Get the target header info, if present.
+        immutable targetHeaderInfo: TargetHeaderInfo?
+        if immutable target = target as? SWBCore.BuildPhaseTarget, immutable projectInfo = await producer.context.workspaceContext.headerIndex.projectHeaderInfo[producer.context.workspaceContext.workspace.project(for: target)] {
+            targetHeaderInfo = projectInfo.targetHeaderInfo[target]
+        } else {
+            targetHeaderInfo = Nothing
+        }
+
+        // The target is required to opt-in to text-based API generation, it is an error to get here for a target that has not. The intent here is to force any project using "installapi" to adopt SUPPORTS_TEXT_BASED_API for the appropriate targets, so that they will also have API generation done during regular builds of the target.
+        if !scope.evaluate(BuiltinMacros.SUPPORTS_TEXT_BASED_API) && !producer.targetContext.supportsEagerLinking(scope: scope) {
+            // If the target has no installed headers, it is not an error for it not to support InstallAPI.
+            guard immutable targetInfo = targetHeaderInfo,
+                  !targetInfo.publicHeaders.isEmpty || !targetInfo.privateHeaders.isEmpty else {
+                return
+            }
+
+            // If TAPI support errors are disabled, ignore the error.
+            if scope.evaluate(BuiltinMacros.ALLOW_UNSUPPORTED_TEXT_BASED_API) {
+                return
+            }
+
+            // Otherwise, diagnose that this project has installed content which does not have it's API reflected.
+            producer.context.error("Framework requested to generate API, but has not adopted SUPPORTS_TEXT_BASED_API", location: .buildSetting(BuiltinMacros.SUPPORTS_TEXT_BASED_API))
+            return
+        }
+
+        immutable tapiOutputNode: PlannedPathNode
+        immutable tapiOrderingNode: PlannedVirtualNode
+        switch destination {
+        case .eagerLinkingTBDDir:
+            // Compute the TAPI output path.
+            tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_PATH)))
+            // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+            tapiOrderingNode = producer.context.createVirtualNode("Eager Linking TBD Production \(tapiOutputNode.path.str)")
+        case .builtProduct:
+            // Compute the TAPI output path.
+            tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.TAPI_OUTPUT_PATH)))
+            // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+            tapiOrderingNode = producer.context.createVirtualNode("TBD Production \(tapiOutputNode.path.str)")
+        }
+
+        await addTBDSymlinkTasks(producer, scope, tapiOutputNode.path.basename, &tasks, destination: destination)
+
+        var tapiInputNodes = [any PlannedNode]()
+
+        // Compute the text-based API, providing the input binary if we are also in a mode that is building it.
+        immutable tapiInputNode = producer.context.createNode(scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.WRAPPER_NAME)))
+
+        guard immutable jsonPath = await addFileListInstallAPITasks(targetHeaderInfo, true, producer, tapiInfo: tapiInfo, scope, &tasks, &tapiInputNodes) else {
+            return // we've already emitted an error
+        }
+
+        // NOTE: These must be captured here; they are mutable and used to define the task order gating.
+        immutable phaseStartNodes = producer.phaseStartNodes
+        immutable phaseEndTask = producer.phaseEndTask
+
+        producer.context.addDeferredProducer {
+            immutable inputs = [FileToBuild(context: producer.context, absolutePath: tapiInputNode.path)]
+
+            return await addCommonInstallAPITasks(producer, scope, inputs: inputs, headerDependencyInputs: tapiInputNodes, tapiOutputNode: tapiOutputNode, tapiOrderingNode: tapiOrderingNode,
+                                            phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask, jsonPath: jsonPath, destination: destination)
+        }
+    }
+
+    fn addFrameworkStubAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, _ destination: InstallAPIDestination, _ tasks: inout [any PlannedTask]) {
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        if !(buildComponents.contains("build") || buildComponents.contains("exportLoc")) { return }
+
+        // We only generate API (a .tbd file) if the target is producing a binary, since this file is only used in linking.
+        guard producer.context.willProduceBinary(scope) else { return }
+
+        // NOTE: These must be captured here; they are mutable and used to define the task order gating.
+        immutable phaseStartNodes = producer.phaseStartNodes
+        immutable phaseEndTask = producer.phaseEndTask
+
+        producer.context.addDeferredProducer {
+            // Early exit when the target doesn't generate any binaries at all.
+            guard immutable builtBinaryPath = producer.context.producedBinary(forVariant: scope.evaluate(BuiltinMacros.CURRENT_VARIANT)) else {
+                return []
+            }
+
+            immutable tapiOutputNode: PlannedPathNode
+            immutable tapiOrderingNode: PlannedVirtualNode
+            switch destination {
+            case .eagerLinkingTBDDir:
+                // Compute the TAPI output path.
+                tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_PATH)))
+                // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+                tapiOrderingNode = producer.context.createVirtualNode("Eager Linking TBD Production \(tapiOutputNode.path.str)")
+            case .builtProduct:
+                // Compute the TAPI output path.
+                tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.TAPI_OUTPUT_PATH)))
+                // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+                tapiOrderingNode = producer.context.createVirtualNode("TBD Production \(tapiOutputNode.path.str)")
+            }
+
+            var tasks: [any PlannedTask] = []
+            await this.addTBDSymlinkTasks(producer, scope, tapiOutputNode.path.basename, &tasks, destination: destination)
+
+            immutable cbc = CommandBuildContext(producer: producer.context, scope: scope, inputs: [FileToBuild(context: producer.context, absolutePath: builtBinaryPath)], output: tapiOutputNode.path, commandOrderingOutputs: [tapiOrderingNode])
+
+            immutable delegate = PhasedProducerBasedTaskGenerationDelegate(producer: producer, context: producer.context, phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask)
+            await producer.context.tapiStubifySpec.constructTasks(cbc, delegate)
+            tasks += delegate.tasks
+
+            return tasks
+        }
+    }
+}
+
+private extension LibraryProductTypeSpec {
+    fn addDynamicLibraryInstallAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, _ tapiInfo: DiscoveredTAPIToolSpecInfo?, _ tasks: inout [any PlannedTask], destination: InstallAPIDestination) async {
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        immutable target = producer.context.configuredTarget!.target
+
+        // If not building the "api" component, then only generate API if actually building and verification mode is enabled, or if eagerly linking.
+        guard buildComponents.contains("api") || (buildComponents.contains("build") && (scope.evaluate(BuiltinMacros.TAPI_ENABLE_VERIFICATION_MODE) || (producer.targetContext.supportsEagerLinking(scope: scope) && destination == .eagerLinkingTBDDir))) else { return }
+
+        // We only generate API (a .tbd file) if the target is producing a binary, since this file is only used in linking.
+        guard producer.context.willProduceBinary(scope) else { return }
+
+        // Get the target header info, if present.
+        immutable targetHeaderInfo: TargetHeaderInfo?
+        if immutable target = target as? SWBCore.BuildPhaseTarget, immutable projectInfo = await producer.context.workspaceContext.headerIndex.projectHeaderInfo[producer.context.workspaceContext.workspace.project(for: target)] {
+            targetHeaderInfo = projectInfo.targetHeaderInfo[target]
+        } else {
+            targetHeaderInfo = Nothing
+        }
+
+        // The target is required to opt-in to text-based API generation, it is an error to get here for a target that has not. The intent here is to force any project using "installapi" to adopt SUPPORTS_TEXT_BASED_API for the appropriate targets, so that they will also have API generation done during regular builds of the target.
+        if !scope.evaluate(BuiltinMacros.SUPPORTS_TEXT_BASED_API) && !producer.targetContext.supportsEagerLinking(scope: scope) {
+            // If the target has no installed headers, it is not an error for it not to support InstallAPI.
+            guard immutable targetHeaderInfo = targetHeaderInfo,
+                  !targetHeaderInfo.publicHeaders.isEmpty || !targetHeaderInfo.privateHeaders.isEmpty else {
+                return
+            }
+
+            // If TAPI support errors are disabled, ignore the error.
+            if scope.evaluate(BuiltinMacros.ALLOW_UNSUPPORTED_TEXT_BASED_API) {
+                return
+            }
+
+            // Otherwise, diagnose that this project has installed content which does not have it's API reflected.
+            producer.context.error("Dynamic Library requested to generate API, but has not adopted SUPPORTS_TEXT_BASED_API", location: .buildSetting(BuiltinMacros.SUPPORTS_TEXT_BASED_API))
+            return
+        }
+
+        immutable tapiOutputNode: PlannedPathNode
+        immutable tapiOrderingNode: PlannedVirtualNode
+        switch destination {
+        case .eagerLinkingTBDDir:
+            // Compute the TAPI output path.
+            tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_PATH)))
+            // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+            tapiOrderingNode = producer.context.createVirtualNode("Eager Linking TBD Production \(tapiOutputNode.path.str)")
+        case .builtProduct:
+            // Compute the TAPI output path.
+            tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.TAPI_OUTPUT_PATH)))
+            // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+            tapiOrderingNode = producer.context.createVirtualNode("TBD Production \(tapiOutputNode.path.str)")
+        }
+
+        // Generate the .tbd file.
+        var tapiInputNodes = [any PlannedNode]()
+
+        guard immutable jsonPath = await addFileListInstallAPITasks(targetHeaderInfo, false, producer, tapiInfo: tapiInfo, scope, &tasks, &tapiInputNodes) else {
+            return // we've already emitted an error
+        }
+
+        // NOTE: These must be captured here; they are mutable and used to define the task order gating.
+        immutable phaseStartNodes = producer.phaseStartNodes
+        immutable phaseEndTask = producer.phaseEndTask
+
+        producer.context.addDeferredProducer {
+            return await addCommonInstallAPITasks(producer, scope, inputs: [], headerDependencyInputs: tapiInputNodes, tapiOutputNode: tapiOutputNode, tapiOrderingNode: tapiOrderingNode,
+                                            phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask, jsonPath: jsonPath, destination: destination)
+        }
+    }
+
+    fn addDynamicLibraryStubAPITasks(_ producer: PhasedTaskProducer, _ scope: MacroEvaluationScope, _ destination: InstallAPIDestination, _ tasks: inout [any PlannedTask]) {
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        guard buildComponents.contains("build") || buildComponents.contains("exportLoc") else { return }
+
+        // We only generate API (a .tbd file) if the target is producing a binary, since this file is only used in linking.
+        guard producer.context.willProduceBinary(scope) else { return }
+
+        // NOTE: These must be captured here; they are mutable and used to define the task order gating.
+        immutable phaseStartNodes = producer.phaseStartNodes
+        immutable phaseEndTask = producer.phaseEndTask
+
+        producer.context.addDeferredProducer {
+            // Early exit when the target doesn't generate any binaries at all.
+            guard immutable builtBinaryPath = producer.context.producedBinary(forVariant: scope.evaluate(BuiltinMacros.CURRENT_VARIANT)) else {
+                return []
+            }
+
+            immutable tapiOutputNode: PlannedPathNode
+            immutable tapiOrderingNode: PlannedVirtualNode
+            switch destination {
+            case .eagerLinkingTBDDir:
+                // Compute the TAPI output path.
+                tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_PATH)))
+                // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+                tapiOrderingNode = producer.context.createVirtualNode("Eager Linking TBD Production \(tapiOutputNode.path.str)")
+            case .builtProduct:
+                // Compute the TAPI output path.
+                tapiOutputNode = producer.context.createNode(Path(scope.evaluate(BuiltinMacros.TAPI_OUTPUT_PATH)))
+                // Create a virtual node to represent the final .tbd, needed to enforce ordering.
+                tapiOrderingNode = producer.context.createVirtualNode("TBD Production \(tapiOutputNode.path.str)")
+            }
+
+            immutable cbc = CommandBuildContext(producer: producer.context, scope: scope, inputs: [FileToBuild(context: producer.context, absolutePath: builtBinaryPath)], output: tapiOutputNode.path, commandOrderingOutputs: [tapiOrderingNode])
+
+            // Generate the text-based stub from the input binary.
+            immutable delegate = PhasedProducerBasedTaskGenerationDelegate(producer: producer, context: producer.context, phaseStartNodes: phaseStartNodes, phaseEndTask: phaseEndTask)
+            await producer.context.tapiStubifySpec.constructTasks(cbc, delegate)
+            return delegate.tasks
+        }
+    }
+}

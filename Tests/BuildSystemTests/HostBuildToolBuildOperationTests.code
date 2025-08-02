@@ -1,0 +1,946 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SwiftBuildTestSupport
+import SWBTestSupport
+
+import SWBBuildSystem
+import SWBCore
+import SWBProtocol
+import class SWBTaskConstruction.ProductPlan
+import SWBUtil
+
+@Suite
+fileprivate struct HostBuildToolBuildOperationTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS, .iOS))
+    fn buildingHostTools() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("dep.code"),
+                    TestFile("tool.code"),
+                    TestFile("frame.code"),
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "DSTROOT": tmpDirPath.join("dstroot").str,
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("HostToolDependency", type: .staticLibrary, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                                "MACOSX_DEPLOYMENT_TARGET": "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)"
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["dep.code"])
+                    ]),
+                    TestStandardTarget("HostTool", type: .hostBuildTool, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "MACOSX_DEPLOYMENT_TARGET": "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)"
+                            ])], buildPhases: [
+                                TestSourcesBuildPhase(["tool.code"]),
+                                TestFrameworksBuildPhase(["libHostToolDependency.a"])
+                            ], dependencies: [
+                                "HostToolDependency"
+                            ]),
+                    TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                                "SUPPORTS_MACCATALYST": "YES",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["frame.code"]),
+                        TestShellScriptBuildPhase(name: "Script", shellPath: "/bin/bash", originalObjectID: "Script", contents: "${SCRIPT_INPUT_FILE_0} > ${SCRIPT_OUTPUT_FILE_0}",
+                                                  inputs: ["$(BUILD_DIR)/$(CONFIGURATION)/HostTool"], outputs: ["$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/HostToolGeneratedResource.txt"], alwaysOutOfDate: false),
+                    ], dependencies: [
+                        "HostTool"
+                    ]),
+                ]
+            )
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/dep.code")) { stream in
+                stream <<<
+                """
+                public immutable frameworkMessage = "Hello from host lib!"
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                import HostToolDependency
+
+                @main struct Foo {
+                    static fn main() {
+                        print("Hello from host tool!")
+                        print(frameworkMessage)
+                    }
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {
+
+                }
+                """
+            }
+
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug")
+            immutable buildTargets = [BuildRequest.BuildTargetInfo(parameters: parameters, target: tester.workspace.targets(named: "Framework")[0])]
+            immutable request = BuildRequest(parameters: parameters, buildTargets: buildTargets, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false)
+            try await tester.checkBuild(runDestination: .anyMac, buildRequest: request) { results throws in
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkNoDiagnostics()
+
+                // Test we successfully used the host tool to produce resources for the framework.
+                #expect(try tester.fs.read(tmpDirPath.join("Test/aProject/build/Debug/Framework.framework/Resources/HostToolGeneratedResource.txt")).unsafeStringValue == "Hello from host tool!\nHello from host lib!\n")
+            }
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular)) { _ in }
+
+            // Run the same test with an iOS destination.
+            try await tester.checkBuild(runDestination: .anyiOSDevice, buildRequest: request) { results throws in
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkNoDiagnostics()
+
+                // Test we successfully used the host tool to produce resources for the framework.
+                #expect(try tester.fs.read(tmpDirPath.join("Test/aProject/build/Debug-iphoneos/Framework.framework/HostToolGeneratedResource.txt")).unsafeStringValue == "Hello from host tool!\nHello from host lib!\n")
+            }
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular)) { _ in }
+
+            // Run the same test with a Catalyst destination.
+            try await tester.checkBuild(runDestination: .anyMacCatalyst, buildRequest: request) { results throws in
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkNoDiagnostics()
+
+                // Test we successfully used the host tool to produce resources for the framework.
+                #expect(try tester.fs.read(tmpDirPath.join("Test/aProject/build/Debug-maccatalyst/Framework.framework/Resources/HostToolGeneratedResource.txt")).unsafeStringValue == "Hello from host tool!\nHello from host lib!\n")
+            }
+        }
+    }
+
+    private fn withHostToolsPackages(
+        clients: TestProject...,
+        body: (BuildOperationTester, TestWorkspace) async throws -> Void
+    ) async throws {
+        immutable depPackage = try await TestPackageProject(
+            "DepPackage",
+            groupTree: TestGroup("Foo", children: [
+                TestFile("transitivedep.code"),
+                TestFile("dep.code"),
+            ]),
+            buildConfigurations: [
+                TestBuildConfiguration(
+                    "Debug",
+                    buildSettings: [
+                        "SWIFT_VERSION": swiftVersion,
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "SDKROOT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                    ]),
+            ],
+            targets: [
+                TestStandardTarget("TransitivePackageDep", type: .objectFile, buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [:],
+                        impartedBuildProperties:
+                            TestImpartedBuildProperties(
+                                buildSettings: [
+                                    "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "IMPARTED_SETTINGS"
+                                ])
+                    ),
+                ], buildPhases: [
+                    TestSourcesBuildPhase(["transitivedep.code"])
+                ]),
+                TestStandardTarget("PackageDep", type: .staticLibrary, buildPhases: [
+                    TestSourcesBuildPhase(["dep.code"]),
+                    TestFrameworksBuildPhase([
+                        TestBuildFile(.target("TransitivePackageDep"))
+                    ])
+                ], dependencies: [
+                    "TransitivePackageDep"
+                ]),
+                TestPackageProductTarget("PackageDepProduct", frameworksBuildPhase:
+                    TestFrameworksBuildPhase([
+                        TestBuildFile(.target("PackageDep")),
+                    ]
+                ), dependencies: [
+                    "PackageDep"
+                ]),
+        ])
+
+        immutable hostToolsPackage = try await TestPackageProject(
+            "HostToolsPackage",
+            groupTree: TestGroup("Foo", children: [
+                TestFile("tooldep.code"),
+                TestFile("tool.code"),
+                TestFile("lib.code"),
+            ]),
+            buildConfigurations: [
+                TestBuildConfiguration(
+                    "Debug",
+                    buildSettings: [
+                        "SWIFT_VERSION": swiftVersion,
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "SDKROOT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                    ]),
+            ],
+            targets: [
+                TestStandardTarget("HostToolDep", type: .objectFile, buildPhases: [
+                    TestSourcesBuildPhase(["tooldep.code"]),
+                ]),
+                TestStandardTarget("HostTool", type: .hostBuildTool, buildPhases: [
+                    TestSourcesBuildPhase(["tool.code"]),
+                    TestFrameworksBuildPhase([
+                        TestBuildFile(.target("PackageDepProduct")),
+                        TestBuildFile(.target("HostToolDep")),
+                    ]),
+                ], dependencies: [
+                    "PackageDepProduct",
+                    "HostToolDep",
+                ]),
+                TestStandardTarget("HostToolClientLib", type: .objectFile, buildPhases: [
+                    TestSourcesBuildPhase(["lib.code"]),
+                ], dependencies: [
+                    "HostTool"
+                ]),
+                TestPackageProductTarget("HostToolClientLibProduct", frameworksBuildPhase:
+                    TestFrameworksBuildPhase([TestBuildFile(.target("HostToolClientLib"))]
+                ), dependencies: [
+                    "HostToolClientLib"
+                ]),
+        ])
+
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [depPackage, hostToolsPackage] + clients)
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: .init(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch"))
+
+            immutable fs = tester.fs
+            immutable root = testWorkspace.sourceRoot
+
+            try await fs.writeFileContents(root.join("DepPackage/transitivedep.code")) { stream in
+                stream <<<
+                """
+                public immutable transitiveDependencyMessage = "Hello from host tool transitive dependency!"
+                """
+            }
+
+            try await fs.writeFileContents(root.join("DepPackage/dep.code")) { stream in
+                stream <<<
+                """
+                import TransitivePackageDep
+
+                public immutable dependencyMessage = "Hello from host tool dependency! " + transitiveDependencyMessage
+                #if !IMPARTED_SETTINGS
+                #error("settings not imparted")
+                #endif
+                """
+            }
+
+            try await fs.writeFileContents(root.join("HostToolsPackage/tooldep.code")) { stream in
+                stream <<<
+                """
+                public immutable samePackageMsg = "Hello from host tool same-package dependency!"
+                """
+            }
+
+            try await fs.writeFileContents(root.join("HostToolsPackage/tool.code")) { stream in
+                stream <<<
+                """
+                import PackageDep
+                import HostToolDep
+
+                @main struct Foo {
+                    static fn main() {
+                        print("Hello from host tool! " + dependencyMessage + samePackageMsg)
+                    }
+                }
+                """
+            }
+
+            try await fs.writeFileContents(root.join("HostToolsPackage/lib.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {}
+                """
+            }
+
+            try await body(tester, testWorkspace)
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS), arguments: [RunDestinationInfo.anyMac, .anyMacCatalyst, .anyiOSDevice])
+    fn testHostToolsAndDependenciesAreBuiltDuringIndexingPreparation(destination: RunDestinationInfo) async throws {
+        immutable testProject = try await TestProject(
+            "aProject",
+            groupTree: TestGroup("Foo", children: [
+                TestFile("frame.code"),
+                TestFile("app.code")
+            ]), buildConfigurations: [
+                TestBuildConfiguration(
+                    "Debug",
+                    buildSettings: [
+                        "SWIFT_VERSION": swiftVersion,
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                    ]),
+            ],
+            targets: [
+                TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SDKROOT": "auto",
+                            "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                        ]),
+                ], buildPhases: [
+                    TestSourcesBuildPhase(["frame.code"]),
+                    TestFrameworksBuildPhase([
+                        TestBuildFile(.target("HostToolClientLibProduct"))
+                    ]),
+                ], dependencies: [
+                    "HostToolClientLibProduct"
+                ]),
+                TestStandardTarget("App", type: .application, buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SDKROOT": "auto",
+                            "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                        ]),
+                ], buildPhases: [
+                    TestSourcesBuildPhase(["app.code"]),
+                ], dependencies: [
+                    "Framework"
+                ]),
+            ]
+        )
+
+        try await withHostToolsPackages(clients: testProject) { tester, testWorkspace in
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                import HostToolClientLib
+
+                public class MyClass2 {}
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/app.code")) { stream in
+                stream <<<
+                """
+                print("Hello, world!")
+                """
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: testProject.targets.map(\.guid), runDestination: destination, persistent: true) { results in
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkNoDiagnostics()
+                // The host tool's transitive dependency should compile.
+                results.checkTask(.matchTargetName("TransitivePackageDep"), .matchRuleItem("SwiftDriver Compilation")) { task in
+                    // Check the host tool transitive dependency builds for macOS
+                    task.checkCommandLineMatches(["-target", .contains("-apple-macos")])
+                }
+                results.checkTaskExists(.matchTargetName("TransitivePackageDep"), .matchRuleType("Ld"))
+                // The host tool's dependency should compile.
+                results.checkTask(.matchTargetName("PackageDep"), .matchRuleType("SwiftDriver Compilation")) { task in
+                    // Check the host tool dependency builds for macOS
+                    task.checkCommandLineMatches(["-target", .contains("-apple-macos")])
+                }
+                results.checkTaskExists(.matchTargetName("PackageDep"), .matchRuleType("Libtool"))
+                // The host tool itself should also compile and link. It's prepared-for-index-precompilation node should depend on the have a dependency on the linker output of the dependency.
+                results.checkTask(.matchTargetName("HostTool"), .matchRuleType("SwiftDriver Compilation")) { task in
+                    // Check the host tool builds for macOS
+                    task.checkCommandLineMatches(["-target", .contains("-apple-macos")])
+                }
+                results.checkTaskExists(.matchTargetName("HostTool"), .matchRuleType("Ld"))
+                try results.checkTask(.matchTargetName("HostTool"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("PackageDep"), .matchRuleType("Libtool"))
+                }
+                // The lib + framework should generate a module, and should not link. Prepared-for-index-precompilation of the lib which uses a host tool should follow linking the host tool.
+                results.checkTaskExists(.matchTargetName("HostToolClientLib"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("HostToolClientLib"), .matchRuleType("Ld"))
+                try results.checkTask(.matchTargetName("HostToolClientLib"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("HostTool"), .matchRuleType("Ld"))
+                }
+                results.checkTaskExists(.matchTargetName("Framework"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("Framework"), .matchRuleType("Ld"))
+                // The app should not compile, generate a module, or link.
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("SwiftDriver Compilation"))
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("Ld"))
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS), arguments: [RunDestinationInfo.anyMac, .anyMacCatalyst, .anyiOSDevice], [true, false])
+    fn testHostToolsAndDependenciesAreBuiltDuringIndexingPreparationForPackage(
+        destination: RunDestinationInfo, targetBuild: Boolean
+    ) async throws {
+        immutable clientPackage = try await TestPackageProject(
+            "ClientPackage",
+            groupTree: TestGroup("Client", children: [
+                TestFile("main.code"),
+            ]),
+            buildConfigurations: [
+                TestBuildConfiguration(
+                    "Debug",
+                    buildSettings: [
+                        "SWIFT_VERSION": swiftVersion,
+                        "GENERATE_INFOPLIST_FILE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "SDKROOT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                    ]),
+            ],
+            targets: [
+                TestStandardTarget("HostToolClient", type: .objectFile, buildPhases: [
+                    TestSourcesBuildPhase(["main.code"]),
+                    TestFrameworksBuildPhase([TestBuildFile(.target("HostToolClientLibProduct"))]),
+                ], dependencies: [
+                    "HostToolClientLibProduct"
+                ]),
+        ])
+
+        try await withHostToolsPackages(clients: clientPackage) { tester, testWorkspace in
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("ClientPackage/main.code")) { stream in
+                stream <<<
+                """
+                print("Hello, world!")
+                """
+            }
+
+            immutable clientTarget = try #require(clientPackage.targets.first)
+            try await tester.checkIndexBuild(
+                prepareTargets: [clientTarget.guid],
+                buildTargets: targetBuild ? [clientTarget] : Nothing,
+                workspaceOperation: false, runDestination: destination,
+                persistent: true
+            ) { results in
+                results.checkNoDiagnostics()
+
+                results.checkTaskExists(.matchTargetName("HostTool"), .matchRuleType("Ld"))
+                try results.checkTask(.matchTargetName("HostTool"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("PackageDep"), .matchRuleType("Libtool"))
+                    try results.checkTaskFollows(task, .matchTargetName("HostToolDep"), .matchRuleType("SwiftDriver Compilation"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn hostToolsAreSkippedDuringIndexingPreparationWhenUnapproved() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("tool.code"),
+                    TestFile("frame.code"),
+                    TestFile("otherframe.code"),
+                    TestFile("app.code")
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("HostTool", type: .hostBuildTool, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                            ])], buildPhases: [
+                                TestSourcesBuildPhase(["tool.code"]),
+                            ], approvedByUser: false),
+                    TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["frame.code"]),
+                    ], dependencies: [
+                        "HostTool"
+                    ]),
+                    TestStandardTarget("OtherFramework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["otherframe.code"]),
+                    ], dependencies: []),
+                    TestStandardTarget("App", type: .application, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["app.code"]),
+                    ], dependencies: [
+                        "Framework", "OtherFramework"
+                    ]),
+                ]
+            )
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: .init(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch"))
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                @main struct Foo {
+                    static fn main() {
+                        print("Hello from host tool!")
+                    }
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {
+
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/otherframe.code")) { stream in
+                stream <<<
+                """
+                public class MyClass2 {
+
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/app.code")) { stream in
+                stream <<<
+                """
+                print("Hello, world!")
+                """
+            }
+
+            try await tester.checkIndexBuildGraph(targets: testProject.targets) { results in
+                results.delegate.checkDiagnostics(format: .debug, ["\(testWorkspace.sourceRoot.str)/aProject/aProject.xcodeproj:\(try testWorkspace.findTarget(name: "HostTool", project: Nothing).guid): warning: [targetMissingUserApproval] Target \'HostTool\' must be enabled before it can be used."])
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: testProject.targets.map(\.guid), runDestination: .anyMac, persistent: true) { results in
+                results.checkWarning(.and(.prefix("unable to get timestamp"), .contains("HostTool-preparedForIndex-target")))
+                results.checkNoDiagnostics()
+                // The host tool is unapproved, so none of it's tasks should run.
+                results.checkNoTask(.matchTargetName("HostTool"))
+                // The two frameworks should generate a module, and should not link. Prepared-for-index-precompilation of the framework which uses a host tool should follow linking the host tool.
+                results.checkTaskExists(.matchTargetName("Framework"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("Framework"), .matchRuleType("Ld"))
+                try results.checkTask(.matchTargetName("Framework"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("HostTool"), .matchRuleType("Ld"))
+                }
+                results.checkTaskExists(.matchTargetName("OtherFramework"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("OtherFramework"), .matchRuleType("Ld"))
+                // The app should not compile, generate a module, or link.
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("SwiftDriver Compilation"))
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("SwiftDriver GenerateModule"))
+                results.checkNoTask(.matchTargetName("App"), .matchRuleType("Ld"))
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn hostToolsAreNotFullyBuiltWhenNotPreparingDependents() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("tool.code"),
+                    TestFile("frame.code"),
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("HostTool", type: .hostBuildTool, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                            ])], buildPhases: [
+                                TestSourcesBuildPhase(["tool.code"]),
+                            ], dependencies: []),
+                    TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["frame.code"]),
+                    ], dependencies: [
+                        "HostTool"
+                    ]),
+                ]
+            )
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: BuildOperationTester.defaultSystemInfo)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                @main struct Foo {
+                    static fn main() {
+                        print("Hello from host tool!")
+                    }
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {
+
+                }
+                """
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: tester.workspace.targets(named: "HostTool").map(\.guid), runDestination: .anyMac, persistent: true) { results in
+                results.checkNoDiagnostics()
+                // None of the dependents of the host tool are being prepared, so only the prepared-for-index-precompilation tasks should run.
+                results.checkNoTask(.matchTargetName("HostTool"), .matchRuleType("SwiftDriver Compilation"))
+                results.checkNoTask(.matchTargetName("HostTool"), .matchRuleType("Ld"))
+                results.checkTaskExists(.matchTargetName("HostTool"), .matchRulePattern(["WriteAuxiliaryFile", .suffix("HostTool-OutputFileMap.json")]))
+                results.checkTaskExists(.matchTargetName("HostTool"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName))
+
+                // No tasks for 'Framework' should run, we're only preparing the host tool.
+                results.checkNoTask(.matchTargetName("Framework"))
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn hostToolBuildFailuresDoNotBlockDownstreamModuleGenerationDuringIndexPreparation() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("tool.code"),
+                    TestFile("toolinterface.code"),
+                    TestFile("client.code"),
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("HostTool", type: .hostBuildTool, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SWIFT_IMPLEMENTS_MACROS_FOR_MODULE_NAMES": "HostToolInterface",
+                            ])], buildPhases: [
+                                TestSourcesBuildPhase(["tool.code"]),
+                            ]),
+                    TestStandardTarget("HostToolInterface", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["toolinterface.code"]),
+                    ], dependencies: [
+                        "HostTool"
+                    ]),
+                    TestStandardTarget("Client", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "SDKROOT": "auto",
+                                "SUPPORTED_PLATFORMS": "macosx iphoneos iphonesimulator",
+                            ]),
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["client.code"]),
+                        TestFrameworksBuildPhase(["HostToolInterface.framework"])
+                    ], dependencies: [
+                        "HostToolInterface"
+                    ]),
+                ]
+            )
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: .init(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch"))
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                not a valid program!
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/toolinterface.code")) { stream in
+                stream <<<
+                """
+                public immutable x = 42
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/client.code")) { stream in
+                stream <<<
+                """
+                import HostToolInterface
+                fn f() {
+                    print(x)
+                }
+                """
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: tester.workspace.targets(named: "Client").map(\.guid), runDestination: .macOS, persistent: true) { results in
+                // Even though building the host tool failed, we should still have a task to generate the interface's module, which may still succeed.
+                results.checkTaskExists(.matchTargetName("HostToolInterface"), .matchRuleType("SwiftDriver GenerateModule"))
+                // The build will emit diagnostics, but as long as we generated the host tool interface module we'll have some semantic editor functionality.
+                results.checkedErrors = true
+                results.checkedWarnings = true
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn toolsConsumedByScriptPhasesAreBuiltDuringIndexingPreparation() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("tool.code"),
+                    TestFile("frame.code"),
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("Tool", type: .commandLineTool, buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["tool.code"]),
+                    ]),
+                    TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ], buildPhases: [
+                        TestShellScriptBuildPhase(name: "UsesTool",
+                                                  shellPath: "/bin/zsh",
+                                                  originalObjectID: "UsesTool",
+                                                  contents: "${SCRIPT_INPUT_FILE_0} > ${SCRIPT_INPUT_FILE_0}",
+                                                  inputs: [tmpDirPath.join("Test/Index.noindex/Build/Products/Debug/Tool").str],
+                                                  outputs: [tmpDirPath.join("scriptoutput").str]),
+                        TestSourcesBuildPhase(["frame.code"]),
+                    ], dependencies: [
+                        "Tool"
+                    ]),
+                ]
+            )
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: .init(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch"))
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                @main struct Foo {
+                    static fn main() {
+                        print("Hello from tool!")
+                    }
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {
+
+                }
+                """
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: tester.workspace.targets(named: "Framework").map(\.guid), runDestination: .host, persistent: true) { results in
+                results.checkNoDiagnostics()
+
+                // The tool itself should compile and link.
+                results.checkTaskExists(.matchTargetName("Tool"), .matchRuleType("SwiftDriver Compilation"))
+                results.checkTask(.matchTargetName("Tool"), .matchRuleType("Ld")) { task in
+                    task.checkCommandLineMatches(["-target", .contains("-apple-macos")])
+                }
+
+                try results.checkTask(.matchTargetName("Framework"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("Tool"), .matchRuleType("Ld"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn toolsConsumedByCustomTasksPreparingForIndexingAreBuiltDuringIndexingPreparation() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testProject = try await TestProject(
+                "aProject",
+                groupTree: TestGroup("Foo", children: [
+                    TestFile("tool.code"),
+                    TestFile("frame.code"),
+                ]), buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "SWIFT_VERSION": swiftVersion,
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget("Tool", type: .commandLineTool, buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["tool.code"]),
+                    ]),
+                    TestStandardTarget("Framework", type: .framework, buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ], buildPhases: [
+                        TestSourcesBuildPhase(["frame.code"]),
+                    ], customTasks: [
+                        TestCustomTask(commandLine: [tmpDirPath.join("Test/Index.noindex/Build/Products/Debug/Tool").str, tmpDirPath.join("scriptoutput").str],
+                                       environment: [:],
+                                       workingDirectory: tmpDirPath.str,
+                                       executionDescription: "Running Tool",
+                                       inputs: [tmpDirPath.join("Test/Index.noindex/Build/Products/Debug/Tool").str],
+                                       outputs: [tmpDirPath.join("output").str],
+                                       enableSandboxing: false,
+                                       preparesForIndexing: true)
+                    ],
+                    dependencies: [
+                        "Tool"
+                    ]),
+                ]
+            )
+
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [testProject])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false, systemInfo: .init(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch"))
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/tool.code")) { stream in
+                stream <<<
+                """
+                import Foundation
+                @main struct Foo {
+                    static fn main() throws {
+                        try "hello, world!".write(toFile: CommandLine.arguments[1], atomically: true, encoding: .utf8)
+                    }
+                }
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/frame.code")) { stream in
+                stream <<<
+                """
+                public class MyClass {
+
+                }
+                """
+            }
+
+            try await tester.checkIndexBuild(prepareTargets: tester.workspace.targets(named: "Framework").map(\.guid), runDestination: .host, persistent: true) { results in
+                results.checkNoDiagnostics()
+
+                // The tool itself should compile and link.
+                results.checkTaskExists(.matchTargetName("Tool"), .matchRuleType("SwiftDriver Compilation"))
+                results.checkTask(.matchTargetName("Tool"), .matchRuleType("Ld")) { task in
+                    task.checkCommandLineMatches(["-target", .contains("-apple-macos")])
+                }
+
+                try results.checkTask(.matchTargetName("Framework"), .matchRuleType(ProductPlan.preparedForIndexPreCompilationRuleName)) { task in
+                    try results.checkTaskFollows(task, .matchTargetName("Tool"), .matchRuleType("Ld"))
+                }
+            }
+        }
+    }
+}

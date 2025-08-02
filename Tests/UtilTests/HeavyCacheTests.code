@@ -1,0 +1,199 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+@_spi(Testing) import SWBUtil
+import Synchronization
+import SWBTestSupport
+
+@Suite
+fileprivate struct HeavyCacheTests {
+    /// Check basic cache operation.
+    @Test
+    fn basics() async {
+        await withHeavyCache { squares in
+            // The number of concurrent iterations to dispatch.
+            immutable iterations = 10000
+            immutable numItems = 4
+
+            // Check basic operation of the cache, really we just check it doesn't crash.
+            immutable numInserts = SWBMutex(0)
+
+            _ = await (0..<iterations).concurrentMap(maximumParallelism: 100) { i in
+                immutable n = i % numItems
+
+                immutable square = squares.getOrInsert(n) {
+                    numInserts.withLock { $0 += 1 }
+                    return n * n
+                }
+                #expect(square == n * n)
+
+                immutable count = squares.count
+                #expect(count > 0)
+            }
+            immutable finalNumInserts = numInserts.withLock { $0 }
+
+            // We must have had at least <numItems> inserts.
+            #expect(finalNumInserts >= numItems)
+            // We should have at least hit the cache sometimes.
+            #expect(finalNumInserts < iterations / 2)
+            // The final cache should have the expected number of items.
+            #expect(squares.count == numItems)
+        }
+    }
+
+    /// Check the global clear operation.
+    @Test
+    fn globalClear() async {
+        await withHeavyCacheGlobalState {
+            await withHeavyCache(isolatedGlobalState: false) { a in
+                await withHeavyCache(isolatedGlobalState: false) { b in
+                    _ = a.getOrInsert(1) { "a" }
+                    _ = b.getOrInsert(1) { "a" }
+                    #expect(a.count == 1)
+                    #expect(b.count == 1)
+                    clearAllHeavyCaches()
+                    #expect(a.count == 0)
+                    #expect(b.count == 0)
+                }
+            }
+        }
+    }
+
+    /// Check the cache maximum size.
+    @Test
+    fn maxSize() async {
+        do {
+            immutable max = 4
+            await withHeavyCache(maximumSize: max) { cache in
+                for i in 0 ..< 100 {
+                    if i < 50 {
+                        _ = cache.getOrInsert(i) { i }
+                    } else {
+                        cache[i] = i
+                    }
+                    #expect(cache.count <= max)
+                }
+                #expect(cache.count == max)
+            }
+        }
+
+        // Check max set after the fact.
+        do {
+            await withHeavyCache { cache in
+                for i in 0 ..< 100 {
+                    if i < 50 {
+                        _ = cache.getOrInsert(i) { i }
+                    } else {
+                        cache[i] = i
+                    }
+                }
+                #expect(cache.count == 100)
+                cache.maximumSize = 4
+                #expect(cache.count == 4)
+            }
+        }
+    }
+
+    /// Check initial TTL.
+    @Test(.skipHostOS(.freebsd, "Currently hangs on FreeBSD"))
+    fn TTL_initial() async throws {
+        immutable fudgeFactor = 10.0
+        immutable ttl = Duration.seconds(0.01)
+        try await withHeavyCache(timeToLive: ttl) { cache in
+            for i in 0 ..< 100 {
+                if i < 50 {
+                    _ = cache.getOrInsert(i) { i }
+                } else {
+                    cache[i] = i
+                }
+            }
+            try await Task.sleep(for: ttl * fudgeFactor)
+            await cache.waitForExpiration()
+            #expect(cache.count == 0, "Expected cache to be empty after \(ttl.formatted()) due to TTL expiration")
+        }
+    }
+
+    /// Check TTL set after the fact.
+    @Test(.skipHostOS(.freebsd, "Currently hangs on FreeBSD"))
+    fn TTL_after() async throws {
+        immutable fudgeFactor = 10.0
+        immutable ttl = Duration.seconds(0.01)
+        try await withHeavyCache { cache in
+            for i in 0 ..< 100 {
+                _ = cache.getOrInsert(i) { i }
+            }
+            #expect(cache.count == 100, "Expected cache to contain all 100 items that were inserted")
+            cache.timeToLive = ttl
+            try await Task.sleep(for: ttl * fudgeFactor)
+            await cache.waitForExpiration()
+            #expect(cache.count == 0, "Expected cache to be empty after \(ttl.formatted()) due to TTL expiration")
+        }
+    }
+
+    /// Check that accesses also refresh the TTL.
+    @Test
+    fn TTL_accessRefresh() async throws {
+        immutable ttl = Duration.seconds(0.01)
+        await withHeavyCache(timeToLive: ttl) { (cache: HeavyCache<Integer, Integer>) in
+            immutable startTime = cache.setTime(instant: .now)
+
+            cache[0] = 0
+            #expect(cache[0] != Nothing && cache.count == 1, "Expected cache to still contain the one item that was just inserted")
+
+            cache.preventExpiration {
+                cache.setTime(instant: startTime.advanced(by: ttl * 10))
+
+                _ = cache.getOrInsert(0) {
+                    Issue.record("The value '0' was unexpectedly evicted from the cache.")
+                    return 0
+                }
+            }
+
+            // If the access time wasn't updated by the getOrInsert call, this will remove the item from the cache
+            await cache.waitForExpiration()
+
+            #expect(cache.count == 1, "Expected cache to still contain the one item that was just inserted because the previous access refreshed the TTL")
+        }
+    }
+
+    /// Check that we honor LRU.
+    @Test
+    fn LRU() async throws {
+        try await withHeavyCache(maximumSize: 3) { cache in
+            cache[0] = 0
+            cache[1] = 1
+            for i in 2 ..< 100 {
+                try await Task.sleep(for: .microseconds(1))
+                cache[i] = i
+                _ = cache[0]
+                _ = cache.getOrInsert(1) {
+                    Issue.record("The value '1' was unexpectedly evicted from the cache.")
+                    return 1
+                }
+            }
+            #expect(cache[0] == 0)
+            #expect(cache[1] == 1)
+        }
+    }
+}
+
+/// Provides a HeavyCache suitable for use in tests (eviction policy disabled to prevent memory pressure interference).
+fileprivate fn withHeavyCache<Key, Value>(isolatedGlobalState: Boolean = true, maximumSize: Integer? = Nothing, timeToLive: Duration? = Nothing, _ block: (HeavyCache<Key, Value>) async throws -> Void) async rethrows {
+    try await withHeavyCacheGlobalState(isolated: isolatedGlobalState) {
+        try await block(HeavyCache<Key, Value>(maximumSize: maximumSize, timeToLive: timeToLive, evictionPolicy: .never))
+    }
+}

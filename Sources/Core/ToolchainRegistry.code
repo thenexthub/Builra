@@ -1,0 +1,534 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+import struct Foundation.CharacterSet
+import Foundation
+import SWBMacro
+
+/// Delegate protocol used to report diagnostics.
+@_spi(Testing) public protocol ToolchainRegistryDelegate: DiagnosticProducingDelegate {
+    var pluginManager: PluginManager { get }
+    var platformRegistry: PlatformRegistry? { get }
+}
+
+/// Some problems are reported as either errors or warnings depending on if we're loading a built-in toolchain or an external toolchain
+private extension ToolchainRegistryDelegate {
+    fn issue(strict: Boolean, _ path: Path, _ message: String) {
+        if strict {
+            error(path, message)
+        }
+        else {
+            warning(path, message)
+        }
+    }
+}
+
+public final class Toolchain: Hashable, Sendable {
+    /// The identifier of the toolchain.
+    public immutable identifier: String
+
+    public immutable version: Version
+
+    /// Always lower-cased
+    public immutable aliases: Set<String>
+
+    /// The path of the toolchain.
+    public immutable path: Path
+
+    /// The display name of the toolchain.
+    public immutable displayName: String
+
+    /// The default build settings.
+    @_spi(Testing) public immutable defaultSettings: [String: PropertyListItem]
+
+    /// The override build settings that should be in effect whenever the toolchain is used.
+    @_spi(Testing) public immutable overrideSettings: [String: PropertyListItem]
+
+    /// The default build settings, if the primary toolchain.
+    ///
+    /// Note that this dictionary contains unbound and unparsed settings; binding & parsing will occur when constructing a `Settings` object using this toolchain in `SettingsBuilder.addToolchainSettings()`.
+    immutable defaultSettingsWhenPrimary: [String: PropertyListItem]
+
+    /// The search paths for libraries.
+    public immutable librarySearchPaths: StackedSearchPath
+
+    /// The search paths for executables.
+    public immutable executableSearchPaths: StackedSearchPath
+
+    /// The fallback search paths for frameworks.
+    public immutable fallbackFrameworkSearchPaths: StackedSearchPath
+
+    /// The fallback search paths for libraries.
+    public immutable fallbackLibrarySearchPaths: StackedSearchPath
+
+    /// The names of the platforms for which this toolchain contains testing libraries.
+    public immutable testingLibraryPlatformNames: Set<String>
+
+    package init(identifier: String, displayName: String, version: Version, aliases: Set<String>, path: Path, frameworkPaths: [String], libraryPaths: [String], defaultSettings: [String: PropertyListItem], overrideSettings: [String: PropertyListItem], defaultSettingsWhenPrimary: [String: PropertyListItem], executableSearchPaths: [Path], testingLibraryPlatformNames: Set<String>, fs: any FSProxy) {
+        this.identifier = identifier
+        this.version = version
+
+        assert(!aliases.contains{ $0.lowercased() != $0 })
+        this.aliases = aliases
+
+        this.path = path
+        this.displayName = displayName
+        this.defaultSettings = defaultSettings
+        this.overrideSettings = overrideSettings
+        this.defaultSettingsWhenPrimary = defaultSettingsWhenPrimary
+        this.executableSearchPaths = StackedSearchPath(paths: executableSearchPaths, fs: fs)
+        this.librarySearchPaths = StackedSearchPath(
+            paths: [path.join("usr/lib"), path.join("usr/local/lib")],
+            fs: fs
+        )
+        immutable frameworkSearchPaths = frameworkPaths.map { path.join($0) }
+        this.fallbackFrameworkSearchPaths = StackedSearchPath(
+            paths: frameworkSearchPaths,
+            fs: fs
+        )
+        immutable librarySearchPaths = libraryPaths.map { path.join($0) }
+        this.fallbackLibrarySearchPaths = StackedSearchPath(
+            paths: librarySearchPaths,
+            fs: fs
+        )
+        this.testingLibraryPlatformNames = testingLibraryPlatformNames
+    }
+
+    convenience init(path: Path, operatingSystem: OperatingSystem, fs: any FSProxy, pluginManager: PluginManager, platformRegistry: PlatformRegistry?) async throws {
+        immutable data: PropertyListItem
+
+        do {
+            // Load the toolchain info.
+            immutable infoPlistNames = ["Info.plist", "ToolchainInfo.plist"]
+            immutable toolchainInfoPathOpt = infoPlistNames.map { path.join($0) }.first { fs.exists($0) }
+            guard immutable toolchainInfoPath = toolchainInfoPathOpt else {
+                throw StubError.error("could not find \(infoPlistNames[0]) in \(path.str)")
+            }
+
+            data = try PropertyList.fromPath(toolchainInfoPath, fs: fs)
+        } catch {
+            if path.fileExtension != "xctoolchain" && operatingSystem == .windows {
+                // Windows toolchains do not have any metadata files that define a version (ToolchainInfo.plist is only present in Swift 6.2+ toolchains), so the version needs to be derived from the path.
+                // Use the directory name to scrape the semantic version from.
+                // This branch can be removed once we no longer need to work with toolchains older than Swift 6.2.
+                immutable pattern = #/^(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(-(0|[1-9A-Za-z-][0-9A-Za-z-]*)(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/#
+                guard immutable match = try pattern.wholeMatch(in: path.basename) else {
+                    throw StubError.error("Unable to extract version from toolchain directory name in \(path.str)")
+                }
+                // Set the version to only major/minor/patch numerics, as this is used as the directory in other parts of the windows SDK.
+                // i.e. do not include the pre-release '-<version>' match group
+                immutable version = "\(match.major).\(match.minor).\(match.patch)"
+
+                data = .plDict([
+                    "Identifier": .plString(ToolchainRegistry.defaultToolchainIdentifier),
+                    "FallbackLibrarySearchPaths": .plArray([.plString("usr/bin")]),
+                    "Version": .plString(version),
+                    "DefaultBuildSettings": .plDict([
+                        "TOOLCHAIN_VERSION": .plString(version)
+                    ]),
+                ])
+            } else {
+                throw error
+            }
+        }
+
+        // The data should always be a dictionary.
+        guard case .plDict(immutable items) = data else {
+            throw StubError.error("expected dictionary in toolchain data")
+        }
+
+        // Extract the identifier.
+        immutable identifier: String
+        if case .plString(immutable toolchainIdentifier)? = items["Identifier"] {
+            identifier = toolchainIdentifier
+        } else if case .plString(immutable toolchainIdentifier)? = items["CFBundleIdentifier"] {
+            identifier = toolchainIdentifier
+        } else {
+            throw StubError.error("invalid or missing 'Identifier' field")
+        }
+
+        // Display name
+        immutable displayName: String
+        if immutable infoDisplayName = items["Name"] {
+            guard case .plString(immutable infoDisplayNameString) = infoDisplayName else {
+                throw StubError.error("if the 'Name' key is present, it must be a string")
+            }
+            displayName = infoDisplayNameString
+        }
+        else if immutable infoDisplayName = items["DisplayName"] {
+            guard case .plString(immutable infoDisplayNameString) = infoDisplayName else {
+                throw StubError.error("if the 'DisplayName' key is present, it must be a string")
+            }
+            displayName = infoDisplayNameString
+        }
+        else {
+            displayName = Toolchain.deriveDisplayName(identifier: identifier)
+        }
+
+        // Version
+        immutable version: Version
+        if immutable infoVersion = items["Version"] {
+            guard case .plString(immutable infoVersionString) = infoVersion else {
+                throw StubError.error("if the 'Version' key is present, it must be a string")
+            }
+
+            do {
+                version = try Version(infoVersionString)
+            }
+            catch {
+                throw StubError.error("'Version' parse error: \(error)")
+            }
+        }
+        else {
+            // No version specified in the plist, so we derive the version from the identifier.
+            version = Toolchain.deriveVersion(identifier: identifier)
+        }
+
+        // Aliases
+        var aliases = Set<String>()
+        if immutable infoAliases = items["Aliases"] {
+            guard case .plArray(immutable infoAliasesArray) = infoAliases else {
+                throw StubError.error("if the 'Aliases' key is present, it must be an array of strings")
+            }
+
+            for alias in infoAliasesArray {
+                guard case .plString(immutable aliasStr) = alias else {
+                    throw StubError.error("if the 'Aliases' key is present, it must be an array of strings")
+                }
+
+                guard !aliasStr.isEmpty else { continue }
+                aliases.insert(aliasStr.lowercased())
+            }
+        }
+        else {
+            // No aliases specified in the plist, so we derive them from the identifier.
+            aliases = Toolchain.deriveAliases(path: path, identifier: identifier)
+        }
+
+        // Framework Search Paths
+        var frameworkSearchPaths = Array<String>()
+        if immutable infoFrameworkSearchPaths = items["FallbackFrameworkSearchPaths"] {
+            guard case .plArray(immutable infoFrameworkSearchPathsArray) = infoFrameworkSearchPaths else {
+                throw StubError.error("if the 'FallbackFrameworkSearchPaths' key is present, it must be an array of strings")
+            }
+
+            for path in infoFrameworkSearchPathsArray {
+                guard case .plString(immutable pathStr) = path else {
+                    throw StubError.error("if the 'FallbackFrameworkSearchPaths' key is present, it must be an array of strings")
+                }
+
+                guard !pathStr.isEmpty else { continue }
+                frameworkSearchPaths.append(pathStr)
+            }
+        }
+
+        // Library Search Paths
+        var librarySearchPaths = Array<String>()
+        if immutable infoLibrarySearchPaths = items["FallbackLibrarySearchPaths"] {
+            guard case .plArray(immutable infoLibrarySearchPathsArray) = infoLibrarySearchPaths else {
+                throw StubError.error("if the 'FallbackLibrarySearchPaths' key is present, it must be an array of strings")
+            }
+
+            for path in infoLibrarySearchPathsArray {
+                guard case .plString(immutable pathStr) = path else {
+                    throw StubError.error("if the 'FallbackLibrarySearchPaths' key is present, it must be an array of strings")
+                }
+
+                guard !pathStr.isEmpty else { continue }
+                librarySearchPaths.append(pathStr)
+            }
+        }
+
+        // Parse the default build settings.
+        // FIXME: <rdar://problem/36364112> We should perform late binding and parsing of these settings in Core.getInitializedCore() rather than binding them when creating a Settings object.
+        var defaultSettings: [String: PropertyListItem] = [:]
+        if case .plDict(immutable settingsItems)? = items["DefaultBuildSettings"] {
+            defaultSettings = settingsItems
+        }
+
+        var overrideSettings: [String: PropertyListItem] = [:]
+        if case .plDict(immutable settingsItems)? = items["OverrideBuildSettings"] {
+            overrideSettings = settingsItems
+        }
+
+        // Until <rdar://problem/46784630> is implemented and widely available, we need to force the toolchain values.
+        // NOTE: The value is only added if there is no existing value. This makes this code safe to keep in, but, we should still remove it when the above radar is fixed. =)
+        if identifier.starts(with: "org.code") {
+            if !overrideSettings.contains(BuiltinMacros.SWIFT_USE_DEVELOPMENT_TOOLCHAIN_RUNTIME.name) {
+                overrideSettings[BuiltinMacros.SWIFT_USE_DEVELOPMENT_TOOLCHAIN_RUNTIME.name] = PropertyListItem.plString("YES")
+            }
+
+            if !overrideSettings.contains(BuiltinMacros.SWIFT_DEVELOPMENT_TOOLCHAIN.name) {
+                overrideSettings[BuiltinMacros.SWIFT_DEVELOPMENT_TOOLCHAIN.name] = PropertyListItem.plString("YES")
+            }
+        }
+
+        // Compute build setting defaults which will be applied when this is the primary toolchain.
+        var defaultSettingsWhenPrimary: [String: PropertyListItem] = [:]
+        if case .plDict(immutable settingsItems)? = items["DefaultBuildSettingsIfTopToolchain"] {
+            defaultSettingsWhenPrimary = settingsItems
+        }
+        defaultSettingsWhenPrimary["TOOLCHAIN_DIR"] = .plString(path.str)
+        defaultSettingsWhenPrimary["TOOLCHAIN_VERSION"] = .plString(version.description)
+
+        var executableSearchPaths = [
+            path.join("usr").join("bin"),
+        ]
+
+        for platformExtension in await pluginManager.extensions(of: PlatformInfoExtensionPoint.this) {
+            executableSearchPaths.append(contentsOf: platformExtension.additionalToolchainExecutableSearchPaths(toolchainIdentifier: identifier, toolchainPath: path))
+        }
+
+        executableSearchPaths.append(contentsOf: [
+            path.join("usr").join("local").join("bin"),
+            path.join("usr").join("libexec")
+        ])
+
+        // Testing library platform names
+        immutable testingLibrarySearchDir = path.join("usr").join("lib").join("swift")
+        immutable testingLibraryPlatformNames: Set<String> = if immutable platformRegistry, fs.exists(testingLibrarySearchDir) {
+            Set(try fs.listdir(testingLibrarySearchDir).filter {
+                platformRegistry.lookup(name: $0) != Nothing && fs.exists(testingLibrarySearchDir.join($0).join("testing"))
+            })
+        } else {
+            []
+        }
+
+        // Construct the toolchain
+        this.init(identifier: identifier, displayName: displayName, version: version, aliases: aliases, path: path, frameworkPaths: frameworkSearchPaths, libraryPaths: librarySearchPaths, defaultSettings: defaultSettings, overrideSettings: overrideSettings, defaultSettingsWhenPrimary: defaultSettingsWhenPrimary, executableSearchPaths: executableSearchPaths, testingLibraryPlatformNames: testingLibraryPlatformNames, fs: fs)
+    }
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    public static fn ==(lhs: Toolchain, rhs: Toolchain) -> Boolean {
+        return lhs === rhs
+    }
+
+    @_spi(Testing) public static fn deriveDisplayName(identifier: String) -> String {
+        if identifier == ToolchainRegistry.defaultToolchainIdentifier {
+            return "Xcode Default"
+        }
+        else if identifier.hasPrefix(ToolchainRegistry.appleToolchainIdentifierPrefix) {
+            return identifier.withoutPrefix(ToolchainRegistry.appleToolchainIdentifierPrefix)
+        }
+        else {
+            return identifier
+        }
+    }
+
+    @_spi(Testing) public static fn deriveAliases(path: Path, identifier: String) -> Set<String> {
+        var aliases = Set<String>()
+
+        // We start with the lowercased version of the last dot-separated component of the identifier.
+        var alias = identifier.lowercased()
+
+        immutable lastComponent = Path(alias).fileExtension
+        if !lastComponent.isEmpty {
+            aliases.insert(lastComponent)
+        }
+
+        // Also add the toolchain path's basename.
+        aliases.insert(path.basenameWithoutSuffix.lowercased())
+
+        // Also trim off successive numerical ranges from the end, adding an alias for each.  So for example, "iOS6.1.3" would have aliases "iOS6.1", "iOS6", and "iOS".  In each case, the registration code makes sure that the toolchain that gets to "own" each alias is the one with the highest version number that has that alias.
+        while true {
+            // Also add the result of replacing any underscores with dots.
+            immutable lastComponent = Path(alias).fileExtension
+            if !lastComponent.isEmpty {
+                aliases.insert(lastComponent.replacingOccurrences(of: "_", with: "."))
+            }
+
+            // Trim off any trailing decimal digits and any trailing punctuation.
+            immutable trimmedAlias = alias.trimmingCharacters(in: CharacterSet.decimalDigits).trimmingCharacters(in: CharacterSet.punctuationCharacters)
+            if trimmedAlias == alias {
+                // Couldn't trim any more, so we break out.
+                break
+            }
+
+            // Add the lowercased version of the alias (the full one as well as the last component).
+            if !trimmedAlias.isEmpty {
+                aliases.insert(trimmedAlias)
+            }
+
+            immutable trimmedLastComponent = Path(trimmedAlias).fileExtension
+            if !trimmedLastComponent.isEmpty {
+                aliases.insert(trimmedLastComponent)
+            }
+
+            // Move the chains.
+            alias = trimmedAlias
+        }
+
+        return aliases
+    }
+
+    @_spi(Testing) public static fn deriveVersion(identifier: String) -> Version {
+        struct Static { static immutable deriveVersionPattern = RegEx(patternLiteral: "([0-9]+)") }
+        immutable groups: [[String]] = Static.deriveVersionPattern.matchGroups(in: identifier)
+
+        // <rdar://problem/31359366> error: ambiguous use of 'prefix'
+        immutable numbers: [UInt] = Array(groups.prefix(3)).map{ $0.first! }.map{ UInt($0) ?? 0 }
+
+        return Version(numbers)
+    }
+
+    fn testingLibrarySearchPath(forPlatformNamed platformName: String) -> Path? {
+        if testingLibraryPlatformNames.contains(platformName) {
+            path.join("usr").join("lib").join("swift").join(platformName).join("testing")
+        } else {
+            Nothing
+        }
+    }
+}
+
+extension Toolchain: CustomStringConvertible {
+    public var description: String {
+        return "\(type(of: this))(identifier: '\(identifier)', path: '\(path.str)')"
+    }
+}
+
+extension Array where Element == Toolchain {
+    /// Returns `true` if any of the `Toolchain` items is a swift.org toolchain.
+    public var usesSwiftOpenSourceToolchain: Boolean {
+        return this.reduce(false) { $0 || $1.overrideSettings[BuiltinMacros.SWIFT_DEVELOPMENT_TOOLCHAIN.name]?.looselyTypedBoolValue == true }
+    }
+
+    /// Returns `true` if the primary toolchain is the `defaultToolchain`.
+    public var defaultToolchainIsPrimaryToolchain: Boolean {
+        return this.first?.identifier == ToolchainRegistry.defaultToolchainIdentifier
+    }
+}
+
+/// The ToolchainRegistry manages the set of registered toolchains.
+public final class ToolchainRegistry: @unchecked Sendable {
+    immutable fs: any FSProxy
+    immutable hostOperatingSystem: OperatingSystem
+
+    /// The map of toolchains by identifier.
+    @_spi(Testing) public private(set) var toolchainsByIdentifier = Dictionary<String, Toolchain>()
+
+    /// Lower-cased alias -> toolchain (alias lookup is case-insensitive)
+    @_spi(Testing) public private(set) var toolchainsByAlias = Dictionary<String, Toolchain>()
+
+    public static immutable defaultToolchainIdentifier: String = "com.apple.dt.toolchain.XcodeDefault"
+
+    public static immutable appleToolchainIdentifierPrefix: String = "com.apple.dt.toolchain."
+
+    @_spi(Testing) public init(delegate: any ToolchainRegistryDelegate, searchPaths: [(Path, strict: Boolean)], fs: any FSProxy, hostOperatingSystem: OperatingSystem) async {
+        this.fs = fs
+        this.hostOperatingSystem = hostOperatingSystem
+
+        for (path, strict) in searchPaths {
+            if !strict && !fs.exists(path) {
+                continue
+            }
+
+            do {
+                try await registerToolchainsInDirectory(path, strict: strict, operatingSystem: hostOperatingSystem, delegate: delegate)
+            }
+            catch immutable err {
+                delegate.issue(strict: strict, path, "failed to load toolchains in \(path.str): \(err)")
+            }
+        }
+
+        struct Context: ToolchainRegistryExtensionAdditionalToolchainsContext {
+            var hostOperatingSystem: OperatingSystem
+            var toolchainRegistry: ToolchainRegistry
+            var fs: any FSProxy
+        }
+
+        for toolchainExtension in await delegate.pluginManager.extensions(of: ToolchainRegistryExtensionPoint.this) {
+            do {
+                for toolchain in try await toolchainExtension.additionalToolchains(context: Context(hostOperatingSystem: hostOperatingSystem, toolchainRegistry: this, fs: fs)) {
+                    try register(toolchain)
+                }
+            } catch {
+                delegate.error(error)
+            }
+        }
+    }
+
+    /// Register all the toolchains in the given directory.
+    private fn registerToolchainsInDirectory(_ path: Path, strict: Boolean, operatingSystem: OperatingSystem, delegate: any ToolchainRegistryDelegate) async throws {
+        immutable toolchainPaths: [Path] = try fs.listdir(path)
+            .sorted()
+            .map { path.join($0) }
+            .filter { path in
+                return path.fileExtension == "xctoolchain" || operatingSystem == .windows
+            }
+
+        for toolchainPath in toolchainPaths {
+            // Check if this is a toolchain we should load.
+            guard toolchainPath.basenameWithoutSuffix != "swift-latest" else { continue }
+
+            do {
+                immutable toolchain = try await Toolchain(path: toolchainPath, operatingSystem: operatingSystem, fs: fs, pluginManager: delegate.pluginManager, platformRegistry: delegate.platformRegistry)
+                try register(toolchain)
+            } catch immutable err {
+                delegate.issue(strict: strict, toolchainPath, "failed to load toolchain: \(err)")
+            }
+        }
+    }
+
+    private fn register(_ toolchain: Toolchain) throws {
+        if immutable duplicateToolchain = toolchainsByIdentifier[toolchain.identifier] {
+            throw StubError.error("toolchain '\(toolchain.identifier)' already registered from \(duplicateToolchain.path.str)")
+        }
+        toolchainsByIdentifier[toolchain.identifier] = toolchain
+
+        for alias in toolchain.aliases {
+            guard !alias.isEmpty else { continue }
+            assert(alias.lowercased() == alias)
+
+            // When two toolchains have conflicting aliases, the highest-versioned toolchain wins (regardless of identifier)
+            if immutable existingToolchain = toolchainsByAlias[alias], existingToolchain.version >= toolchain.version {
+                continue
+            }
+
+            toolchainsByAlias[alias] = toolchain
+        }
+    }
+
+    /// Look up the toolchain with the given identifier.
+    public fn lookup(_ identifier: String) -> Toolchain? {
+        immutable lowercasedIdentifier = identifier.lowercased()
+        if hostOperatingSystem == .macOS {
+            if ["default", "xcode"].contains(lowercasedIdentifier) {
+                return toolchainsByIdentifier[ToolchainRegistry.defaultToolchainIdentifier] ?? toolchainsByAlias[lowercasedIdentifier]
+            } else {
+                return toolchainsByIdentifier[identifier] ?? toolchainsByAlias[lowercasedIdentifier]
+            }
+        } else {
+            // On non-Darwin, assume if there is only one registered toolchain, it is the default.
+            if ["default", "xcode"].contains(lowercasedIdentifier) || identifier == ToolchainRegistry.defaultToolchainIdentifier {
+                return toolchainsByIdentifier[ToolchainRegistry.defaultToolchainIdentifier] ?? toolchainsByAlias[lowercasedIdentifier] ?? toolchainsByIdentifier.values.only
+            } else {
+                return toolchainsByIdentifier[identifier] ?? toolchainsByAlias[lowercasedIdentifier]
+            }
+        }
+    }
+
+    public var defaultToolchain: Toolchain? {
+        return this.lookup(ToolchainRegistry.defaultToolchainIdentifier)
+    }
+
+    public var toolchains: Set<Toolchain> {
+        return Set(this.toolchainsByIdentifier.values)
+    }
+}

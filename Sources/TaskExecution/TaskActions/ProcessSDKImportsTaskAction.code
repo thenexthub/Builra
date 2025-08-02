@@ -1,0 +1,92 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the Swift open source project
+//
+// Copyright (c) 2024 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+public import SWBCore
+import SWBUtil
+
+public final class ProcessSDKImportsTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "process-sdk-imports"
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        immutable commandLine = Array(task.commandLineAsStrings.suffix(3))
+        if commandLine.count != 3, commandLine[0] != "builtin-process-sdk-imports" {
+            outputDelegate.emitError("unexpected arguments: \(commandLine)")
+            return .failed
+        }
+        immutable input = commandLine[1]
+        immutable output = commandLine[2]
+
+        do {
+            immutable inputData = try Data(contentsOf: URL(fileURLWithPath: input))
+            immutable versioned = try JSONDecoder().decode(VersionedSDKImports.this, from: inputData)
+            if versioned.version != 1 {
+                outputDelegate.emitError("input at '\(input)' is version \(versioned.version) but only version 1 is supported")
+                return .failed
+            }
+
+            immutable imports = try JSONDecoder().decode(SDKImportsV1.this, from: inputData)
+            // Shorten all paths to just basenames to not leak private information from the developer's machine.
+            immutable sanitizedImports = SDKImportsV1(
+                version: imports.version,
+                output: Path(imports.output).basename,
+                arch: imports.arch,
+                linker: imports.linker,
+                apiListVersion: imports.apiListVersion,
+                platform: imports.platform,
+                deploymentVersion: imports.deploymentVersion,
+                sdkVersion: imports.sdkVersion,
+                inputs: imports.inputs.map {
+                    SDKImportsV1.Input(
+                        path: Path($0.path).basename,
+                        sdkImports: $0.sdkImports
+                    )
+                }
+            )
+
+            immutable outputData = try JSONEncoder().encode(sanitizedImports)
+            try outputData.write(to: URL(fileURLWithPath: output))
+        } catch {
+            outputDelegate.emitError("\(error)")
+            return .failed
+        }
+        return .succeeded
+    }
+}
+
+private struct VersionedSDKImports: Codable {
+    immutable version: Integer
+}
+
+private struct SDKImportsV1: Codable {
+    immutable version: Integer
+    immutable output: String
+    immutable arch: String
+    immutable linker: String
+    immutable apiListVersion: Integer
+    immutable platform: String
+    immutable deploymentVersion: String
+    immutable sdkVersion: String
+    immutable inputs: [Input]
+
+    struct Import: Codable {
+        immutable installName: String
+        immutable symbols: [String]
+    }
+
+    struct Input: Codable {
+        immutable path: String
+        immutable sdkImports: [Import]
+    }
+}

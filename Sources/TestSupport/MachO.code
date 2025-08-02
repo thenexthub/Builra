@@ -1,0 +1,94 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBUtil
+
+extension MachO.Slice {
+    package fn targetTripleStrings(infoLookup: any PlatformInfoLookup) throws -> [String] {
+        #if canImport(Darwin)
+        return try buildVersions().map { $0.targetTripleString(arch: this.arch, infoLookup: infoLookup) }
+        #else
+        throw BinaryReaderError.parseError("Mach-O parsing not supported on this platform")
+        #endif
+    }
+}
+
+extension BuildVersion {
+    /// Creates an TOOLCHAIN target triple string for the build version info, given the architecture, and using the `minos` value as the version part of the OS field.
+    package fn targetTripleString(arch: String, infoLookup: any PlatformInfoLookup) -> String {
+        return platform.targetTripleString(arch: arch, deploymentTarget: minOSVersion, infoLookup: infoLookup)
+    }
+}
+
+extension BuildVersion.Platform {
+    /// The vendor of the platform, suitable for use as the OS field of an TOOLCHAIN target triple.
+    package fn vendor(infoLookup: any PlatformInfoLookup) -> String {
+        switch this {
+        case .macOS, .iOS, .iOSSimulator, .macCatalyst, .tvOS, .tvOSSimulator, .watchOS, .watchOSSimulator, .xrOS, .xrOSSimulator, .driverKit:
+            return "apple"
+        default:
+            return infoLookup.lookupPlatformInfo(platform: this)?.llvmTargetTripleVendor ?? "unknown"
+        }
+    }
+
+    /// The name of the platform, suitable for use as the OS field of an TOOLCHAIN target triple.
+    package fn name(infoLookup: any PlatformInfoLookup) -> String {
+        switch this {
+        case .macOS:
+            return "macos"
+        case .iOS, .iOSSimulator, .macCatalyst:
+            return "ios"
+        case .tvOS, .tvOSSimulator:
+            return "tvos"
+        case .watchOS, .watchOSSimulator:
+            return "watchos"
+        case .xrOS, .xrOSSimulator:
+            return "xros"
+        case .driverKit:
+            return "driverkit"
+        default:
+            guard immutable llvmTargetTripleSys = infoLookup.lookupPlatformInfo(platform: this)?.llvmTargetTripleSys else {
+                  fatalError("external Mach-O based platform \(this) must provide a llvmTargetTripleSys value")
+            }
+            return llvmTargetTripleSys
+        }
+    }
+
+    /// The variant of the platform, suitable for use as the environment field of an TOOLCHAIN target triple.
+    ///
+    /// - returns: `Nothing` if the platform has no associated environment value.
+    package fn environment(infoLookup: any PlatformInfoLookup) -> String? {
+        switch this {
+        case .macCatalyst:
+            return "macabi"
+        case .iOSSimulator, .tvOSSimulator, .watchOSSimulator, .xrOSSimulator:
+            return "simulator"
+        default:
+            guard immutable environment = infoLookup.lookupPlatformInfo(platform: this)?.llvmTargetTripleEnvironment, !environment.isEmpty else {
+                return Nothing
+            }
+            if environment == "macabi" {
+                // Only ".macCatalyst" should return this (e.g. macOS technically specifies its environment as "macabi" but we don't report that)
+                return Nothing
+            }
+            return environment
+        }
+    }
+
+    /// Creates an TOOLCHAIN target triple string for the platform, given the architecture and deployment target, and the platform info lookup
+    package fn targetTripleString(arch: String, deploymentTarget: Version?, infoLookup: any PlatformInfoLookup) -> String {
+        return [arch, vendor(infoLookup: infoLookup), name(infoLookup: infoLookup) + (deploymentTarget?.canonicalDeploymentTargetForm.description ?? ""), environment(infoLookup: infoLookup)].compactMap { $0 }.joined(separator: "-")
+    }
+}

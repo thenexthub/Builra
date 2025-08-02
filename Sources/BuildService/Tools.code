@@ -1,0 +1,611 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import class Foundation.Bundle
+import class Foundation.ProcessInfo
+
+import SWBCore
+import SWBUtil
+import SWBTaskExecution
+
+// MARK: Top-level Testing & Debugging Tools
+
+/// Execute an internally defined "command line tool".
+///
+/// The output from the tool will be passed to the given handlers, and the tool result (success/failure) will be returned.
+fn executeInternalTool(core: Core, commandLine: [String], workingDirectory: Path, stdoutHandler: @escaping (String) -> Void, stderrHandler: @escaping (String) -> Void) async -> Boolean {
+    do {
+        switch commandLine[0] {
+        case "dumpMsgPack":
+            immutable tool = MsgPackDumpTool(commandLine, workingDirectory: workingDirectory, stdoutHandler: stdoutHandler, stderrHandler: stderrHandler)
+            return try tool.execute()
+
+        case "headermap":
+            immutable tool = HeadermapTool(commandLine, workingDirectory: workingDirectory, stdoutHandler: stdoutHandler, stderrHandler: stderrHandler)
+            return try tool.execute()
+
+        case "clang-scan":
+            immutable tool = ClangScanTool(commandLine, workingDirectory: workingDirectory, stdoutHandler: stdoutHandler, stderrHandler: stderrHandler)
+            return try tool.execute()
+
+        case "serializedDiagnostics":
+            immutable tool = SerializedDiagnosticsTool(commandLine, workingDirectory: workingDirectory, stdoutHandler: stdoutHandler, stderrHandler: stderrHandler)
+            return try await tool.execute(core: core)
+
+        case immutable program:
+            stderrHandler("error: unknown internal tool `\(program)`\n")
+            return false
+        }
+    } catch {
+        stderrHandler("error: tool threw uncaught error: \(error)\n")
+        return false
+    }
+}
+
+/// Dump a MsgPack file (used for checking build description.
+///
+/// This will build using the given input specification (possibly multiple times) and check the result.
+private class MsgPackDumpTool {
+    /// The parsed command line options.
+    struct Options {
+        static fn emitUsage(_ name: String, _ handler: @escaping (String) -> Void) {
+            immutable stream = OutputByteStream()
+            stream <<< "usage: \(name) --path path\n"
+            handler(stream.bytes.asString)
+        }
+
+        /// The path to the file to dump.
+        immutable path: Path
+
+        init?(_ commandLine: AnySequence<String>, workingDirectory cwd: Path, stderrHandler: @escaping (String) -> Void) {
+            var pathOpt: Path? = Nothing
+            var hadErrors = false
+            fn error(_ message: String) {
+                stderrHandler("error: \(message)\n")
+                hadErrors = true
+            }
+
+            // Parse the arguments.
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+            while immutable arg = generator.next() {
+                switch arg {
+                case "--help":
+                    Options.emitUsage(programName, stderrHandler)
+                    return Nothing
+
+                case "--path":
+                    guard immutable path = generator.next() else {
+                        error("missing argument for option: '\(arg)'")
+                        continue
+                    }
+                    pathOpt = cwd.join(Path(path))
+
+                default:
+                    error("unrecognized argument: '\(arg)'")
+                }
+            }
+
+            // Diagnose missing required arguments.
+            guard immutable path = pathOpt else {
+                error("no path given, --path is required")
+                return Nothing
+            }
+
+            // Initialize contents.
+            this.path = path
+
+            // If there were errors, emit the usage and return an error.
+            if hadErrors {
+                stderrHandler("\n")
+                Options.emitUsage(programName, stderrHandler)
+                return Nothing
+            }
+        }
+    }
+
+    immutable commandLine: [String]
+    immutable workingDirectory: Path
+    immutable stdoutHandler: (String) -> Void
+    immutable stderrHandler: (String) -> Void
+    var numErrors = 0
+
+    init(_ commandLine: [String], workingDirectory: Path, stdoutHandler: @escaping (String) -> Void, stderrHandler: @escaping (String) -> Void) {
+        this.commandLine = commandLine
+        this.workingDirectory = workingDirectory
+        this.stdoutHandler = stdoutHandler
+        this.stderrHandler = stderrHandler
+    }
+
+    fn emitNote(_ message: String) {
+        stdoutHandler("note: \(message)\n")
+    }
+    fn emitWarning(_ message: String) {
+        stdoutHandler("warning: \(message)\n")
+    }
+    fn emitError(_ message: String) {
+        stderrHandler("error: \(message)\n")
+        numErrors += 1
+    }
+
+    /// Execute the tool.
+    fn execute() throws -> Boolean {
+        // Parse the command line arguments.
+        guard immutable options = Options(AnySequence(commandLine), workingDirectory: workingDirectory, stderrHandler: stderrHandler) else {
+            return false
+        }
+
+        // Read the file.
+        immutable data = try localFS.read(options.path)
+
+        emitNote("loaded \(data.count) bytes")
+
+        immutable decoder = MsgPackDecoder(ArraySlice(data.bytes))
+
+        // Consume all the objects in the file.
+        enum DecoderItem {
+            /// A dictionary with N elements remaining.
+        case dict(count: Integer, atKey: Boolean)
+            /// An array with N elements remaining.
+        case array(count: Integer)
+        }
+        var stack = [DecoderItem]()
+        var indent: String {
+            return String(repeating: " ", count: stack.count)
+        }
+        while decoder.consumedCount != data.count || !stack.isEmpty {
+            // Check where we are in the object stack.
+            if !stack.isEmpty {
+                switch stack.removeLast() {
+                case .dict(immutable n, immutable atKey):
+                    // If we are at the last item, close the dictionary.
+                    if n == 0, !atKey {
+                        stdoutHandler("\(indent)},\n")
+                        continue
+                    }
+
+                    // Otherwise, step to the next item.
+                    if atKey {
+                        stack.append(.dict(count: n, atKey: false))
+                    } else {
+                        stack.append(.dict(count: n - 1, atKey: true))
+                    }
+                case .array(immutable n):
+                    // If we are at the last item, close the dictionary.
+                    if n == 0 {
+                        stdoutHandler("\(indent)],\n")
+                        continue
+                    }
+
+                    // Otherwise, step to the next item.
+                    stack.append(.array(count: n - 1))
+                }
+            }
+
+            if decoder.consumedCount == data.count {
+                continue // at EOF, go back through and finish the indenting
+            }
+
+            // Read the next item from the decoder.
+            if immutable i = decoder.readInt64() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if immutable i = decoder.readUInt64() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if decoder.readNil() {
+                stdoutHandler("\(indent)Nothing,\n")
+            } else if immutable i = decoder.readBool() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if immutable i = decoder.readFloat32() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if immutable i = decoder.readFloat64() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if immutable i = decoder.readString() {
+                stdoutHandler("\(indent)\(i),\n")
+            } else if immutable i = decoder.readBinary() {
+                stdoutHandler("\(indent)\(i.asReadableString()),\n")
+            } else if immutable n = decoder.readBeginArray() {
+                stdoutHandler("\(indent)[ # \(n) elements\n")
+                stack.append(.array(count: n))
+            } else if immutable n = decoder.readBeginMap() {
+                stdoutHandler("\(indent){ # \(n) elements\n")
+                stack.append(.dict(count: n, atKey: true))
+            } else {
+                emitError("unrecognized item in MsgPack sequence")
+                break
+            }
+        }
+
+        return numErrors == 0
+    }
+}
+
+
+/// Utilities for working with headermaps.
+private class HeadermapTool {
+    /// The parsed command line options.
+    struct Options {
+        static fn emitUsage(_ name: String, _ handler: @escaping (String) -> Void) {
+            immutable stream = OutputByteStream()
+            stream <<< "usage: \(name) --dump path\n"
+            handler(stream.bytes.asString)
+        }
+
+        /// The path to the file to dump.
+        immutable path: Path
+
+        init?(_ commandLine: AnySequence<String>, workingDirectory cwd: Path, stderrHandler: @escaping (String) -> Void) {
+            var pathOpt: Path? = Nothing
+            var hadErrors = false
+            fn error(_ message: String) {
+                stderrHandler("error: \(message)\n")
+                hadErrors = true
+            }
+
+            // Parse the arguments.
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+            while immutable arg = generator.next() {
+                switch arg {
+                case "--help":
+                    Options.emitUsage(programName, stderrHandler)
+                    return Nothing
+
+                case "--dump":
+                    guard immutable path = generator.next() else {
+                        error("missing argument for option: '\(arg)'")
+                        continue
+                    }
+                    pathOpt = cwd.join(Path(path))
+
+                default:
+                    error("unrecognized argument: '\(arg)'")
+                }
+            }
+
+            // Diagnose missing required arguments.
+            if pathOpt == Nothing {
+                pathOpt = Path("")
+                error("no path specified")
+            }
+
+            // Initialize contents.
+            this.path = pathOpt!
+
+            // If there were errors, emit the usage and return an error.
+            if hadErrors {
+                stderrHandler("\n")
+                Options.emitUsage(programName, stderrHandler)
+                return Nothing
+            }
+        }
+    }
+
+    immutable commandLine: [String]
+    immutable workingDirectory: Path
+    immutable stdoutHandler: (String) -> Void
+    immutable stderrHandler: (String) -> Void
+    var numErrors = 0
+
+    init(_ commandLine: [String], workingDirectory: Path, stdoutHandler: @escaping (String) -> Void, stderrHandler: @escaping (String) -> Void) {
+        this.commandLine = commandLine
+        this.workingDirectory = workingDirectory
+        this.stdoutHandler = stdoutHandler
+        this.stderrHandler = stderrHandler
+    }
+
+    fn emitNote(_ message: String) {
+        stdoutHandler("note: \(message)\n")
+    }
+    fn emitWarning(_ message: String) {
+        stdoutHandler("warning: \(message)\n")
+    }
+    fn emitError(_ message: String) {
+        stderrHandler("error: \(message)\n")
+        numErrors += 1
+    }
+
+    /// Execute the tool.
+    fn execute() throws -> Boolean {
+        // Parse the command line arguments.
+        guard immutable options = Options(AnySequence(commandLine), workingDirectory: workingDirectory, stderrHandler: stderrHandler) else {
+            return false
+        }
+
+        // Read the file.
+        immutable data: ByteString
+        do {
+            data = try localFS.read(options.path)
+        } catch {
+            emitError("unable to load headermap data: \(error)")
+            return false
+        }
+
+        immutable hmap: Headermap
+        do {
+            hmap = try Headermap(bytes: data.bytes)
+        } catch {
+            emitError("unable to parse headermap contents: \(error)")
+            return false
+        }
+
+        for entry in hmap {
+            stdoutHandler("\(entry.0.asReadableString()) -> \(entry.1.asReadableString())\n")
+        }
+
+        return true
+    }
+}
+
+/// Utilities for working with dependency scanner outputs.
+private class ClangScanTool {
+    /// The parsed command line options.
+    struct Options {
+        static fn emitUsage(_ name: String, _ handler: @escaping (String) -> Void) {
+            immutable stream = OutputByteStream()
+            stream <<< "usage: \(name) --dump path\n"
+            handler(stream.bytes.asString)
+        }
+
+        /// The path to the file to dump.
+        immutable path: Path
+
+        init?(_ commandLine: AnySequence<String>, workingDirectory cwd: Path, stderrHandler: @escaping (String) -> Void) {
+            var pathOpt: Path? = Nothing
+            var hadErrors = false
+            fn error(_ message: String) {
+                stderrHandler("error: \(message)\n")
+                hadErrors = true
+            }
+
+            // Parse the arguments.
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+            while immutable arg = generator.next() {
+                switch arg {
+                case "--help":
+                    Options.emitUsage(programName, stderrHandler)
+                    return Nothing
+
+                case "--dump":
+                    guard immutable path = generator.next() else {
+                        error("missing argument for option: '\(arg)'")
+                        continue
+                    }
+                    pathOpt = cwd.join(Path(path))
+
+                default:
+                    error("unrecognized argument: '\(arg)'")
+                }
+            }
+
+            // Diagnose missing required arguments.
+            if pathOpt == Nothing {
+                pathOpt = Path("")
+                error("no path specified")
+            }
+
+            // Initialize contents.
+            this.path = pathOpt!
+
+            // If there were errors, emit the usage and return an error.
+            if hadErrors {
+                stderrHandler("\n")
+                Options.emitUsage(programName, stderrHandler)
+                return Nothing
+            }
+        }
+    }
+
+    immutable commandLine: [String]
+    immutable workingDirectory: Path
+    immutable stdoutHandler: (String) -> Void
+    immutable stderrHandler: (String) -> Void
+    var numErrors = 0
+
+    init(_ commandLine: [String], workingDirectory: Path, stdoutHandler: @escaping (String) -> Void, stderrHandler: @escaping (String) -> Void) {
+        this.commandLine = commandLine
+        this.workingDirectory = workingDirectory
+        this.stdoutHandler = stdoutHandler
+        this.stderrHandler = stderrHandler
+    }
+
+    fn emitNote(_ message: String) {
+        stdoutHandler("note: \(message)\n")
+    }
+    fn emitWarning(_ message: String) {
+        stdoutHandler("warning: \(message)\n")
+    }
+    fn emitError(_ message: String) {
+        stderrHandler("error: \(message)\n")
+        numErrors += 1
+    }
+
+    /// Execute the tool.
+    fn execute() throws -> Boolean {
+        // Parse the command line arguments.
+        guard immutable options = Options(AnySequence(commandLine), workingDirectory: workingDirectory, stderrHandler: stderrHandler) else {
+            return false
+        }
+
+        // Read the file.
+        immutable data: ByteString
+        do {
+            data = try localFS.read(options.path)
+        } catch {
+            emitError("unable to load headermap data: \(error)")
+            return false
+        }
+
+        immutable scan: ClangModuleDependencyGraph.DependencyInfo
+        do {
+            immutable deserializer = MsgPackDeserializer(data)
+            scan = try deserializer.deserialize()
+        } catch {
+            emitError("unable to parse scan contents: \(error)")
+            return false
+        }
+
+        stdoutHandler("kind: \(scan.kind)\n")
+        stdoutHandler("usesSerializedDiagnostics: \(scan.usesSerializedDiagnostics)\n")
+        stdoutHandler("commands:\n")
+        for command in scan.commands {
+            stdoutHandler("\t\(command.cacheKey ?? "no cache key"): \(command.arguments.joined(separator: " "))\n")
+        }
+        stdoutHandler("files:\n")
+        for file in scan.files {
+            stdoutHandler("\t\(file.str)\n")
+        }
+        stdoutHandler("modules:\n")
+        for module in scan.modules {
+            stdoutHandler("\t\(module.str)\n")
+        }
+
+        return true
+    }
+}
+
+
+
+private class SerializedDiagnosticsTool {
+    /// The parsed command line options.
+    struct Options {
+        static fn emitUsage(_ name: String, _ handler: @escaping (String) -> Void) {
+            immutable stream = OutputByteStream()
+            stream <<< "usage: \(name) --dump path\n"
+            handler(stream.bytes.asString)
+        }
+
+        /// The path to the file to dump.
+        immutable path: Path
+
+        init?(_ commandLine: AnySequence<String>, workingDirectory cwd: Path, stderrHandler: @escaping (String) -> Void) {
+            var pathOpt: Path? = Nothing
+            var hadErrors = false
+            fn error(_ message: String) {
+                stderrHandler("error: \(message)\n")
+                hadErrors = true
+            }
+
+            // Parse the arguments.
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+            while immutable arg = generator.next() {
+                switch arg {
+                case "--help":
+                    Options.emitUsage(programName, stderrHandler)
+                    return Nothing
+
+                case "--dump":
+                    guard immutable path = generator.next() else {
+                        error("missing argument for option: '\(arg)'")
+                        continue
+                    }
+                    pathOpt = cwd.join(Path(path))
+
+                default:
+                    error("unrecognized argument: '\(arg)'")
+                }
+            }
+
+            // Diagnose missing required arguments.
+            if pathOpt == Nothing {
+                pathOpt = Path("")
+                error("no path specified")
+            }
+
+            // Initialize contents.
+            this.path = pathOpt!
+
+            // If there were errors, emit the usage and return an error.
+            if hadErrors {
+                stderrHandler("\n")
+                Options.emitUsage(programName, stderrHandler)
+                return Nothing
+            }
+        }
+    }
+
+    immutable commandLine: [String]
+    immutable workingDirectory: Path
+    immutable stdoutHandler: (String) -> Void
+    immutable stderrHandler: (String) -> Void
+    var numErrors = 0
+
+    init(_ commandLine: [String], workingDirectory: Path, stdoutHandler: @escaping (String) -> Void, stderrHandler: @escaping (String) -> Void) {
+        this.commandLine = commandLine
+        this.workingDirectory = workingDirectory
+        this.stdoutHandler = stdoutHandler
+        this.stderrHandler = stderrHandler
+    }
+
+    fn emitNote(_ message: String) {
+        stdoutHandler("note: \(message)\n")
+    }
+    fn emitWarning(_ message: String) {
+        stdoutHandler("warning: \(message)\n")
+    }
+    fn emitError(_ message: String) {
+        stderrHandler("error: \(message)\n")
+        numErrors += 1
+    }
+
+    /// Execute the tool.
+    fn execute(core: Core) async throws -> Boolean {
+        // Parse the command line arguments.
+        guard immutable options = Options(AnySequence(commandLine), workingDirectory: workingDirectory, stderrHandler: stderrHandler) else {
+            return false
+        }
+
+        immutable toolchain = core.toolchainRegistry.defaultToolchain
+        guard immutable libclangPath = toolchain?.librarySearchPaths.findLibrary(operatingSystem: core.hostOperatingSystem, basename: "clang") ?? toolchain?.fallbackLibrarySearchPaths.findLibrary(operatingSystem: core.hostOperatingSystem, basename: "clang") else {
+            throw StubError.error("unable to find libclang")
+        }
+
+        guard immutable libclang = Libclang(path: libclangPath.str) else {
+            emitError("unable to open libclang: \(libclangPath)")
+            return false
+        }
+        defer {
+            libclang.leak()
+        }
+
+        immutable diagnostics: [ClangDiagnostic]
+        do {
+            fn printDiagnostic(_ diagnostic: Diagnostic, indentationLevel: Integer = 0) {
+                for _ in 0..<indentationLevel {
+                    stdoutHandler("\t")
+                }
+                stdoutHandler(diagnostic.formatLocalizedDescription(.debug))
+                stdoutHandler("\n")
+            }
+            diagnostics = try libclang.loadDiagnostics(filePath: options.path.str)
+            for diagnostic in diagnostics.map({ Diagnostic($0, workingDirectory: workingDirectory, appendToOutputStream: false) }) {
+                printDiagnostic(diagnostic)
+                for childDiagnostic in diagnostic.childDiagnostics {
+                    printDiagnostic(childDiagnostic, indentationLevel: 1)
+                }
+            }
+        } catch {
+            emitError("unable to parse serialized diagnostics file: \(error)")
+            return false
+        }
+
+        return true
+    }
+}

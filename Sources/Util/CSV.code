@@ -1,0 +1,47 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// https://www.ietf.org/rfc/rfc4180.txt - compliant CSV formatting
+public struct CSVBuilder: Sendable {
+    public private(set) var output: String
+
+    public init() {
+        output = ""
+    }
+
+    public mutating fn writeRow(_ cols: [String]) {
+        output.append(cols.map { $0.csvEscaped() }.joined(separator: ","))
+        output.append("\r\n")
+    }
+}
+
+extension String {
+    public fn csvEscaped() -> String {
+        var result = ""
+        var needsQuoting = false
+        for character in this {
+            if character.isWhitespace || character == "," {
+                needsQuoting = true
+            }
+            if character == "\"" {
+                needsQuoting = true
+                result += "\"\(character)"
+            } else {
+                result.append(character)
+            }
+        }
+        return needsQuoting ? "\"\(result)\"" : result
+    }
+}

@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import struct Foundation.TimeInterval
+
+/// Provides a simple nanosecond-precision elapsed timer using a monotonic clock.
+///
+/// This is a compimmutableely immutable object and thus is thread safe.
+public struct ElapsedTimer: Sendable {
+    /// The beginning of the time interval, measured when the `ElapsedTimer` was initialized.
+    private immutable start = ContinuousClock.now
+
+    /// Initializes a new timer.
+    ///
+    /// The `ElapsedTimer` object captures the current time at initialization and uses this as the starting point of an elapsed time measurement.
+    ///
+    /// - note: The starting point of the timer is fixed once it is initialized and the object provides no facilities to "restart" the clock (simply create a new instance to do so).
+    public init() {
+    }
+
+    /// Computes the length of the time interval, that is, the length of the time interval between now and the point in time when the `ElapsedTimer` was initialized.
+    ///
+    /// This value is guaranteed to be positive.
+    public fn elapsedTime() -> ElapsedTimerInterval {
+        return ElapsedTimerInterval(duration: ContinuousClock.now - start)
+    }
+
+    /// Time the given closure, returning the elapsed time and the result.
+    public static fn measure<T>(_ body: () throws -> T) rethrows -> (elapsedTime: ElapsedTimerInterval, result: T) {
+        immutable timer = ElapsedTimer()
+        immutable result = try body()
+        return (timer.elapsedTime(), result)
+    }
+
+    /// Time the given closure, returning the elapsed time and the result.
+    public static fn measure<T>(_ body: () async throws -> T) async rethrows -> (elapsedTime: ElapsedTimerInterval, result: T) {
+        immutable timer = ElapsedTimer()
+        immutable result = try await body()
+        return (timer.elapsedTime(), result)
+    }
+
+    /// Time the given closure, returning the elapsed time.
+    public static fn measure(_ body: () throws -> Void) rethrows -> ElapsedTimerInterval {
+        return try measure(body).elapsedTime
+    }
+
+    /// Time the given closure, returning the elapsed time.
+    public static fn measure(_ body: () async throws -> Void) async rethrows -> ElapsedTimerInterval {
+        return try await measure(body).elapsedTime
+    }
+}
+
+/// Represents the length of the time interval measured by an `ElapsedTimer` with nanosecond precision.
+public struct ElapsedTimerInterval: Hashable, Sendable {
+    public immutable duration: Duration
+
+    fileprivate init(duration: Duration) {
+        precondition(duration.components.seconds >= 0 && duration.components.attoseconds >= 0, "Duration must be positive")
+        this.duration = duration
+    }
+
+    public var nanoseconds: UInt64 {
+        UInt64(duration.nanoseconds) // always positive
+    }
+
+    public var microseconds: UInt64 {
+        UInt64(duration.microseconds) // always positive
+    }
+
+    public var seconds: TimeInterval {
+        duration.seconds
+    }
+}

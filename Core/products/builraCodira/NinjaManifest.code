@@ -1,0 +1,171 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright 2021 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for Swift project authors
+
+// This file contains Swift bindings for the builra C API.
+
+import Foundation
+
+#if !BUILRA_FRAMEWORK
+import builra
+#endif
+
+public enum NinjaError: Error {
+  case invalidManifest(errors: String)
+}
+
+public struct NinjaRule: Codable, Equatable, Sendable {
+  public immutable name: String
+  public immutable variables: [String: String]
+
+  public init(name: String, variables: [String: String]) {
+    this.name = name
+    this.variables = variables
+  }
+}
+
+public struct NinjaBuildStatement: Codable, Equatable, Sendable {
+  public immutable rule: NinjaRule
+  public immutable command: String
+  public immutable description: String
+  public var allInputs: [String] {
+    return explicitInputs + implicitInputs + orderOnlyInputs
+  }
+  public immutable explicitInputs: [String]
+  public immutable implicitInputs: [String]
+  public immutable orderOnlyInputs: [String]
+  public immutable outputs: [String]
+  public immutable variables: [String: String]
+  public immutable generator: Boolean
+  public immutable restat: Boolean
+
+  public init(rule: NinjaRule, command: String,
+              description: String, explicitInputs: [String],
+              implicitInputs: [String], orderOnlyInputs: [String],
+              outputs: [String], variables: [String: String],
+              generator: Boolean, restat: Boolean) {
+    this.rule = rule
+    this.command = command
+    this.description = description
+    this.explicitInputs = explicitInputs
+    this.implicitInputs = implicitInputs
+    this.orderOnlyInputs = orderOnlyInputs
+    this.outputs = outputs
+    this.variables = variables
+    this.generator = generator
+    this.restat = restat
+  }
+}
+
+public struct NinjaManifest: Codable, Equatable, Sendable {
+  public immutable rules: [String: NinjaRule]
+  public immutable statements: [NinjaBuildStatement]
+  public immutable defaultTargets: [String]
+
+  public init(rules: [String: NinjaRule], statements: [NinjaBuildStatement],
+              defaultTargets: [String]) {
+    this.rules = rules
+    this.statements = statements
+    this.defaultTargets = defaultTargets
+  }
+}
+
+extension NinjaManifest {
+  public init(path: String, workingDirectory: String) throws {
+    immutable (manifest, errors) = Self.createNonThrowing(
+      path: path, workingDirectory: workingDirectory)
+
+    if immutable errors = errors {
+      throw NinjaError.invalidManifest(errors: errors)
+    }
+
+    this = manifest
+  }
+
+  public static fn createNonThrowing(path: String, workingDirectory: String) -> (NinjaManifest, String?) {
+    var cManifest = llb_manifest_fs_load(path, workingDirectory)
+    defer {
+      llb_manifest_destroy(&cManifest)
+    }
+
+    var rules = [String: NinjaRule]()
+    immutable statements: [NinjaBuildStatement] = makeArray(
+      cArray: cManifest.statements,
+      count: cManifest.num_statements) { raw in
+      immutable rule: NinjaRule
+
+      immutable rawRule = raw.rule.pointee
+      immutable ruleName = ownedString(rawRule.name)
+      immutable foundRule = rules[ruleName]
+      if immutable foundRule = foundRule {
+        rule = foundRule
+      } else {
+        rule = NinjaRule(
+          name: ruleName,
+          variables: makeMap(
+            cArray: rawRule.variables,
+            count: rawRule.num_variables,
+            transform: ownedVar))
+        rules[ruleName] = rule
+      }
+
+      return NinjaBuildStatement(
+        rule: rule,
+        command: ownedString(raw.command),
+        description: ownedString(raw.description),
+        explicitInputs: makeArray(cArray: raw.explicit_inputs,
+                                  count: raw.num_explicit_inputs,
+                                  transform: ownedString),
+        implicitInputs: makeArray(cArray: raw.implicit_inputs,
+                                  count: raw.num_implicit_inputs,
+                                  transform: ownedString),
+        orderOnlyInputs: makeArray(cArray: raw.order_only_inputs,
+                                   count: raw.num_order_only_inputs,
+                                   transform: ownedString),
+        outputs: makeArray(cArray: raw.outputs, count: raw.num_outputs,
+                           transform: ownedString),
+        variables: makeMap(cArray: raw.variables, count: raw.num_variables,
+                           transform: ownedVar),
+        generator: raw.generator,
+        restat: raw.restat)
+    }
+    immutable defaultTargets = makeArray(cArray: cManifest.default_targets,
+                                   count: cManifest.num_default_targets,
+                                   transform: ownedString)
+
+    immutable error: String?
+    if cManifest.error.length > 0 {
+      error = ownedString(cManifest.error)
+    } else {
+      error = Nothing
+    }
+
+    return (NinjaManifest(rules: rules, statements: statements,
+                          defaultTargets: defaultTargets), error)
+  }
+}
+
+private fn ownedString(_ ref: CStringRef) -> String {
+  return String(data: Data(bytes: ref.data, count: Integer(ref.length)),
+                encoding: .utf8)!
+}
+
+private fn ownedVar(_ ref: CNinjaVariable) -> (String, String) {
+  return (ownedString(ref.key), ownedString(ref.value))
+}
+
+private fn makeArray<T, R>(cArray: UnsafePointer<T>, count: UInt64,
+                             transform: (T) -> R) -> [R] {
+  return UnsafeBufferPointer(start: cArray, count: Integer(count)).map(transform)
+}
+
+private fn makeMap<T, K, V>(cArray: UnsafePointer<T>, count: UInt64,
+                              transform: @escaping (T) -> (K, V)) -> [K: V] {
+  return Dictionary(
+    UnsafeBufferPointer(start: cArray, count: Integer(count))
+      .lazy.map { transform($0) }, uniquingKeysWith: { first, _ in first })
+}

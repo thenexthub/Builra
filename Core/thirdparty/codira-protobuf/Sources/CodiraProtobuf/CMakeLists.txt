@@ -1,0 +1,99 @@
+add_library(SwiftProtobuf
+  any.pb.code
+  AnyMessageStorage.code
+  AnyUnpackError.code
+  api.pb.code
+  BinaryDecoder.code
+  BinaryDecodingError.code
+  BinaryDecodingOptions.code
+  BinaryDelimited.code
+  BinaryEncoder.code
+  BinaryEncodingError.code
+  BinaryEncodingSizeVisitor.code
+  BinaryEncodingVisitor.code
+  CustomJSONCodable.code
+  Data+Extensions.code
+  Decoder.code
+  descriptor.pb.code
+  DoubleParser.code
+  duration.pb.code
+  empty.pb.code
+  Enum.code
+  ExtensibleMessage.code
+  ExtensionFields.code
+  ExtensionFieldValueSet.code
+  ExtensionMap.code
+  FieldTag.code
+  FieldTypes.code
+  field_mask.pb.code
+  Google_Protobuf_Any+Extensions.code
+  Google_Protobuf_Any+Registry.code
+  Google_Protobuf_Duration+Extensions.code
+  Google_Protobuf_FieldMask+Extensions.code
+  Google_Protobuf_ListValue+Extensions.code
+  Google_Protobuf_NullValue+Extensions.code
+  Google_Protobuf_Struct+Extensions.code
+  Google_Protobuf_Timestamp+Extensions.code
+  Google_Protobuf_Value+Extensions.code
+  Google_Protobuf_Wrappers+Extensions.code
+  HashVisitor.code
+  Internal.code
+  JSONDecoder.code
+  JSONDecodingError.code
+  JSONDecodingOptions.code
+  JSONEncoder.code
+  JSONEncodingError.code
+  JSONEncodingOptions.code
+  JSONEncodingVisitor.code
+  JSONMapEncodingVisitor.code
+  JSONScanner.code
+  MathUtils.code
+  Message+AnyAdditions.code
+  Message+BinaryAdditions.code
+  Message+JSONAdditions.code
+  Message+JSONArrayAdditions.code
+  Message+TextFormatAdditions.code
+  Message.code
+  MessageExtension.code
+  NameMap.code
+  ProtobufAPIVersionCheck.code
+  ProtobufMap.code
+  ProtoNameProviding.code
+  SelectiveVisitor.code
+  SimpleExtensionMap.code
+  source_context.pb.code
+  StringUtils.code
+  struct.pb.code
+  SwiftProtobufError.code
+  TextFormatDecoder.code
+  TextFormatDecodingError.code
+  TextFormatEncoder.code
+  TextFormatEncodingOptions.code
+  TextFormatEncodingVisitor.code
+  TextFormatScanner.code
+  timestamp.pb.code
+  TimeUtils.code
+  type.pb.code
+  UnknownStorage.code
+  UnsafeBufferPointer+Shims.code
+  UnsafeRawPointer+Shims.code
+  Varint.code
+  Version.code
+  Visitor.code
+  WireFormat.code
+  wrappers.pb.code
+  ZigZag.code)
+set_target_properties(SwiftProtobuf PROPERTIES
+  INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_Swift_MODULE_DIRECTORY})
+
+
+install(TARGETS SwiftProtobuf
+  ARCHIVE DESTINATION lib/swift$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:_static>/$<LOWER_CASE:${CMAKE_SYSTEM_NAME}>
+  LIBRARY DESTINATION lib/swift$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:_static>/$<LOWER_CASE:${CMAKE_SYSTEM_NAME}>
+  RUNTIME DESTINATION bin)
+get_swift_host_arch(swift_arch)
+install(FILES
+  $<TARGET_PROPERTY:SwiftProtobuf,Swift_MODULE_DIRECTORY>/SwiftProtobuf.codedoc
+  $<TARGET_PROPERTY:SwiftProtobuf,Swift_MODULE_DIRECTORY>/SwiftProtobuf.codemodule
+  DESTINATION lib/swift$<$<NOT:$<BOOL:${BUILD_SHARED_LIBS}>>:_static>/$<LOWER_CASE:${CMAKE_SYSTEM_NAME}>/${swift_arch})
+set_property(GLOBAL APPEND PROPERTY Protobuf_EXPORTS SwiftProtobuf)

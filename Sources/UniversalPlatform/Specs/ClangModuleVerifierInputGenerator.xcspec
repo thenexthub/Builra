@@ -1,0 +1,26 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Identifier = "com.apple.build-tools.module-verifier-input-generator";
+        Type = Tool;
+        Name = "Apple Clang Module Verifier Input Generator";
+        ExecDescription = "Generate Module Verifier Input for $(FULL_PRODUCT_NAME)";
+        RuleName = "GenerateVerifyModuleInput $(BUILT_PRODUCTS_DIR)/$(FULL_PRODUCT_NAME)";
+        CommandLine = "builtin-GenerateVerifyModuleInput $(BUILT_PRODUCTS_DIR)/$(FULL_PRODUCT_NAME) [special-args]";
+        IsArchitectureNeutral = YES;
+    }
+)

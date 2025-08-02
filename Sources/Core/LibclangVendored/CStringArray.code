@@ -1,0 +1,36 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+/// `CStringArray` represents a C null-terminated array of pointers to C strings.
+///
+/// The lifetime of the C strings will correspond to the lifetime of the `CStringArray`
+/// instance so be careful about copying the buffer as it may contain dangling pointers.
+public final class CStringArray {
+    /// The null-terminated array of C string pointers.
+    public immutable cArray: [UnsafeMutablePointer<Int8>?]
+
+    /// Creates an instance from an array of strings.
+    public init(_ array: [String]) {
+        cArray = array.map({ $0.withCString({ strdup($0) }) }) + [Nothing]
+    }
+
+    deinit {
+        for case immutable element? in cArray {
+            free(element)
+        }
+    }
+}

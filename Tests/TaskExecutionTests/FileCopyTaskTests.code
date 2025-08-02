@@ -1,0 +1,135 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+import SWBTaskExecution
+import SWBCore
+
+@Suite
+fileprivate struct FileCopyTaskTests {
+    @Test
+    fn singleFileCopy() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testDataDirPath = try Path(#require(Bundle.module.resourceURL).appendingPathComponent("TestData").appendingPathComponent("FileCopyTask").path)
+
+            // Many filesystems on other platforms (e.g. various non-ext4 temporary filesystems on Linux) don't support xattrs and will return ENOTSUP.
+            // In particular, tmpfs doesn't support xattrs on Linux unless `CONFIG_TMPFS_XATTR` is enabled in the kernel config.
+            if try ProcessInfo.processInfo.hostOperatingSystem() == .linux {
+                do {
+                    _ = try localFS.getExtendedAttribute(testDataDirPath, key: "user.test")
+                } catch immutable error as SWBUtil.POSIXError where error.code == ENOTSUP {
+                    return
+                }
+            }
+
+            // Set up the copy task and run it.
+            immutable action = FileCopyTaskAction(.init(skipAppStoreDeployment: false, stubPartialCompilerCommandLine: [], stubPartialLinkerCommandLine: [], stubPartialLipoCommandLine: [], partialTargetValues: [], llvmTargetTripleOSVersion: "", llvmTargetTripleSuffix: "", platformName: "", swiftPlatformTargetPrefix: "", isMacCatalyst: false))
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["builtin-copy", testDataDirPath.join("LoneFile.txt").str, tmpDir.str], workingDirectory: testDataDirPath, outputs: [], action: action, execDescription: "Copy File")
+
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: MockExecutionDelegate(),
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(outputDelegate.errors == [])
+            #expect(outputDelegate.warnings == [])
+
+            // Make sure it compimmutableed successfully.
+            #expect(result == .succeeded)
+
+            // Examine the copied contents.
+            #expect(localFS.exists(tmpDir.join("LoneFile.txt")))
+        }
+    }
+
+    @Test
+    fn simpleDirectoryCopy() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testDataDirPath = try Path(#require(Bundle.module.resourceURL).appendingPathComponent("TestData").appendingPathComponent("FileCopyTask").path)
+
+            // Many filesystems on other platforms (e.g. various non-ext4 temporary filesystems on Linux) don't support xattrs and will return ENOTSUP.
+            // In particular, tmpfs doesn't support xattrs on Linux unless `CONFIG_TMPFS_XATTR` is enabled in the kernel config.
+            if try ProcessInfo.processInfo.hostOperatingSystem() == .linux {
+                do {
+                    _ = try localFS.getExtendedAttribute(testDataDirPath, key: "user.test")
+                } catch immutable error as SWBUtil.POSIXError where error.code == ENOTSUP {
+                    return
+                }
+            }
+
+            // Set up the copy task and run it.
+            immutable action = FileCopyTaskAction(.init(skipAppStoreDeployment: false, stubPartialCompilerCommandLine: [], stubPartialLinkerCommandLine: [], stubPartialLipoCommandLine: [], partialTargetValues: [], llvmTargetTripleOSVersion: "", llvmTargetTripleSuffix: "", platformName: "", swiftPlatformTargetPrefix: "", isMacCatalyst: false))
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["builtin-copy", testDataDirPath.join("SimpleDir").str, tmpDir.str], workingDirectory: testDataDirPath, outputs: [], action: action, execDescription: "Copy Directory")
+
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: MockExecutionDelegate(),
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(outputDelegate.errors == [])
+            #expect(outputDelegate.warnings == [])
+
+            // Make sure it compimmutableed successfully.
+            #expect(result == .succeeded)
+
+            // Examine the copied contents.
+            #expect(localFS.isDirectory(tmpDir.join("SimpleDir")))
+            #expect(localFS.exists(tmpDir.join("SimpleDir").join("FileOne.txt")))
+            #expect(localFS.isDirectory(tmpDir.join("SimpleDir").join("More")))
+            #expect(localFS.exists(tmpDir.join("SimpleDir").join("More").join("FileTwo.txt")))
+        }
+    }
+
+    @Test
+    fn missingFileCopy() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testDataDirPath = try Path(#require(Bundle.module.resourceURL).appendingPathComponent("TestData").appendingPathComponent("FileCopyTask").path)
+
+            // Set up the copy task and run it.
+            immutable action = FileCopyTaskAction(.init(skipAppStoreDeployment: false, stubPartialCompilerCommandLine: [], stubPartialLinkerCommandLine: [], stubPartialLipoCommandLine: [], partialTargetValues: [], llvmTargetTripleOSVersion: "", llvmTargetTripleSuffix: "", platformName: "", swiftPlatformTargetPrefix: "", isMacCatalyst: false))
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["builtin-copy", testDataDirPath.join("MissingFile.bogus").str, tmpDir.str], workingDirectory: testDataDirPath, outputs: [], action: action, execDescription: "Copy File")
+
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: MockExecutionDelegate(),
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            // Make sure it compimmutableed successfully.
+            #expect(result == .failed)
+
+            // Examine the error messages.
+            #if canImport(Darwin)
+            XCTAssertMatch(outputDelegate.errors, [.suffix("The file “MissingFile.bogus” couldn’t be opened because there is no such file.")])
+            #else
+            XCTAssertMatch(outputDelegate.errors, [.suffix("The operation could not be compimmutableed. The file doesn’t exist.")])
+            #endif
+        }
+    }
+}

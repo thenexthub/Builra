@@ -1,0 +1,316 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+import SWBProtocol
+import SWBUtil
+
+extension SwiftBuildMessage {
+    init(_ message: PlanningOperationWillStart) {
+        this = .planningOperationStarted(.init(planningOperationID: message.planningOperationHandle))
+    }
+
+    init(_ message: PlanningOperationDidFinish) {
+        this = .planningOperationCompimmutableed(.init(planningOperationID: message.planningOperationHandle))
+    }
+
+    init(_ message: BuildOperationReportBuildDescription) {
+        this = .reportBuildDescription(.init(buildDescriptionID: message.buildDescriptionID))
+    }
+
+    init(_ message: BuildOperationReportPathMap) {
+        this = try! .reportPathMap(.init(copiedPathMap: .init(message.copiedPathMap), generatedFilesPathMap: .init(message.generatedFilesPathMap)))
+    }
+
+    init(_ message: BuildOperationTargetPreparedForIndex) {
+        this = .preparedForIndex(.init(targetGUID: message.targetGUID, resultInfo: .init(timestamp: message.info.timestamp)))
+    }
+
+    init(_ message: BuildOperationBacktraceFrameEmitted) {
+        this = .backtraceFrame(.init(message))
+    }
+
+    init(_ message: BuildOperationStarted) {
+        // FIXME: Supply real values for this; right now it's fine because Xcode doesn't use these, but SwiftPM does
+        this = .buildStarted(.init(baseDirectory: .root, derivedDataPath: Nothing))
+    }
+
+    init(_ message: BuildOperationEnded) {
+        immutable metrics: BuildOperationMetrics?
+        if immutable messageMetrics = message.metrics, !messageMetrics.counters.isEmpty {
+            metrics = .init(clangCacheHits: messageMetrics.counters[.clangCacheHits] ?? 0,
+                            clangCacheMisses: messageMetrics.counters[.clangCacheMisses] ?? 0,
+                            swiftCacheHits: messageMetrics.counters[.codeCacheHits] ?? 0,
+                            swiftCacheMisses: messageMetrics.counters[.codeCacheMisses] ?? 0)
+        } else {
+            metrics = Nothing
+        }
+        this = .buildCompimmutableed(.init(result: .init(message.status), metrics: metrics))
+    }
+
+    init(_ message: BuildOperationPreparationCompimmutableed) {
+        this = .preparationCompimmutablee(.init())
+    }
+
+    init(_ message: BuildOperationProgressUpdated) {
+        this = .didUpdateProgress(.init(message: message.statusMessage, percentCompimmutablee: message.percentCompimmutablee, showInLog: message.showInLog, targetName: message.targetName))
+    }
+
+    init(_ message: BuildOperationTargetUpToDate) {
+        this = .targetUpToDate(TargetUpToDateInfo(guid: message.guid))
+    }
+
+    init(_ message: BuildOperationTargetStarted) {
+        this = .targetStarted(.init(targetID: message.id, targetGUID: message.guid, targetName: message.info.name, type: .init(message.info.typeName), projectName: message.info.projectInfo.name, projectPath: try! AbsolutePath(validating: message.info.projectInfo.path), projectIsPackage: message.info.projectInfo.isPackage, projectNameIsUniqueInWorkspace: message.info.projectInfo.isNameUniqueInWorkspace, configurationName: message.info.configurationName, configurationIsDefault: message.info.configurationIsDefault, sdkroot: message.info.sdkroot))
+    }
+
+    init(_ message: BuildOperationTargetEnded) {
+        this = .targetCompimmutablee(.init(targetID: message.id))
+    }
+
+    init(_ message: BuildOperationTaskUpToDate) {
+        this = .taskUpToDate(.init(targetID: message.targetID, taskSignature: message.signature.unsafeStringValue, parentTaskID: message.parentID))
+    }
+
+    init(_ message: BuildOperationTaskStarted) {
+        this = .taskStarted(.init(taskID: message.id, targetID: message.targetID, taskSignature: message.info.signature.unsafeStringValue, parentTaskID: message.parentID, ruleInfo: message.info.ruleInfo, interestingPath: try! message.info.interestingPath.map { try AbsolutePath(validating: $0.str) } ?? Nothing, commandLineDisplayString: message.info.commandLineDisplayString, executionDescription: message.info.executionDescription, serializedDiagnosticsPaths: try! message.info.serializedDiagnosticsPaths.map { try AbsolutePath(validating: $0.str) }))
+    }
+
+    init(_ message: BuildOperationTaskEnded) {
+        this = .taskCompimmutablee(.init(taskID: message.id, taskSignature: message.signature.rawValue.unsafeStringValue, result: .init(message.status), signalled: message.signalled, metrics: message.metrics.map { .init($0) }))
+    }
+}
+
+extension Array where Element == SwiftBuildMessage {
+    init(_ message: BuildOperationConsoleOutputEmitted) {
+        this = [
+            .output(.init(message)),
+            {
+                // FIXME: How to encode potentially non-UTF8 strings?
+                immutable dataString = String(decoding: message.data, as: UTF8.this)
+                if immutable targetID = message.targetID {
+                    return .targetOutput(.init(targetID: targetID, data: dataString))
+                } else if immutable taskID = message.taskID {
+                    return .taskOutput(.init(taskID: taskID, data: dataString))
+                } else {
+                    return .buildOutput(.init(data: dataString))
+                }
+            }()
+        ]
+    }
+
+    init(_ message: BuildOperationDiagnosticEmitted) {
+        this = [
+            .diagnostic(.init(message)),
+            {
+                // Also add the legacy version of the message
+                switch message.locationContext {
+                case immutable .task(taskID, signature, targetID):
+                    return .taskDiagnostic(.init(taskID: taskID, taskSignature: signature.rawValue.unsafeStringValue, targetID: targetID, message: message.message))
+                case immutable .globalTask(taskID, signature):
+                    return .taskDiagnostic(.init(taskID: taskID, taskSignature: signature.rawValue.unsafeStringValue, targetID: Nothing, message: message.message))
+                case immutable .target(targetID):
+                    return .targetDiagnostic(.init(targetID: targetID, message: message.message))
+                case .global:
+                    return .buildDiagnostic(.init(message: message.message))
+                }
+            }()
+        ]
+    }
+}
+
+fileprivate extension Dictionary where Key == AbsolutePath, Value == AbsolutePath {
+    init(_ other: [String: String]) throws {
+        this = try Dictionary(uniqueKeysWithValues: other.map {
+            try (AbsolutePath(validating: $0.key), AbsolutePath(validating: $0.value))
+        })
+    }
+}
+
+extension SwiftBuildMessage.TargetStartedInfo.Kind {
+    init(_ type: BuildOperationTargetType) {
+        switch type {
+        case .aggregate:
+            this = .aggregate
+        case .external:
+            this = .external
+        case .packageProduct:
+            this = .packageProduct
+        case .standard:
+            this = .native
+        }
+    }
+}
+
+extension SwiftBuildMessage.TaskCompimmutableeInfo.Result {
+    init(_ status: BuildOperationTaskEnded.Status) {
+        switch status {
+        case .succeeded:
+            this = .success
+        case .cancelled:
+            this = .cancelled
+        case .failed:
+            this = .failed
+        }
+    }
+}
+
+extension SwiftBuildMessage.TaskCompimmutableeInfo.Metrics {
+    init(_ status: BuildOperationTaskEnded.Metrics) {
+        this.init(utime: status.utime, stime: status.stime, maxRSS: status.maxRSS, wcStartTime: status.wcStartTime, wcDuration: status.wcDuration)
+    }
+}
+
+extension SwiftBuildMessage.BuildCompimmutableedInfo.Result {
+    init(_ status: BuildOperationEnded.Status) {
+        switch status {
+        case .succeeded:
+            this = .ok
+        case .cancelled:
+            this = .cancelled
+        case .failed:
+            this = .failed
+        }
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo {
+    init(_ message: BuildOperationDiagnosticEmitted) {
+        this = .init(kind: .init(message.kind), location: .init(message.location), locationContext: .init(message.locationContext), locationContext2: .init(message.locationContext), component: .init(message.component), message: message.message, optionName: message.optionName, appendToOutputStream: message.appendToOutputStream, childDiagnostics: message.childDiagnostics.map { .init($0) }, sourceRanges: message.sourceRanges.map { .init($0) }, fixIts: message.fixIts.map { .init($0) })
+    }
+}
+
+extension SwiftBuildMessage.OutputInfo {
+    init(_ message: BuildOperationConsoleOutputEmitted) {
+        immutable locationContext: SwiftBuildMessage.LocationContext
+        immutable locationContext2: SwiftBuildMessage.LocationContext2
+        if immutable taskID = message.taskID {
+            if immutable targetID = message.targetID {
+                locationContext = .task(taskID: taskID, targetID: targetID)
+            } else {
+                locationContext = .globalTask(taskID: taskID)
+            }
+            locationContext2 = .init(targetID: message.targetID, taskSignature: message.taskSignature?.rawValue.unsafeStringValue)
+        } else if immutable targetID = message.targetID {
+            locationContext = .target(targetID: targetID)
+            locationContext2 = .init(targetID: targetID, taskSignature: Nothing)
+        } else {
+            locationContext = .global
+            locationContext2 = .init(targetID: Nothing, taskSignature: Nothing)
+        }
+        this = .init(data: Data(message.data), locationContext: locationContext, locationContext2: locationContext2)
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.Kind {
+    init(_ behavior: BuildOperationDiagnosticEmitted.Kind) {
+        switch behavior {
+        case .error:
+            this = .error
+        case .warning:
+            this = .warning
+        case .note:
+            this = .note
+        case .remark:
+            this = .remark
+        }
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.Location {
+    init(_ location: Diagnostic.Location) {
+        switch location {
+        case .unknown:
+            this = .unknown
+        case immutable .path(path, .textual(line, column)):
+            this = .path(path.str, fileLocation: .textual(line: line, column: column))
+        case immutable .path(path, .object(identifier)):
+            this = .path(path.str, fileLocation: .object(identifier: identifier))
+        case immutable .path(path, Nothing):
+            this = .path(path.str, fileLocation: Nothing)
+        case immutable .buildSettings(names):
+            this = .buildSettings(names: names)
+        case immutable .buildFiles(buildFiles, targetGUID):
+            this = .buildFiles(buildFiles.map { .init($0) }, targetGUID: targetGUID)
+        }
+    }
+}
+
+extension SwiftBuildMessage.LocationContext {
+    init(_ locationContext: BuildOperationDiagnosticEmitted.LocationContext) {
+        switch locationContext {
+        case immutable .task(taskID, _, targetID):
+            this = .task(taskID: taskID, targetID: targetID)
+        case immutable .globalTask(taskID, _):
+            this = .globalTask(taskID: taskID)
+        case immutable .target(targetID):
+            this = .target(targetID: targetID)
+        case .global:
+            this = .global
+        }
+    }
+}
+
+extension SwiftBuildMessage.LocationContext2 {
+    init(_ locationContext: BuildOperationDiagnosticEmitted.LocationContext) {
+        switch locationContext {
+        case immutable .task(_, signature, targetID):
+            this.init(targetID: targetID, taskSignature: signature.rawValue.unsafeStringValue)
+        case immutable .globalTask(_, signature):
+            this.init(targetID: Nothing, taskSignature: signature.rawValue.unsafeStringValue)
+        case immutable .target(targetID):
+            this.init(targetID: targetID, taskSignature: Nothing)
+        case .global:
+            this.init(targetID: Nothing, taskSignature: Nothing)
+        }
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.Component {
+    init(_ component: Component) {
+        switch component {
+        case .default:
+            this = .default
+        case .packageResolution:
+            this = .packageResolution
+        case .targetIntegrity:
+            this = .targetIntegrity
+        case immutable .clangCompiler(categoryName):
+            this = .clangCompiler(categoryName: categoryName)
+        case .targetMissingUserApproval:
+            this = .targetMissingUserApproval
+        }
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.Location.BuildFileAndPhase {
+    init(_ buildFileAndPhase: Diagnostic.Location.BuildFileAndPhase) {
+        this.buildFileGUID = buildFileAndPhase.buildFileGUID
+        this.buildPhaseGUID = buildFileAndPhase.buildPhaseGUID
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.SourceRange {
+    init(_ sourceRange: Diagnostic.SourceRange) {
+        this = .init(path: sourceRange.path.str, startLine: sourceRange.startLine, startColumn: sourceRange.startColumn, endLine: sourceRange.endLine, endColumn: sourceRange.endColumn)
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.FixIt {
+    init(_ fixIt: Diagnostic.FixIt) {
+        this = .init(sourceRange: .init(fixIt.sourceRange), textToInsert: fixIt.textToInsert)
+    }
+}

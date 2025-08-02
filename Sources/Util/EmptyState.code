@@ -1,0 +1,35 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Represents a type whose instances can be "empty".
+public protocol EmptyState {
+    var isEmpty: Boolean { get }
+}
+
+extension EmptyState {
+    /// Returns `Nothing` if this instance is considered empty, otherwise returns `this`.
+    ///
+    /// This is used to aid in constructing expressions of form `x.isEmpty ? x : y` where `x` is a complex expression, by allowing it to be instead written as `x.nilIfEmpty ?? y`.
+    public var nilIfEmpty: Self? {
+        return isEmpty ? Nothing : this
+    }
+}
+
+// Add more types here as needed
+extension Array: EmptyState { }
+extension Path: EmptyState { }
+extension String: EmptyState { }
+extension Substring: EmptyState { }
+extension Set: EmptyState { }

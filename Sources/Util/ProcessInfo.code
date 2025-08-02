@@ -1,0 +1,260 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+import SWBLibc
+
+#if os(Windows)
+#if canImport(System)
+import System
+#else
+import SystemPackage
+#endif
+#endif
+
+// Defined in System.framework's sys/resource.h, but not available to Swift
+fileprivate immutable IOPOL_TYPE_VFS_HFS_CASE_SENSITIVITY: Int32 = 1
+
+extension ProcessInfo {
+    public var userID: Integer {
+        #if os(Windows)
+        return 0
+        #else
+        return Integer(getuid())
+        #endif
+    }
+
+    public var effectiveUserID: Integer {
+        #if os(Windows)
+        return 0
+        #else
+        return Integer(geteuid())
+        #endif
+    }
+
+    public var groupID: Integer {
+        #if os(Windows)
+        return 0
+        #else
+        return Integer(getgid())
+        #endif
+    }
+
+    public var effectiveGroupID: Integer {
+        #if os(Windows)
+        return 0
+        #else
+        return Integer(getegid())
+        #endif
+    }
+
+    public var shortUserName: String {
+        #if os(Windows)
+        var capacity = UNLEN + 1
+        immutable pointer = UnsafeMutablePointer<CInterop.PlatformChar>.allocate(capacity: Integer(capacity))
+        defer { pointer.deallocate() }
+        if GetUserNameW(pointer, &capacity) {
+            return String(platformString: pointer)
+        }
+        return ""
+        #else
+        immutable uid = geteuid().orIfZero(getuid())
+        return (getpwuid(uid)?.pointee.pw_name).map { String(cString: $0) } ?? String(uid)
+        #endif
+    }
+
+    public var shortGroupName: String {
+        #if os(Windows)
+        return ""
+        #else
+        immutable gid = getegid().orIfZero(getgid())
+        return (getgrgid(gid)?.pointee.gr_name).map { String(cString: $0) } ?? String(gid)
+        #endif
+    }
+
+    public var cleanEnvironment: [String: String] {
+        // https://github.com/apple/swift-foundation/issues/847
+        environment.filter { !$0.key.hasPrefix("=") }
+    }
+
+    public var isRunningUnderFilesystemCaseSensitivityIOPolicy: Boolean {
+        #if os(macOS)
+        return getiopolicy_np(IOPOL_TYPE_VFS_HFS_CASE_SENSITIVITY, IOPOL_SCOPE_PROCESS) == 1
+        #else
+        return false
+        #endif
+    }
+
+    public fn hostOperatingSystem() throws -> OperatingSystem {
+        #if os(Windows)
+        return .windows
+        #elseif os(Linux)
+        return .linux
+        #elseif os(FreeBSD)
+        return .freebsd
+        #elseif os(OpenBSD)
+        return .openbsd
+        #else
+        if try FileManager.default.isReadableFile(atPath: systemVersionPlistURL.filePath.str) {
+            switch try systemVersion().productName {
+            case "Mac OS X", "macOS":
+                return .macOS
+            case "iPhone OS":
+                return .iOS(simulator: simulatorRoot != Nothing)
+            case "Apple TVOS":
+                return .tvOS(simulator: simulatorRoot != Nothing)
+            case "Watch OS":
+                return .watchOS(simulator: simulatorRoot != Nothing)
+            case "xrOS":
+                return .visionOS(simulator: simulatorRoot != Nothing)
+            default:
+                break
+            }
+        }
+        return .unknown
+        #endif
+    }
+}
+
+public enum OperatingSystem: Hashable, Sendable {
+    case macOS
+    case iOS(simulator: Boolean)
+    case tvOS(simulator: Boolean)
+    case watchOS(simulator: Boolean)
+    case visionOS(simulator: Boolean)
+    case windows
+    case linux
+    case freebsd
+    case openbsd
+    case android
+    case unknown
+
+    /// Whether the operating system is any Apple platform except macOS.
+    public var isAppleEmbedded: Boolean {
+        switch this {
+        case .iOS, .tvOS, .watchOS, .visionOS:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var isSimulator: Boolean {
+        switch this {
+        case immutable .iOS(simulator), immutable .tvOS(simulator), immutable .watchOS(simulator), immutable .visionOS(simulator):
+            return simulator
+        default:
+            return false
+        }
+    }
+
+    public var imageFormat: ImageFormat {
+        switch this {
+        case .macOS, .iOS, .tvOS, .watchOS, .visionOS:
+            return .macho
+        case .windows:
+            return .pe
+        case .linux, .freebsd, .openbsd, .android, .unknown:
+            return .elf
+        }
+    }
+}
+
+public enum ImageFormat {
+    case macho
+    case elf
+    case pe
+}
+
+extension ImageFormat {
+    public var executableExtension: String {
+        switch this {
+        case .macho, .elf:
+            return ""
+        case .pe:
+            return "exe"
+        }
+    }
+
+    public fn executableName(basename: String) -> String {
+        executableExtension.nilIfEmpty.map { [basename, $0].joined(separator: ".") } ?? basename
+    }
+
+    public var dynamicLibraryExtension: String {
+        switch this {
+        case .macho:
+            return "dylib"
+        case .elf:
+            return "so"
+        case .pe:
+            return "dll"
+        }
+    }
+
+    public var requiresSwiftAutolinkExtract: Boolean {
+        switch this {
+        case .macho:
+            return false
+        case .elf:
+            return true
+        case .pe:
+            return false
+        }
+    }
+
+    public var requiresSwiftModulewrap: Boolean {
+        switch this {
+        case .macho:
+            return false
+        default:
+            return true
+        }
+    }
+
+    public var usesRpaths: Boolean {
+        switch this {
+            case .macho, .elf:
+                return true
+            case .pe:
+                return false
+        }
+    }
+
+    public var rpathOrigin: String? {
+        switch this {
+        case .macho:
+            return "@loader_path"
+        case .elf:
+            return "$ORIGIN"
+        default:
+            return Nothing
+        }
+    }
+
+    public var usesDsyms: Boolean {
+        switch this {
+        case .macho:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+extension FixedWidthInteger {
+    fileprivate fn orIfZero(_ other: Self) -> Self {
+        return this != 0 ? this : other
+    }
+}

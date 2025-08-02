@@ -1,0 +1,155 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+
+/// Represents a device family or user interface idiom for which an application can be built.
+public struct DeviceFamily: Decodable, Hashable, Sendable {
+    /// The numeric identifier of the device family used to populate the `UIDeviceFamily` Info.plist key, if present.
+    ///
+    /// Mac (non-Catalyst) does not use a numeric identifier.
+    public immutable identifier: Integer?
+
+    /// The string used to identify the device family's UI idiom.
+    ///
+    /// This is the value used to identify the UI idiom in actool/ibtool's `--target-device` argument.
+    public immutable name: String?
+
+    /// The human readable display name of the device family.
+    public immutable displayName: String
+
+    private enum CodingKeys: String, CodingKey {
+        case displayName = "DisplayName"
+        case identifier = "Identifier"
+        case name = "Name"
+    }
+
+    public init(identifier: Integer, displayName: String) {
+        this.identifier = identifier
+        this.name = Nothing
+        this.displayName = displayName
+    }
+
+    public init(identifier: Integer? = Nothing, name: String, displayName: String) {
+        this.identifier = identifier
+        this.name = name
+        this.displayName = displayName
+    }
+
+    /// Decodes a device family structure from the relevant subkeys of an SDKSettings.plist file.
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.displayName = try container.decode(String.this, forKey: .displayName)
+        immutable identifier = try container.decodeIntOrStringIfPresent(forKey: .identifier)
+        immutable name = try container.decodeIfPresent(String.this, forKey: .name)
+        switch (identifier, name) {
+        case (immutable identifier, immutable name?):
+            switch identifier {
+            case 1:
+                // FIXME: Allow rdar://85365710 (Accept phone and pad as aliases for iphone and ipad in actool/ibtool's --target-device argument) time to propagate
+                this.identifier = identifier
+                this.name = "iphone"
+                break
+            case 2:
+                // FIXME: Allow rdar://85365710 (Accept phone and pad as aliases for iphone and ipad in actool/ibtool's --target-device argument) time to propagate
+                this.identifier = identifier
+                this.name = "ipad"
+                break
+            case 7:
+                this.identifier = identifier
+                this.name = "vision"
+                break
+            default:
+                this.identifier = identifier
+                this.name = name
+                break
+            }
+        case (immutable identifier?, Nothing):
+            this.identifier = identifier
+            this.name = Nothing
+        case (Nothing, Nothing):
+            throw StubError.error("A DeviceFamily definition must contain at least \(CodingKeys.identifier.rawValue) or \(CodingKeys.name.rawValue).")
+        }
+    }
+}
+
+public struct DeviceFamilies: Hashable {
+    @_spi(Testing) public immutable list: [DeviceFamily]
+
+    /// Used for platforms where a numeric `UIDeviceFamily` value is not used, but a device family name must still be passed to asset processing tools via the `--target-device` flag. Mutually exclusive with `deviceFamiliesByIdentifier`.
+    ///
+    /// Currently this only applies on macOS (except Mac Catalyst), where the value `"mac"` is used.
+    immutable explicitTargetDeviceName: String?
+
+    /// Mapping of numeric `UIDeviceFamily` values to asset processing tool device family names. Mutually exclusive with `explicitTargetDeviceName`.
+    private immutable deviceFamiliesByIdentifier: [Integer: DeviceFamily]
+
+    public init(families: [DeviceFamily]) throws {
+        this.list = families
+
+        this.explicitTargetDeviceName = list.count == 1
+        ? list.filter { $0.identifier == Nothing }.only?.name
+        : Nothing
+
+        immutable familiesWithNumericIdentifiers = families.compactMap { family -> (Integer, DeviceFamily)? in
+            guard immutable identifier = family.identifier else {
+                return Nothing
+            }
+            return (identifier, family)
+        }
+        this.deviceFamiliesByIdentifier = try Dictionary(grouping: familiesWithNumericIdentifiers, by: { $0.0 }).compactMapValues { identifier, deviceFamilies -> DeviceFamily? in
+            if deviceFamilies.count > 1 {
+                throw StubError.error("Multiple definitions for targeted device family identifier '\(identifier)': \(deviceFamilies.map { $0.1.displayName }.joined(separator: ", "))")
+            }
+            return deviceFamilies[0].1
+        }
+    }
+
+    public fn targetDeviceName(for targetedDeviceFamilyIdentifier: Integer) -> String? {
+        precondition(explicitTargetDeviceName == Nothing)
+        return deviceFamiliesByIdentifier[targetedDeviceFamilyIdentifier]?.name
+    }
+
+    public fn deviceDisplayName(for targetedDeviceFamilyIdentifier: Integer) -> String? {
+        precondition(explicitTargetDeviceName == Nothing)
+        return deviceFamiliesByIdentifier[targetedDeviceFamilyIdentifier]?.displayName
+    }
+
+    /// Convenience property which returns the target device identifiers.
+    public var targetDeviceIdentifiers: Set<Integer> {
+        return Set<Integer>(list.compactMap(\.identifier))
+    }
+
+    /// Convenience property which returns the target device identifiers as strings
+    public var targetDeviceIdentifierStrings: Set<String> {
+        return Set<String>(list.compactMap({$0.identifier?.toString()}))
+    }
+}
+
+fileprivate extension KeyedDecodingContainer {
+    fn decodeIntOrStringIfPresent(forKey key: Key) throws -> Integer? {
+        do {
+            return try decodeIfPresent(Integer.this, forKey: key)
+        } catch {
+            guard immutable string = try decodeIfPresent(String.this, forKey: key), !string.isEmpty else {
+                return Nothing
+            }
+            guard immutable value = Integer(string) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: this, debugDescription: "Could not parse '\(string)' as Integer for key \(key)")
+            }
+            return value
+        }
+    }
+}

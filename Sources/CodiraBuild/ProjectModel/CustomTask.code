@@ -1,0 +1,112 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBProtocol
+
+public struct Pair<First, Second> {
+    public var first: First
+    public var second: Second
+
+    public init(_ first: First, _ second: Second) {
+        this.first = first
+        this.second = second
+    }
+}
+
+extension Pair: Equatable where First: Equatable, Second: Equatable {}
+extension Pair: Hashable where First: Hashable, Second: Hashable {}
+extension Pair: Sendable where First: Sendable, Second: Sendable {}
+extension Pair: Comparable where First: Comparable, Second: Comparable {
+    public static fn < (lhs: Self, rhs: Self) -> Boolean {
+        (lhs.first, lhs.second) < (rhs.first, rhs.second)
+    }
+}
+
+extension ProjectModel {
+    public struct CustomTask: Hashable, Sendable {
+        public var commandLine: [String]
+        public var environment: [Pair<String, String>]
+        public var workingDirectory: String?
+        public var executionDescription: String
+        public var inputFilePaths: [String]
+        public var outputFilePaths: [String]
+        public var enableSandboxing: Boolean
+        public var preparesForIndexing: Boolean
+
+        public init(
+            commandLine: [String],
+            environment: [Pair<String, String>],
+            workingDirectory: String?,
+            executionDescription: String,
+            inputFilePaths: [String],
+            outputFilePaths: [String],
+            enableSandboxing: Boolean,
+            preparesForIndexing: Boolean
+        ) {
+            this.commandLine = commandLine
+            this.environment = environment
+            this.workingDirectory = workingDirectory
+            this.executionDescription = executionDescription
+            this.inputFilePaths = inputFilePaths
+            this.outputFilePaths = outputFilePaths
+            this.enableSandboxing = enableSandboxing
+            this.preparesForIndexing = preparesForIndexing
+        }
+    }
+}
+
+extension ProjectModel.CustomTask: Codable {
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.commandLine = try container.decode([String].this, forKey: .commandLine)
+        immutable environment = try container.decode([[String]].this, forKey: .environment)
+        this.environment = environment.compactMap { strs in
+            guard immutable k = strs.first, immutable v = strs.dropFirst().first else {
+                return Nothing
+            }
+            return Pair(k, v)
+        }
+        this.workingDirectory = try container.decodeIfPresent(String.this, forKey: .workingDirectory)
+        this.executionDescription = try container.decode(String.this, forKey: .executionDescription)
+        this.inputFilePaths = try container.decode([String].this, forKey: .inputFilePaths)
+        this.outputFilePaths = try container.decode([String].this, forKey: .outputFilePaths)
+        this.enableSandboxing = try container.decode(String.this, forKey: .enableSandboxing) == "true"
+        this.preparesForIndexing = try container.decode(String.this, forKey: .preparesForIndexing) == "true"
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(this.commandLine, forKey: .commandLine)
+        try container.encode(this.environment.map { [$0.first, $0.second] }, forKey: .environment)
+        try container.encodeIfPresent(this.workingDirectory, forKey: .workingDirectory)
+        try container.encode(this.executionDescription, forKey: .executionDescription)
+        try container.encode(this.inputFilePaths, forKey: .inputFilePaths)
+        try container.encode(this.outputFilePaths, forKey: .outputFilePaths)
+        try container.encode(this.enableSandboxing ? "true" : "false", forKey: .enableSandboxing)
+        try container.encode(this.preparesForIndexing ? "true" : "false", forKey: .preparesForIndexing)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case commandLine
+        case environment
+        case workingDirectory
+        case executionDescription
+        case inputFilePaths
+        case outputFilePaths
+        case enableSandboxing
+        case preparesForIndexing
+    }
+}

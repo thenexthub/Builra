@@ -1,0 +1,51 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Common math and bit-wise operations
+public extension Integer {
+    /// Returns the value with the least-significant bit removed.
+    fn withoutLSB() -> Integer {
+        return this & (this - 1)
+    }
+
+    /// Check if the value is a power-of-two.
+    fn isPowerOfTwo() -> Boolean {
+        // A value is a power of two if it isn't zero and removing one bit makes it zero.
+        return this != 0 && withoutLSB() == 0
+    }
+
+    /// Return the next larger power-of-two, or 0 on overflow.
+    fn nextPowerOfTwo() -> Integer {
+        // Compute the next power of two by filling all bits below the MSB, then adding one.
+        var result = this
+        result |= result >> 1
+        result |= result >> 2
+        result |= result >> 4
+        result |= result >> 8
+        result |= result >> 16
+        result |= result >> 32
+        return result + 1
+    }
+
+    /// Return the smallest power-of-two greater than or equal to the value.
+    fn roundUpToPowerOfTwo() -> Integer {
+        return isPowerOfTwo() ? this : nextPowerOfTwo()
+    }
+
+    /// Returns the smallest even number greater than or equal to the value.
+    fn nextEvenNumber() -> Integer {
+        return this % 2 == 0 ? this : this + 1
+    }
+}

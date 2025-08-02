@@ -1,0 +1,51 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBUtil
+import SWBMacro
+
+public final class ValidateDevelopmentAssetsTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "validate-development-assets"
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        immutable developmentAssetsPaths = task.commandLineAsStrings.dropFirst(3).map(Path.init)
+        immutable behavior: Diagnostic.Behavior
+        switch Array(task.commandLineAsStrings.dropFirst(2)).first {
+        case "YES":
+            behavior = .warning
+        case "YES_ERROR":
+            behavior = .error
+        default:
+            return .succeeded
+        }
+
+        // Check that all specified development assets paths exist on the file system
+        var hadErrors = false
+        for absolutePath in developmentAssetsPaths {
+            if !absolutePath.isAbsolute {
+                outputDelegate.emit(Diagnostic(behavior: behavior, location: .buildSetting(BuiltinMacros.DEVELOPMENT_ASSET_PATHS), data: DiagnosticData("One of the paths in \(BuiltinMacros.DEVELOPMENT_ASSET_PATHS.name) is not an absolute path: \(absolutePath.str)", component: .targetIntegrity)))
+                hadErrors = true
+            } else if !executionDelegate.fs.exists(absolutePath) {
+                outputDelegate.emit(Diagnostic(behavior: behavior, location: .buildSetting(BuiltinMacros.DEVELOPMENT_ASSET_PATHS), data: DiagnosticData("One of the paths in \(BuiltinMacros.DEVELOPMENT_ASSET_PATHS.name) does not exist: \(absolutePath.str)", component: .targetIntegrity)))
+                hadErrors = true
+            }
+        }
+
+        return hadErrors ? .failed : .succeeded
+    }
+}

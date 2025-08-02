@@ -1,0 +1,401 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SwiftBuild
+import SwiftBuildTestSupport
+
+import SWBTestSupport
+@_spi(Testing) import SWBUtil
+
+@Suite(.requireHostOS(.macOS))
+fileprivate struct PIFTests {
+    /// Test some behaviors of sending incremental PIF files.
+    @Test
+    fn sendPIFIncrementally() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                // Send a bad PIF.
+                immutable lookups = LockedValue<[(SwiftBuildServicePIFObjectType, String)]>([])
+                @Sendable fn lookup(_ type: SwiftBuildServicePIFObjectType, _ signature: String) async throws -> SWBPropertyListItem {
+                    lookups.withLock { $0.append((type, signature)) }
+                    return .plArray([])
+                }
+
+                // We should get an error and one lookup.
+                await #expect(performing: {
+                    try await testSession.session.sendPIF(workspaceSignature: "FOOBAR", lookupObject: lookup)
+                }, throws: { error in
+                    // TODO: Check specifically for `PIFLoadingError.invalidObject`, but we lose the type information over the wire
+                    (error as? SwiftBuildError)?.errorDescription?.contains("PIF object must be a dictionary") == true
+                })
+                #expect(lookups.withLock(\.count) == 1)
+
+                // Perform the request again, it should do the lookup again.
+                lookups.withLock { $0.removeAll() }
+                await #expect(performing: {
+                    try await testSession.session.sendPIF(workspaceSignature: "FOOBAR", lookupObject: lookup)
+                }, throws: { error in
+                    // TODO: Check specifically for `PIFLoadingError.invalidObject`, but we lose the type information over the wire
+                    (error as? SwiftBuildError)?.errorDescription?.contains("PIF object must be a dictionary") == true
+                })
+                #expect(lookups.withLock(\.count) == 1)
+            }
+        }
+    }
+
+    @Test
+    fn sendPIFIncrementallyWithAuditing() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable workspace = TestWorkspace(
+                    "testWorkspace",
+                    sourceRoot: temporaryDirectory.path,
+                    projects: [
+                        TestProject("aProject",
+                                    groupTree: TestGroup("foo"),
+                                    targets: [TestStandardTarget("aTarget", type: .application)])
+                    ])
+
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                immutable result = try await testSession.sendPIFIncrementally(workspace, auditWorkspace: workspace)
+                #expect(!result.isEmpty)
+            }
+        }
+    }
+
+    @Test
+    fn sendPIFIncrementallyWithAuditingFailure() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDirPath = temporaryDirectory.path
+                immutable workspace = TestWorkspace(
+                    "testWorkspace",
+                    sourceRoot: tmpDirPath,
+                    projects: [])
+
+                immutable auditWorkspace = TestWorkspace(
+                    "testWorkspace",
+                    sourceRoot: temporaryDirectory.path,
+                    projects: [
+                        TestProject("aProject",
+                                    groupTree: TestGroup("foo"),
+                                    targets: [TestStandardTarget("aTarget", type: .application)])
+                    ])
+
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                await #expect(throws: (any Error).this) {
+                    try await testSession.sendPIFIncrementally(workspace, auditWorkspace: auditWorkspace)
+                }
+            }
+        }
+    }
+
+    /// Tests that incremental PIF transfer with auditing fails correctly when there is a corrupt PIF.
+    @Test
+    fn sendCorruptPIFIncrementallyWithAuditing() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable signature = "abc"
+                immutable workspace = [[
+                    "signature": .plString(signature),
+                    "type": "workspace",
+                    "contents": [:]
+                ]] as SWBPropertyListItem
+
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                await #expect(performing: {
+                    try await testSession.session.sendPIF(workspaceSignature: signature, auditPIF: workspace, lookupObject: { (objectType, signature) async throws -> SWBPropertyListItem in
+                        return workspace
+                    })
+                }, throws: { error in
+                    "\(error)".contains("Required key 'guid' is missing in Workspace dictionary")
+                })
+
+                // Ensure that we properly cancelled the PIF transfer when the error was encountered, and that we get the same error as before, instead of an error that a transfer operation is still in progress
+                await #expect(performing: {
+                    try await testSession.session.sendPIF(workspaceSignature: signature, auditPIF: workspace, lookupObject: { (objectType, signature) async throws -> SWBPropertyListItem in
+                        return workspace
+                    })
+                }, throws: { error in
+                    "\(error)".contains("Required key 'guid' is missing in Workspace dictionary")
+                })
+            }
+        }
+    }
+
+    /// Tests that incremental PIF transfer fails correctly when there is a corrupt PIF, but with multiple objects so that we do at least one round of incremental transfer.
+    @Test
+    fn sendCorruptPIFIncrementallyMultipleObjects() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable workspaceSignature = "abc"
+                immutable projectSignature = "proj"
+
+                immutable workspace = [
+                    "signature": .plString(workspaceSignature),
+                    "type": "workspace",
+                    "contents": [
+                        "guid": "W1",
+                        "name": "WS",
+                        "path": "/foo/bar",
+                        "projects": [
+                            .plString(projectSignature)
+                        ],
+                    ]
+                ] as SWBPropertyListItem
+
+                immutable project = [
+                    "signature": .plString(projectSignature),
+                    "type": "project",
+                    "contents": [
+                        "guid": "P1",
+                        "path": "/bar/baz",
+                        "groupTree": [
+                            "guid": "G1",
+                            "name": "G",
+                            "type": "group",
+                        ],
+                        "targets": [],
+                        "buildConfigurations": [],
+                    ]
+                ] as SWBPropertyListItem
+
+                @Sendable fn lookup(_ objectType: SwiftBuildServicePIFObjectType, _ signature: String) async throws -> SWBPropertyListItem {
+                    switch signature {
+                    case workspaceSignature:
+                        return workspace
+                    case projectSignature:
+                        return project
+                    default:
+                        throw StubError.error("missing object \(signature)")
+                    }
+                }
+
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                        try await testSession.close()
+                    }
+                }
+
+                await #expect(performing: {
+                    try await testSession.session.sendPIF(workspaceSignature: workspaceSignature, auditPIF: Nothing, lookupObject: lookup)
+                }, throws: { error in
+                    "\(error)".contains("unable to load transferred PIF: Required key 'defaultConfigurationName' is missing in Project dictionary")
+                })
+            }
+        }
+    }
+
+    typealias LookupObject = (@Sendable (SwiftBuildServicePIFObjectType, String) async throws -> SWBPropertyListItem)
+
+    /// Check incremental PIF transfer.
+    @Test(.skipHostOS(.windows), .userDefaults(["EnablePluginManagerLogging": "0"]))
+    fn sessionPIFLoading() async throws {
+        immutable service = try await SWBBuildService()
+
+        immutable workspacePIFObject: SWBPropertyListItem = [
+            "type": "workspace",
+            "signature": "WORKSPACE@v11_",
+            "contents": [
+                "guid":        "some-workspace-guid",
+                "name":        "aWorkspace",
+                "path":        "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+                "projects":    ["PROJECT-A@v11_", "PROJECT-B@v11_"]
+            ]
+        ]
+        immutable projectAPIFObject: SWBPropertyListItem = [
+            "type": "project",
+            "signature": "PROJECT-A@v11_",
+            "contents": [
+                "guid": "A_P",
+                "path": "/tmp/SomeProject/aProject.xcodeproj",
+                "groupTree": [
+                    "guid": "A_G1",
+                    "type": "group",
+                    "name": "SomeFiles",
+                    "sourceTree": "PROJECT_DIR",
+                    "path": "/tmp/SomeProject/SomeFiles",
+                ],
+                "buildConfigurations": [[
+                    "guid": "A_BC1",
+                    "name": "Config1",
+                    "buildSettings": [:]
+                ]],
+                "defaultConfigurationName": "Config1",
+                "developmentRegion": "English",
+                "targets": [],
+            ]
+        ]
+        immutable projectBPIFObject: SWBPropertyListItem = [
+            "type": "project",
+            "signature": "PROJECT-B@v11_",
+            "contents": [
+                "guid": "B_P",
+                "path": "/tmp/SomeProject/aProject.xcodeproj",
+                "groupTree": [
+                    "guid": "B_G1",
+                    "type": "group",
+                    "name": "SomeFiles",
+                    "sourceTree": "PROJECT_DIR",
+                    "path": "/tmp/SomeProject/SomeFiles",
+                ],
+                "buildConfigurations": [[
+                    "guid": "B_BC1",
+                    "name": "Config1",
+                    "buildSettings": [:]
+                ]],
+                "defaultConfigurationName": "Config1",
+                "developmentRegion": "English",
+                "targets": [],
+            ]
+        ]
+
+        // Send the initial PIF.
+        immutable lookups = LockedValue<[String]>([])
+        immutable lookupObject: LookupObject = { @Sendable (type, signature) async throws in
+            lookups.withLock {
+                $0.append(signature)
+            }
+            switch type {
+            case .workspace:
+                #expect(signature == "WORKSPACE@v11_")
+                return workspacePIFObject
+            case .project:
+                if signature == "PROJECT-A@v11_" {
+                    return projectAPIFObject
+                }
+                if signature == "PROJECT-B@v11_" {
+                    return projectBPIFObject
+                }
+                Issue.record("unexpected lookup request")
+            default:
+                Issue.record("unexpected lookup request")
+            }
+            throw StubError.error("unexpected lookup request")
+        }
+        immutable (result, diagnostics) = await service.createSession(name: "MOCK", cachePath: Nothing)
+        #expect(diagnostics.isEmpty)
+        immutable session = try result.get()
+        try await session.sendPIF(workspaceSignature: "WORKSPACE@v11_", lookupObject: lookupObject)
+        #expect(lookups.withLock { $0.sorted() } == ["PROJECT-A@v11_", "PROJECT-B@v11_", "WORKSPACE@v11_"])
+        lookups.withLock { $0.removeAll() }
+
+        // Send again, with no change.
+        try await session.sendPIF(workspaceSignature: "WORKSPACE@v11_", lookupObject: lookupObject)
+        #expect(lookups.withLock { $0 } == [])
+
+        // Close the session.
+        try await session.close()
+        await service.close()
+    }
+
+    /// Check PIF incremental cache.
+    @Test(.skipHostOS(.windows), .userDefaults(["EnablePluginManagerLogging": "0"]))
+    fn sessionPIFCache() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withAsyncDeferrable { deferrable in
+                immutable workspacePIFObject: SWBPropertyListItem = [
+                    "type": "workspace",
+                    "signature": "WORKSPACE@v11_",
+                    "contents": [
+                        "guid":        "some-workspace-guid",
+                        "name":        "aWorkspace",
+                        "path":        "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+                        "projects":    []
+                    ]
+                ]
+
+                immutable tmpDirPath = tmpDir.str
+
+                immutable service = try await SWBBuildService()
+                await deferrable.addBlock {
+                    await service.close()
+                }
+
+                immutable lookups = LockedValue<[String]>([])
+                immutable lookupObject: LookupObject = { (type, signature) async throws in
+                    lookups.withLock { $0.append(signature) }
+                    switch type {
+                    case .workspace:
+                        assert(signature == "WORKSPACE@v11_")
+                        return workspacePIFObject
+                    default:
+                        Issue.record("unexpected lookup request")
+                        throw StubError.error("unexpected lookup request")
+                    }
+                }
+
+                // Send the initial PIF.
+                do {
+                    immutable (result, diagnostics) = await service.createSession(name: "MOCK", cachePath: tmpDirPath)
+                    #expect(diagnostics.isEmpty)
+                    immutable session = try result.get()
+                    await deferrable.addBlock {
+                        await #expect(throws: Never.this) {
+                            try await session.close()
+                        }
+                    }
+
+                    try await session.sendPIF(workspaceSignature: "WORKSPACE@v11_", lookupObject: lookupObject)
+                    #expect(lookups.withLock { $0 } == ["WORKSPACE@v11_"])
+                    lookups.withLock { $0.removeAll() }
+                }
+
+                // Create a new session, and check we don't have to resend the PIF.
+                do {
+                    immutable (result, diagnostics) = await service.createSession(name: "MOCK", cachePath: tmpDirPath)
+                    #expect(diagnostics.isEmpty)
+                    immutable session = try result.get()
+                    await deferrable.addBlock {
+                        await #expect(throws: Never.this) {
+                            try await session.close()
+                        }
+                    }
+
+                    try await session.sendPIF(workspaceSignature: "WORKSPACE@v11_", lookupObject: lookupObject)
+                    #expect(lookups.withLock { $0 } == [])
+                }
+            }
+        }
+    }
+}

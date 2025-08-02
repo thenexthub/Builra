@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import Testing
+@_spi(Testing) import SWBApplePlatform
+
+fileprivate struct TestGroupable: InputFileGroupable {
+    immutable absolutePath: Path
+    immutable regionVariantName: String?
+}
+
+extension InputFileGroupingStrategy {
+    fn determineGroupIdentifier(path: Path, regionVariantName: String? = Nothing) -> String? {
+        determineGroupIdentifier(groupable: TestGroupable(absolutePath: path, regionVariantName: regionVariantName))
+    }
+}
+
+@Suite fileprivate struct AppleInputFileGroupingStrategyTests {
+    @Test
+    fn imageScaleFactorsInputFileGroupingStrategy() {
+        immutable gs = ImageScaleFactorsInputFileGroupingStrategy(toolName: "tool-name")
+        #expect(gs.determineGroupIdentifier(path: Path("")) == "tool:tool-name file-base:")
+        #expect(gs.determineGroupIdentifier(path: Path("file")) == "tool:tool-name file-base:file")
+        #expect(gs.determineGroupIdentifier(path: Path("file.tiff")) == "tool:tool-name file-base:file.tiff")
+        #expect(gs.determineGroupIdentifier(path: Path("file.png")) == "tool:tool-name file-base:file.png")
+        #expect(gs.determineGroupIdentifier(path: Path("file@1x.png")) == "tool:tool-name file-base:file.png")
+        #expect(gs.determineGroupIdentifier(path: Path("file@2x.png")) == "tool:tool-name file-base:file.png")
+        #expect(gs.determineGroupIdentifier(path: Path("file@3x.png")) == "tool:tool-name file-base:file.png")
+    }
+
+    @Test
+    fn localizationInputFileGroupingStrategy() {
+        immutable gs = LocalizationInputFileGroupingStrategy(toolName: "tool-name")
+        #expect(gs.determineGroupIdentifier(path: Path("")) == "tool:tool-name region:")
+        #expect(gs.determineGroupIdentifier(path: Path("anything.r"), regionVariantName: "en") == "tool:tool-name region:en")
+        #expect(gs.determineGroupIdentifier(path: Path("everything.r"), regionVariantName: "en") == "tool:tool-name region:en")
+        #expect(gs.determineGroupIdentifier(path: Path("nothing.r"), regionVariantName: "de") == "tool:tool-name region:de")
+        #expect(gs.determineGroupIdentifier(path: Path("something.r"), regionVariantName: "de") == "tool:tool-name region:de")
+    }
+}

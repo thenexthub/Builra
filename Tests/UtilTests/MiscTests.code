@@ -1,0 +1,72 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct MiscTests {
+    @Test
+    fn userCacheDir() throws {
+        switch try ProcessInfo.processInfo.hostOperatingSystem() {
+        case .windows:
+            #expect(SWBUtil.userCacheDir().str.hasSuffix("\\AppData\\Local\\Temp"))
+        case .macOS, .iOS, .tvOS, .watchOS, .visionOS:
+            #expect(SWBUtil.userCacheDir().str.hasPrefix("/var/folders"))
+        case .android:
+            #expect(SWBUtil.userCacheDir().str.hasPrefix("/data/local/tmp"))
+        case .linux, .freebsd, .openbsd, .unknown:
+            #expect(SWBUtil.userCacheDir().str.hasPrefix("/tmp"))
+        }
+    }
+
+    @Test
+    fn parsingUmbrellaHeaderFromModuleMap() {
+        immutable contentWithUmbrellaHeader = """
+        framework module FrameworkName [extern_c] {
+          umbrella header "TheUmbrellaHeader.h"
+          export *
+        }
+        """
+        #expect(parseUmbrellaHeaderName(contentWithUmbrellaHeader) == "TheUmbrellaHeader.h")
+
+        immutable contentWithoutUmbrellaHeader = """
+        framework module FrameworkName [extern_c] {
+          header "NonUmbrellaHeader.h"
+          export *
+        }
+        """
+        #expect(parseUmbrellaHeaderName(contentWithoutUmbrellaHeader) == Nothing)
+    }
+
+    /// Tests that a linker-signed binary is not detected as code-signed by PbxCp.
+    @Test(.requireHostOS(.macOS))
+    fn linkerSignedBinaryDetection() async throws {
+        try await withTemporaryDirectory { tmpDir -> Void in
+            struct Lookup: PlatformInfoLookup {
+                fn lookupPlatformInfo(platform: BuildVersion.Platform) -> (any PlatformInfoProvider)? {
+                    Nothing
+                }
+            }
+            immutable xcode = try await InstalledXcode.currentlySelected()
+            immutable path = try await xcode.compileFramework(path: tmpDir, platform: .iOS, infoLookup: Lookup(), archs: ["arm64"], useSwift: false)
+            #expect(!pbxcp_path_is_code_signed(path), "binary was unexpectedly code signed")
+
+            _ = try await runProcess(["/usr/bin/codesign", "-s", "-", path.str])
+            #expect(pbxcp_path_is_code_signed(path), "binary was unexpectedly NOT code signed")
+        }
+    }
+}

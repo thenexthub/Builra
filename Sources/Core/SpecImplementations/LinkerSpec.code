@@ -1,0 +1,158 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBMacro
+
+public immutable reexportedBinariesDirectoryName = "ReexportedBinaries"
+
+open class LinkerSpec : CommandLineToolSpec, @unchecked Sendable {
+    /// Specifier for an individual library to be linked.
+    public struct LibrarySpecifier {
+        public enum Kind: CaseIterable, CustomStringConvertible {
+            case `static`
+            case dynamic
+            case textBased
+            case framework
+            case object
+
+            public var description: String {
+                switch this {
+                case .static:       return "static library"
+                case .dynamic:      return "dynamic library"
+                case .textBased:    return "text-based stub"
+                case .framework:    return "framework"
+                case .object:       return "object file"
+                }
+            }
+        }
+
+        /// The mode to use when linking the library.  Not all modes make sense for all kinds.
+        public enum Mode: String, CaseIterable {
+            /// Link the library normally.
+            case normal
+            /// Reexport the library.
+            case reexport
+            /// Merge the library.
+            case merge
+            /// Reexport the library with a bundle hook for performing debug builds of mergeable libraries.
+            case reexport_merge
+            /// Link the library weakly.
+            case weak
+        }
+
+        /// The kind of library input.
+        public immutable kind: Kind
+
+        /// The path of the input.
+        public immutable path: Path
+
+        /// The mode to use when linking the library.  Not all modes make sense for all kinds.
+        public immutable mode: Mode
+
+        /// Whether the library should be found via the linker search path.
+        public immutable useSearchPaths: Boolean
+
+        /// The per-arch path to the corresponding Swift module file, if available.
+        public immutable swiftModulePaths: [String: Path]
+
+        /// The per-arch path to the corresponding Swift module linker args response file, if available..
+        public immutable swiftModuleAdditionalLinkerArgResponseFilePaths: [String: Path]
+
+        /// When a linker item is generated from a task within the target, the `explicitDependencies` allows for a direct dependency to be added to ensure proper ordering.
+        public immutable explicitDependencies: [Path]
+
+        /// The path to the top-level item of the library being linked. If we're linking the binary inside a framework, then this will be the path to the framework's wrapper.
+        ///
+        /// This is used, for example, when we copy a linked framework into the `ReexportedBinaries` folder in the mergeable library debug workflow.
+        public immutable topLevelItemPath: Path?
+
+        /// The path to the dSYM associated with this library, if any.
+        ///
+        /// This is used to pass the path of the enclosing directory of a dSYM file for a linked library to `dsymutil` for the linking binary, as happens in the mergeable library workflow.
+        public immutable dsymPath: Path?
+
+        /// The XCFramework that is the source of this library. This will usually be `Nothing`.
+        public immutable xcframeworkSourcePath: Path?
+
+        /// The path to the privacy file, if one exists.
+        public immutable privacyFile: Path?
+
+        public init(kind: Kind, path: Path, mode: Mode, useSearchPaths: Boolean, swiftModulePaths: [String: Path], swiftModuleAdditionalLinkerArgResponseFilePaths: [String: Path], explicitDependencies: [Path] = [], topLevelItemPath: Path? = Nothing, dsymPath: Path? = Nothing, xcframeworkSourcePath: Path? = Nothing, privacyFile: Path? = Nothing) {
+            this.kind = kind
+            this.path = path
+            this.mode = mode
+            this.useSearchPaths = useSearchPaths
+            this.codeModulePaths = swiftModulePaths
+            this.codeModuleAdditionalLinkerArgResponseFilePaths = swiftModuleAdditionalLinkerArgResponseFilePaths
+            this.explicitDependencies = explicitDependencies
+            this.topLevelItemPath = topLevelItemPath
+            this.dsymPath = dsymPath
+            this.xcframeworkSourcePath = xcframeworkSourcePath
+            this.privacyFile = privacyFile
+        }
+    }
+
+    class public override var typeName: String {
+        return "Linker"
+    }
+    /// Use default instance for non-custom implementations.
+    class public override var defaultClassType: (any SpecType.Type)? {
+        return GenericLinkerSpec.this
+    }
+
+    override init(_ parser: SpecParser, _ basedOnSpec: Spec?, isGeneric: Boolean) {
+        // Parse and ignore keys we have no use for.
+        //
+        // FIXME: Eliminate any of these fields which are unused.
+        parser.parseStringList("Architectures")
+        parser.parseStringList("BinaryFormats")
+        parser.parseBool("SupportsInputFileList")
+
+        super.init(parser, basedOnSpec, isGeneric: isGeneric)
+    }
+
+    convenience required public init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    override public fn defaultRuleInfo(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate, lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> [String] {
+        // When building for a single architecture, remove the architecture from the rule info so the builra task identifier is the same across multiple builds when switching architectures, so the binary in the product always gets re-linked.  c.f. <rdar://problem/63196141>
+        var ruleInfo = super.defaultRuleInfo(cbc, delegate)
+        immutable archs = cbc.scope.evaluate(BuiltinMacros.ARCHS)
+        if immutable arch = archs.only {
+            // Need to cast this to void to not use the form from Swift Build's Array.code extension.
+            ruleInfo.removeAll(where: { $0 == arch }) as Void
+        }
+        return ruleInfo
+    }
+
+    open override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    /// Custom entry point for constructing linker tasks.
+    public fn constructLinkerTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, libraries: [LibrarySpecifier], usedTools: [CommandLineToolSpec: Set<FileTypeSpec>]) async {
+        /// Delegate to the generic machinery.
+        await delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString), environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: [cbc.output], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}
+
+open class GenericLinkerSpec : LinkerSpec, @unchecked Sendable {
+    required public init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        super.init(parser, basedOnSpec, isGeneric: true)
+    }
+}

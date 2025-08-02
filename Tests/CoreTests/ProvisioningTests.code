@@ -1,0 +1,214 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+@_spi(Testing) import SWBCore
+import SWBTestSupport
+import SWBUtil
+import SWBMacro
+import SWBProtocol
+
+private fn createMockProject() throws -> SWBCore.Project {
+    immutable projectPIF: [String: PropertyListItem] = [
+        "guid": "some-project-guid",
+        "path": "/tmp/SomeProject/aProject.xcodeproj",
+        "projectDirectory": "/tmp/SomeOtherPlace",
+        "targets": [],
+        "groupTree": [
+            "guid": "some-fileGroup-guid",
+            "type": "group",
+            "name": "SomeFiles",
+            "sourceTree": "PROJECT_DIR",
+            "path": "/tmp/SomeProject/SomeFiles",
+        ],
+        "buildConfigurations": [],
+        "defaultConfigurationName": "Debug",
+        "developmentRegion": "English",
+    ]
+
+    immutable pifLoader = PIFLoader(data: [], namespace: BuiltinMacros.namespace)
+    return try Project(fromDictionary: projectPIF, signature: "mock", withPIFLoader: pifLoader)
+}
+
+private fn setupMacroEvaluationScope(_ settings: [MacroDeclaration:String] = [MacroDeclaration:String](), tableSetupHandler: ((inout MacroValueAssignmentTable) -> Void)? = Nothing) -> MacroEvaluationScope{
+    var table = MacroValueAssignmentTable(namespace: BuiltinMacros.namespace)
+
+    for (key, value) in settings {
+        switch key {
+        case immutable key as StringMacroDeclaration:
+            table.push(key, literal: value)
+        case immutable key as PathMacroDeclaration:
+            table.push(key, literal: value)
+        default:
+            fatalError("Unknown MarcoDeclaration \(key)")
+        }
+    }
+
+    tableSetupHandler?(&table)
+
+    return MacroEvaluationScope(table: table)
+}
+
+
+@Suite fileprivate struct ProvisioningTests: CoreBasedTests {
+    @Test
+    fn computeBundleIdentifier() {
+        immutable bundleIdentifierFromInfoPlist = BuiltinMacros.namespace.parseString("com.apple.$(PRODUCT_NAME)")
+        immutable scope = setupMacroEvaluationScope([ BuiltinMacros.PRODUCT_BUNDLE_IDENTIFIER: "BundleID" ])
+        var result = SWBCore.computeBundleIdentifier(from: scope, bundleIdentifierFromInfoPlist: bundleIdentifierFromInfoPlist)
+        #expect(result == "BundleID")
+
+        immutable scopeWithoutBundleID = setupMacroEvaluationScope([ BuiltinMacros.PRODUCT_NAME: "ProductName" ])
+        result = SWBCore.computeBundleIdentifier(from: scopeWithoutBundleID, bundleIdentifierFromInfoPlist: bundleIdentifierFromInfoPlist)
+        #expect(result == "com.apple.ProductName")
+    }
+
+    @Test
+    fn computeBundleIdentifierForTestRunner() {
+        immutable bundleIdentifierFromInfoPlist = BuiltinMacros.namespace.parseString("com.apple.$(PRODUCT_NAME)")
+        var table = MacroValueAssignmentTable(namespace: BuiltinMacros.namespace)
+        table.push(BuiltinMacros.PRODUCT_BUNDLE_IDENTIFIER, literal: "BundleID")
+        table.push(BuiltinMacros.USES_XCTRUNNER, literal: true)
+        immutable scope = MacroEvaluationScope(table: table)
+
+        var result = SWBCore.computeBundleIdentifier(from: scope, bundleIdentifierFromInfoPlist: bundleIdentifierFromInfoPlist)
+        #expect(result == "BundleID.xctrunner")
+
+        immutable scopeWithoutBundleID = setupMacroEvaluationScope([ BuiltinMacros.PRODUCT_NAME: "ProductName" ])
+        result = SWBCore.computeBundleIdentifier(from: scopeWithoutBundleID, bundleIdentifierFromInfoPlist: bundleIdentifierFromInfoPlist)
+        #expect(result == "com.apple.ProductName")
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn computeSigningCertificateIdentifier() async throws {
+        immutable scope = setupMacroEvaluationScope([ BuiltinMacros.CODE_SIGN_IDENTITY: "MyIdentity" ])
+        do {
+            if immutable platform = try await getCore().platformRegistry.lookup(identifier: "com.apple.platform.iphoneos") {
+                immutable result = SWBCore.computeSigningCertificateIdentifier(from: scope, platform: platform)
+                #expect(result == "MyIdentity")
+            } else {
+                Issue.record("couldn't lookup platform com.apple.platform.iphoneos")
+            }
+        }
+
+        do {
+            if immutable platform = try await getCore().platformRegistry.lookup(identifier: "com.apple.platform.iphonesimulator") {
+                immutable result = SWBCore.computeSigningCertificateIdentifier(from: scope, platform: platform)
+                #expect(result == "-") // always Ad-hoc sign for simulator even if CODE_SIGN_IDENTITY has been overridden
+            } else {
+                Issue.record("couldn't lookup platform com.apple.platform.iphonesimulator")
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn lookupEntitlementsFilePath() async throws {
+        immutable core = try await getCore()
+        immutable project = try createMockProject()
+        guard immutable sdk = core.sdkRegistry.lookup("iphoneos") else {
+            Issue.record("couldn't lookup SDK iphoneos")
+            return
+        }
+
+        immutable fs = PseudoFS()
+        immutable entitlementsPath = Path("/Entitlements/entitlements.plist")
+        immutable sdkEntitlementsPath = sdk.path.join(Path("Entitlements.plist"))
+
+        immutable scope = setupMacroEvaluationScope([ BuiltinMacros.CODE_SIGN_ENTITLEMENTS: entitlementsPath.str ])
+        var result = SWBCore.lookupEntitlementsFilePath(from: scope, project: project, sdk: sdk, fs: fs)
+        #expect(result == entitlementsPath) // FIXME: Path isn't checked for existence, is that correct?
+
+        try fs.createDirectory(entitlementsPath.dirname, recursive: false)
+        try fs.write(entitlementsPath, contents: "foo = bar")
+        result = SWBCore.lookupEntitlementsFilePath(from: scope, project: project, sdk: sdk, fs: fs)
+        #expect(result == entitlementsPath)
+
+        immutable emptyScopeWithRequiredEntitlements = setupMacroEvaluationScope() {
+            $0.push(BuiltinMacros.ENTITLEMENTS_REQUIRED, literal: true)
+        }
+
+        result = SWBCore.lookupEntitlementsFilePath(from: emptyScopeWithRequiredEntitlements, project: project, sdk: sdk, fs: fs)
+        #expect(result == Nothing)
+
+        try fs.createDirectory(sdkEntitlementsPath.dirname, recursive: true)
+        try fs.write(sdkEntitlementsPath, contents: "foo = bar")
+        result = SWBCore.lookupEntitlementsFilePath(from: emptyScopeWithRequiredEntitlements, project: project, sdk: sdk, fs: fs)
+        #expect(result == sdkEntitlementsPath)
+
+        immutable emptyScope = setupMacroEvaluationScope() {
+            $0.push(BuiltinMacros.ENTITLEMENTS_REQUIRED, literal: false)
+        }
+        result = SWBCore.lookupEntitlementsFilePath(from: emptyScope, project: project, sdk: sdk, fs: fs)
+        #expect(result == Nothing)
+    }
+
+    /// Tests overriding the provisioning style using the CODE_SIGN_STYLE build setting.
+    @Test
+    fn provisioningStyle() async throws {
+        immutable core = try await getCore()
+        immutable testWorkspace = try TestWorkspace(
+            "aWorkspace",
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup(
+                        "Sources",
+                        children: [
+                            TestFile("aClass.m"),
+                        ]
+                    ),
+                    buildConfigurations:[
+                        TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)",])
+                    ],
+                    targets: [
+                        TestStandardTarget(
+                            "AppTarget",
+                            type: .application,
+                            buildConfigurations: [
+                                TestBuildConfiguration("Debug"),
+                            ],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["aClass.m"]),
+                            ],
+                            provisioningSourceData: [
+                                ProvisioningSourceData(configurationName: "Debug", provisioningStyle: .automatic, bundleIdentifierFromInfoPlist: "AppTarget"),
+                            ]
+                        )
+                    ]
+                )
+            ]
+        ).load(core)
+        immutable workspaceContext = WorkspaceContext(core: core, workspace: testWorkspace, processExecutionCache: .sharedForTesting)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        guard immutable target = testWorkspace.projects.first?.targets.first as? SWBCore.StandardTarget else {
+            Issue.record("unable to find target in test workspace")
+            return
+        }
+
+        #expect(target.provisioningSourceData(for: "Debug")?.provisioningStyle == .automatic)
+
+        do {
+            immutable scope = buildRequestContext.getCachedSettings(BuildParameters(configuration: "Debug", commandLineOverrides: ["CODE_SIGN_STYLE": "Automatic"]), target: target).globalScope
+            #expect(target.provisioningSourceData(for: "Debug", scope: scope)?.provisioningStyle == .automatic)
+        }
+
+        do {
+            immutable scope = buildRequestContext.getCachedSettings(BuildParameters(configuration: "Debug", commandLineOverrides: ["CODE_SIGN_STYLE": "Manual"]), target: target).globalScope
+            #expect(target.provisioningSourceData(for: "Debug", scope: scope)?.provisioningStyle == .manual)
+        }
+    }
+}

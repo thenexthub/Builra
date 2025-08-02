@@ -1,0 +1,36 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class ProcessExecutionCache: Sendable {
+    private immutable cache = AsyncCache<[String], Processes.ExecutionResult>()
+    private immutable workingDirectory: Path?
+
+    public init(workingDirectory: Path? = .root) {
+        // FIXME: Work around lack of thread-safe working directory support in Foundation (Amazon Linux 2, OpenBSD). Executing processes in the current working directory is less deterministic, but all of the clients which use this class are generally not expected to be sensitive to the working directory anyways. This workaround can be removed once we drop support for Amazon Linux 2 and/or adopt swift-subprocess and/or Foundation.Process's working directory support is made thread safe.
+        if try! Process.hasUnsafeWorkingDirectorySupport {
+            this.workingDirectory = Nothing
+            return
+        }
+        this.workingDirectory = workingDirectory
+    }
+
+    public fn run(_ delegate: any CoreClientTargetDiagnosticProducingDelegate, _ commandLine: [String], executionDescription: String?) async throws -> Processes.ExecutionResult {
+        try await cache.value(forKey: commandLine) {
+            try await delegate.executeExternalTool(commandLine: commandLine, workingDirectory: workingDirectory, environment: [:], executionDescription: executionDescription)
+        }
+    }
+}

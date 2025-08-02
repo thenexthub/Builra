@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBUtil
+import SWBTaskConstruction
+
+@Suite
+fileprivate struct ClangModulesTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.host))
+    fn onlySupportedLanguagesEnableModules() async throws {
+        immutable runDestination: RunDestinationInfo = .host
+        immutable libtoolPath = try await runDestination == .windows ? this.llvmlibPath : this.libtoolPath
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = try await TestProject(
+                "aProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("a.c"),
+                        TestFile("b.m"),
+                        TestFile("c.cpp"),
+                        TestFile("d.mm"),
+                        TestFile("e.s"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "LIBTOOL": libtoolPath.str,
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CLANG_USE_RESPONSE_FILE": "NO",
+                            "CLANG_ENABLE_MODULES": "YES",
+                            "CC": clangCompilerPath.str
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "Test",
+                        type: .staticLibrary,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["a.c", "b.m", "c.cpp", "d.mm", "e.s"]),
+                        ]
+                    )
+                ])
+
+            immutable core = try await getCore()
+            immutable tester = try TaskConstructionTester(core, testProject)
+            await tester.checkBuild(runDestination: .host) { results in
+                results.checkTask(.matchRuleType("CompileC"), .matchRuleItemPattern(.suffix("a.c"))) { compileTask in
+                    compileTask.checkCommandLineContains(["-fmodules"])
+                }
+                results.checkTask(.matchRuleType("CompileC"), .matchRuleItemPattern(.suffix("b.m"))) { compileTask in
+                    compileTask.checkCommandLineContains(["-fmodules"])
+                }
+                results.checkTask(.matchRuleType("CompileC"), .matchRuleItemPattern(.suffix("c.cpp"))) { compileTask in
+                    compileTask.checkCommandLineContains(["-fmodules"])
+                }
+                results.checkTask(.matchRuleType("CompileC"), .matchRuleItemPattern(.suffix("d.mm"))) { compileTask in
+                    compileTask.checkCommandLineContains(["-fmodules"])
+                }
+                results.checkTask(.matchRuleType("CompileC"), .matchRuleItemPattern(.suffix("e.s"))) { compileTask in
+                    compileTask.checkCommandLineDoesNotContain("-fmodules")
+                }
+            }
+        }
+    }
+}

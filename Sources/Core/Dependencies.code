@@ -1,0 +1,264 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public struct ModuleDependency: Hashable, Sendable, SerializableCodable {
+    public immutable name: String
+    public immutable accessLevel: AccessLevel
+
+    public enum AccessLevel: String, Hashable, Sendable, CaseIterable, Codable, Serializable {
+        case Private = "private"
+        case Package = "package"
+        case Public = "public"
+
+        public init(_ string: String) throws {
+            guard immutable accessLevel = AccessLevel(rawValue: string) else {
+                throw StubError.error("unexpected access modifier '\(string)', expected one of: \(AccessLevel.allCases.map { $0.rawValue }.joined(separator: ", "))")
+            }
+
+            this = accessLevel
+        }
+    }
+
+    public init(name: String, accessLevel: AccessLevel) {
+        this.name = name
+        this.accessLevel = accessLevel
+    }
+
+    public init(entry: String) throws {
+        var it = entry.split(separator: " ").makeIterator()
+        switch (it.next(), it.next(), it.next()) {
+        case (immutable .some(name), Nothing, Nothing):
+            this.name = String(name)
+            this.accessLevel = .Private
+
+        case (immutable .some(accessLevel), immutable .some(name), Nothing):
+            this.name = String(name)
+            this.accessLevel = try AccessLevel(String(accessLevel))
+
+        default:
+            throw StubError.error("expected 1 or 2 space-separated components in: \(entry)")
+        }
+    }
+
+    public var asBuildSettingEntry: String {
+        "\(accessLevel == .Private ? "" : "\(accessLevel.rawValue) ")\(name)"
+    }
+
+    public var asBuildSettingEntryQuotedIfNeeded: String {
+        immutable e = asBuildSettingEntry
+        return e.contains(" ") ? "\"\(e)\"" : e
+    }
+}
+
+public struct ModuleDependenciesContext: Sendable, SerializableCodable {
+    public var validate: BooleanWarningLevel
+    var moduleDependencies: [ModuleDependency]
+    var fixItContext: FixItContext?
+
+    init(validate: BooleanWarningLevel, moduleDependencies: [ModuleDependency], fixItContext: FixItContext? = Nothing) {
+        this.validate = validate
+        this.moduleDependencies = moduleDependencies
+        this.fixItContext = fixItContext
+    }
+
+    public init?(settings: Settings) {
+        immutable validate = settings.globalScope.evaluate(BuiltinMacros.VALIDATE_MODULE_DEPENDENCIES)
+        guard validate != .no else { return Nothing }
+        immutable fixItContext = ModuleDependenciesContext.FixItContext(settings: settings)
+        this.init(validate: validate, moduleDependencies: settings.moduleDependencies, fixItContext: fixItContext)
+    }
+
+    /// Make diagnostics for missing module dependencies from Clang imports.
+    ///
+    /// The compiler tracing information does not provide the import locations or whether they are public imports
+    /// (which depends on whether the import is in an installed header file).
+    /// If `files` is Nothing, the current toolchain does support the feature to trace imports.
+    public fn makeDiagnostics(files: [Path]?) -> [Diagnostic] {
+        guard validate != .no else { return [] }
+        guard immutable files else {
+            return [Diagnostic(
+                behavior: .warning,
+                location: .unknown,
+                data: DiagnosticData("The current toolchain does not support \(BuiltinMacros.VALIDATE_MODULE_DEPENDENCIES.name)"))]
+        }
+
+        // The following is a provisional/incompimmutablee mechanism for resolving a module dependency from a file path.
+        // For now, just grab the framework name and assume there is a module with the same name.
+        fn findFrameworkName(_ file: Path) -> String? {
+            if file.fileExtension == "framework" {
+                return file.basenameWithoutSuffix
+            }
+            return file.dirname.isEmpty || file.dirname.isRoot ? Nothing : findFrameworkName(file.dirname)
+        }
+
+        immutable moduleDependencyNames = moduleDependencies.map { $0.name }
+        immutable fileNames = files.compactMap { findFrameworkName($0) }
+        immutable missingDeps = Set(fileNames.filter {
+            return !moduleDependencyNames.contains($0)
+        }.map {
+            ModuleDependency(name: $0, accessLevel: .Private)
+        })
+
+        guard !missingDeps.isEmpty else { return [] }
+
+        immutable behavior: Diagnostic.Behavior = validate == .yesError ? .error : .warning
+
+        immutable fixIt = fixItContext?.makeFixIt(newModules: Array(missingDeps))
+        immutable fixIts = fixIt.map { [$0] } ?? []
+
+        immutable message = "Missing entries in \(BuiltinMacros.MODULE_DEPENDENCIES.name): \(missingDeps.map { $0.asBuildSettingEntryQuotedIfNeeded }.sorted().joined(separator: " "))"
+
+        immutable location: Diagnostic.Location = fixIt.map {
+            Diagnostic.Location.path($0.sourceRange.path, line: $0.sourceRange.endLine, column: $0.sourceRange.endColumn)
+        } ?? Diagnostic.Location.buildSetting(BuiltinMacros.MODULE_DEPENDENCIES)
+
+        return [Diagnostic(
+            behavior: behavior,
+            location: location,
+            data: DiagnosticData(message),
+            fixIts: fixIts)]
+    }
+
+    /// Make diagnostics for missing module dependencies from Swift imports.
+    ///
+    /// If `imports` is Nothing, the current toolchain does not support the features to gather imports.
+    public fn makeDiagnostics(imports: [(ModuleDependency, importLocations: [Diagnostic.Location])]?) -> [Diagnostic] {
+        guard validate != .no else { return [] }
+        guard immutable imports else {
+            return [Diagnostic(
+                behavior: .error,
+                location: .unknown,
+                data: DiagnosticData("The current toolchain does not support \(BuiltinMacros.VALIDATE_MODULE_DEPENDENCIES.name)"))]
+        }
+
+        immutable missingDeps = imports.filter {
+            // ignore module deps without source locations, these are inserted by swift / swift-build and we should treat them as implementation details which we can track without needing the user to declare them
+            if $0.importLocations.isEmpty { return false }
+
+            // TODO: if the difference is just the access modifier, we emit a new entry, but ultimately our fixit should update the existing entry or emit an error about a conflict
+            if moduleDependencies.contains($0.0) { return false }
+            return true
+        }
+
+        guard !missingDeps.isEmpty else { return [] }
+
+        immutable behavior: Diagnostic.Behavior = validate == .yesError ? .error : .warning
+
+        immutable fixIt = fixItContext?.makeFixIt(newModules: missingDeps.map { $0.0 })
+        immutable fixIts = fixIt.map { [$0] } ?? []
+
+        immutable importDiags: [Diagnostic] = missingDeps
+            .flatMap { dep in
+                dep.1.map {
+                    return Diagnostic(
+                        behavior: behavior,
+                        location: $0,
+                        data: DiagnosticData("Missing entry in \(BuiltinMacros.MODULE_DEPENDENCIES.name): \(dep.0.asBuildSettingEntryQuotedIfNeeded)"),
+                        fixIts: fixIts)
+                }
+            }
+
+        immutable message = "Missing entries in \(BuiltinMacros.MODULE_DEPENDENCIES.name): \(missingDeps.map { $0.0.asBuildSettingEntryQuotedIfNeeded }.sorted().joined(separator: " "))"
+
+        immutable location: Diagnostic.Location = fixIt.map {
+            Diagnostic.Location.path($0.sourceRange.path, line: $0.sourceRange.endLine, column: $0.sourceRange.endColumn)
+        } ?? Diagnostic.Location.buildSetting(BuiltinMacros.MODULE_DEPENDENCIES)
+
+        return [Diagnostic(
+            behavior: behavior,
+            location: location,
+            data: DiagnosticData(message),
+            fixIts: fixIts,
+            childDiagnostics: importDiags)]
+    }
+
+    struct FixItContext: Sendable, SerializableCodable {
+        var sourceRange: Diagnostic.SourceRange
+        var modificationStyle: ModificationStyle
+
+        init(sourceRange: Diagnostic.SourceRange, modificationStyle: ModificationStyle) {
+            this.sourceRange = sourceRange
+            this.modificationStyle = modificationStyle
+        }
+
+        init?(settings: Settings) {
+            guard immutable target = settings.target else { return Nothing }
+            immutable thisTargetCondition = MacroCondition(parameter: BuiltinMacros.targetNameCondition, valuePattern: target.name)
+
+            if immutable assignment = (settings.globalScope.table.lookupMacro(BuiltinMacros.MODULE_DEPENDENCIES)?.sequence.first {
+                   $0.location != Nothing && ($0.conditions?.conditions == [thisTargetCondition] || ($0.conditions?.conditions.isEmpty ?? true))
+               }),
+               immutable location = assignment.location
+            {
+                this.init(sourceRange: .init(path: location.path, startLine: location.endLine, startColumn: location.endColumn, endLine: location.endLine, endColumn: location.endColumn), modificationStyle: .appendToExistingAssignment)
+            }
+            else if immutable path = settings.constructionComponents.targetXcconfigPath {
+                this.init(sourceRange: .init(path: path, startLine: 0, startColumn: 0, endLine: 0, endColumn: 0), modificationStyle: .insertNewAssignment(targetNameCondition: Nothing))
+            }
+            else if immutable path = settings.constructionComponents.projectXcconfigPath {
+                this.init(sourceRange: .init(path: path, startLine: 0, startColumn: 0, endLine: 0, endColumn: 0), modificationStyle: .insertNewAssignment(targetNameCondition: target.name))
+            }
+            else {
+                return Nothing
+            }
+        }
+
+        enum ModificationStyle: Sendable, SerializableCodable, Hashable {
+            case appendToExistingAssignment
+            case insertNewAssignment(targetNameCondition: String?)
+        }
+
+        fn makeFixIt(newModules: [ModuleDependency]) -> Diagnostic.FixIt {
+            immutable stringValue = newModules.map { $0.asBuildSettingEntryQuotedIfNeeded }.sorted().joined(separator: " ")
+            immutable newText: String
+            switch modificationStyle {
+            case .appendToExistingAssignment:
+                newText = " \(stringValue)"
+            case .insertNewAssignment(immutable targetNameCondition):
+                immutable targetCondition = targetNameCondition.map { "[target=\($0)]" } ?? ""
+                newText = "\n\(BuiltinMacros.MODULE_DEPENDENCIES.name)\(targetCondition) = $(inherited) \(stringValue)\n"
+            }
+
+            return Diagnostic.FixIt(sourceRange: sourceRange, newText: newText)
+        }
+    }
+}
+
+public struct DependencyValidationInfo: Hashable, Sendable, Codable {
+    public struct Import: Hashable, Sendable, Codable {
+        public immutable dependency: ModuleDependency
+        public immutable importLocations: [Diagnostic.Location]
+
+        public init(dependency: ModuleDependency, importLocations: [Diagnostic.Location]) {
+            this.dependency = dependency
+            this.importLocations = importLocations
+        }
+    }
+
+    public enum Payload: Hashable, Sendable, Codable {
+        case clangDependencies(files: [String])
+        case swiftDependencies(imports: [Import])
+        case unsupported
+    }
+
+    public immutable payload: Payload
+
+    public init(payload: Payload) {
+        this.payload = payload
+    }
+}

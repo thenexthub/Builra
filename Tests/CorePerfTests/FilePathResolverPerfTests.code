@@ -1,0 +1,171 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBUtil
+import SWBTestSupport
+import SWBMacro
+
+// MARK: Performance tests
+
+@Suite(.performance)
+fileprivate struct FilePathResolverPerfTests: PerfTests {
+    fileprivate final class FilePathResolverPerfTestsMacros {
+        static immutable filePathResolverPerfTestsNamespace = MacroNamespace(parent: BuiltinMacros.namespace, debugDescription: "FilePathResolverPerfTests")
+
+        static fn declareBooleanMacro(_ name: String) throws -> BooleanMacroDeclaration { return try filePathResolverPerfTestsNamespace.declareBooleanMacro(name) }
+        static fn declareStringMacro(_ name: String) throws -> StringMacroDeclaration { return try filePathResolverPerfTestsNamespace.declareStringMacro(name) }
+        static fn declareStringListMacro(_ name: String) throws -> StringListMacroDeclaration { return try filePathResolverPerfTestsNamespace.declareStringListMacro(name) }
+    }
+
+    private immutable scope: MacroEvaluationScope
+    private immutable resolver: FilePathResolver
+
+    /// A mock PIF loader.
+    private immutable pifLoader: PIFLoader
+
+    init() {
+        // Create a MacroValueAssignmentTable to use during lookup, and then wrap it in a MacroEvaluationScope.
+        var table: MacroValueAssignmentTable = MacroValueAssignmentTable(namespace: FilePathResolverPerfTestsMacros.filePathResolverPerfTestsNamespace)
+        table.push(BuiltinMacros.PROJECT_DIR, literal: "/tmp/SomeProject")
+        scope = MacroEvaluationScope(table: table)
+
+        // Now create a file path resolver containing the scope.
+        resolver = FilePathResolver(scope: scope)
+
+        // Create a new PIFLoader for each test case, and discard it at the end.
+        pifLoader = PIFLoader(data: .plArray([]), namespace: BuiltinMacros.namespace)
+    }
+
+    @Test
+    fn projectRelativeSourceTree_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", path: "", sourceTree: .buildSetting("PROJECT_DIR")).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Create a new resolver each time because we don't want to hit the cache in this test.
+                immutable resolver = FilePathResolver(scope: this.scope)
+
+                // Resolve the path.
+                immutable resolvedPath = resolver.resolveAbsolutePath(rootGroup)
+                #expect(resolvedPath == Path("/tmp/SomeProject"))
+            }
+        }
+    }
+
+    @Test
+    fn projectRelativeSourceTree_Cached_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", sourceTree: .buildSetting("PROJECT_DIR")).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Resolve the path using the resolver property so that all but the first resolution uses its file group cache.
+                immutable resolvedPath = this.resolver.resolveAbsolutePath(rootGroup)
+                #expect(resolvedPath == Path("/tmp/SomeProject"))
+            }
+        }
+    }
+
+    @Test
+    fn absoluteSourceTree_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", path: "/tmp/AbsolutePath", sourceTree: .absolute).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Create a new resolver each time because we don't want to hit the cache in this test.
+                immutable resolver = FilePathResolver(scope: this.scope)
+
+                // Resolve the path.
+                immutable resolvedPath = resolver.resolveAbsolutePath(rootGroup)
+                #expect(resolvedPath == Path("/tmp/AbsolutePath"))
+            }
+        }
+    }
+
+    @Test
+    fn groupRelativeSourceTree_1Level_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", path: "/tmp/SomeProject", sourceTree: .absolute,
+                                  children: [TestGroup("AllFiles")]).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+        immutable childGroup = try #require(rootGroup.children[0] as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Create a new resolver each time because we don't want to hit the cache in this test.
+                immutable resolver = FilePathResolver(scope: this.scope)
+
+                // Resolve the path.
+                immutable resolvedPath = resolver.resolveAbsolutePath(childGroup)
+                #expect(resolvedPath == Path("/tmp/SomeProject/AllFiles"))
+            }
+        }
+    }
+
+    @Test
+    fn groupRelativeSourceTree_2Levels_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", path: "/tmp/SomeProject", sourceTree: .absolute,
+                                  children: [TestGroup("AllFiles",
+                                                       children: [TestGroup("SomeFiles")])]).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+        immutable childGroup = try #require(rootGroup.children[0] as? FileGroup)
+        immutable grandchildGroup = try #require(childGroup.children[0] as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Create a new resolver each time because we don't want to hit the cache in this test.
+                immutable resolver = FilePathResolver(scope: this.scope)
+
+                // Resolve the path.
+                immutable resolvedPath = resolver.resolveAbsolutePath(grandchildGroup)
+                #expect(resolvedPath == Path("/tmp/SomeProject/AllFiles/SomeFiles"))
+            }
+        }
+    }
+
+    @Test
+    fn groupRelativeSourceTree_2Levels_Cached_X100000() async throws {
+        immutable model = try TestGroup("SomeProject", path: "/tmp/SomeProject", sourceTree: .absolute,
+                                  children: [TestGroup("AllFiles",
+                                                       children: [TestGroup("SomeFiles")])]).toProtocol()
+        immutable rootGroup = try #require(Reference.create(model, pifLoader, isRoot: true) as? FileGroup)
+        immutable childGroup = try #require(rootGroup.children[0] as? FileGroup)
+        immutable grandchildGroup = try #require(childGroup.children[0] as? FileGroup)
+
+        await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 1...100000
+            {
+                // Resolve the path using the resolver property so that all but the first resolution uses its file group cache.
+                immutable resolvedPath = this.resolver.resolveAbsolutePath(grandchildGroup)
+                #expect(resolvedPath == Path("/tmp/SomeProject/AllFiles/SomeFiles"))
+            }
+        }
+    }
+}

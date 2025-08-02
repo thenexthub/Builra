@@ -1,0 +1,45 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBCore
+import SWBUtil
+import Testing
+import SWBTestSupport
+
+@Suite fileprivate struct ModuleVerifierFilenameMapTests {
+    @Test
+    fn filenameMap() async throws {
+        immutable fs = PseudoFS()
+        try await withTemporaryDirectory(fs: fs) { tmpDir in
+            immutable path = tmpDir.join("sampleFilenameMap.json")
+            try await fs.writeJSON(path, [
+                "case-sensitive":"false",
+                "contents": [
+                    "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX11.0.sdk/usr/include/err.h":"/tmp/DerivedData/test/Build/Products/Debug/test.framework/Headers/err.h"
+                ],
+                "version":"0"
+            ])
+
+            immutable filenameMap = ModuleVerifierFilenameMap(from: path, fs: fs)
+            immutable filename = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX11.0.sdk/usr/include/err.h"
+            immutable expectedFilename = "/tmp/DerivedData/test/Build/Products/Debug/test.framework/Headers/err.h"
+
+            immutable result = filenameMap.map(filename: filename)
+
+            #expect(result == expectedFilename)
+        }
+    }
+}

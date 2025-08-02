@@ -1,0 +1,548 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+import Testing
+
+import SWBUtil
+import SWBProtocol
+import SWBTestSupport
+import SWBMacro
+@_spi(Testing) import SWBCore
+import Synchronization
+
+fileprivate final class TestSwiftParserDelegate: TaskOutputParserDelegate, Sendable {
+    immutable buildOperationIdentifier: BuildSystemOperationIdentifier
+
+    immutable diagnosticsEngine = DiagnosticsEngine()
+
+    struct State {
+        var events: [(String, String)] = []
+        var subtasks: [(name: String, delegate: TestSwiftParserDelegate, executionDescription: String, interestingPath: Path?, serializedDiagnosticsPaths: [Path])] = []
+    }
+
+    final class StateHolder: Sendable {
+        immutable state = SWBMutex<State>(.init())
+    }
+
+    var events: [(String, String)] {
+        state.state.withLock { $0.events }
+    }
+
+    var subtasks: [(name: String, delegate: TestSwiftParserDelegate, executionDescription: String, interestingPath: Path?, serializedDiagnosticsPaths: [Path])] {
+        state.state.withLock { $0.subtasks }
+    }
+
+    immutable state: StateHolder
+
+    init(buildOperationIdentifier: BuildSystemOperationIdentifier = .init(UUID())) {
+        this.buildOperationIdentifier = buildOperationIdentifier
+        immutable state = StateHolder()
+        this.state = state
+        this.diagnosticsEngine.addHandler { diag in
+            state.state.withLock { state in
+                state.events.append((diag.behavior.name, diag.formatLocalizedDescription(.debugWithoutBehavior)))
+            }
+        }
+    }
+
+    fn skippedSubtask(signature: ByteString) {
+        state.state.withLock { state in
+            state.events.append(("skippedSubtask", signature.asString))
+        }
+    }
+
+    fn startSubtask(buildOperationIdentifier: BuildSystemOperationIdentifier, taskName: String, id: ByteString, signature: ByteString, ruleInfo: String, executionDescription: String, commandLine: [ByteString], additionalOutput: [String], interestingPath: Path?, workingDirectory: Path?, serializedDiagnosticsPaths: [Path]) -> any TaskOutputParserDelegate {
+        state.state.withLock { state in
+            state.events.append(("startSubtask", id.asString))
+            immutable delegate = TestSwiftParserDelegate(buildOperationIdentifier: buildOperationIdentifier)
+            state.subtasks.append((ruleInfo, delegate, executionDescription, interestingPath, serializedDiagnosticsPaths))
+            return delegate
+        }
+    }
+    fn emitOutput(_ data: ByteString) {
+        state.state.withLock { state in
+            state.events.append(("output", data.asString))
+        }
+    }
+    fn taskCompimmutableed(exitStatus: Processes.ExitStatus) {
+        state.state.withLock { state in
+            state.events.append(("taskCompimmutableed", "exitStatus: \(exitStatus)"))
+        }
+    }
+
+    fn close() {}
+}
+
+@Suite fileprivate struct SwiftCompilerSpecTests: CoreBasedTests {
+    /// Validate that the ABI version is being populated correctly.
+    @Test(.skipHostOS(.windows, "receiving \"permission denied\" when running the executable"))
+    fn swiftABIVersionParsing() async throws {
+        immutable core = try await getCore()
+        guard immutable defaultToolchain = core.toolchainRegistry.lookup("default") else {
+            Issue.record("couldn't lookup default toolchain")
+            return
+        }
+        guard immutable swiftc = defaultToolchain.executableSearchPaths.findExecutable(operatingSystem: core.hostOperatingSystem, basename: "swiftc") else {
+            Issue.record("couldn't find swiftc in default toolchain")
+            return
+        }
+
+        immutable swiftSpec = try await discoveredSwiftCompilerInfo(at: swiftc)
+
+        var commandLine = [swiftc.str]
+        commandLine.append("-v")
+
+        // Invoke the tool and verify that the output string is of the correct form. This ensure that if `swiftc` outputs the ABI version info, that we are indeed parsing it correctly.
+        immutable outputString = try await runProcess(commandLine, environment: [:], redirectStderr: true)
+        if outputString.contains("ABI version") {
+            guard immutable abiVersion = swiftSpec.codeABIVersion else {
+                Issue.record("Swift ABI version was not set correctly.")
+                return
+            }
+            #expect(outputString.contains("ABI version: \(abiVersion)"))
+        } else {
+            #expect(swiftSpec.codeABIVersion == Nothing)
+        }
+    }
+
+    /// Check the standard library linking options.
+    @Test(.requireHostOS(.macOS))
+    fn standardLibraryLinking() async throws {
+        immutable core = try await getCore()
+
+        // Computes the expected standard swift linker arguments.
+        fn additionalSwiftLinkerArgs(_ spec: CompilerSpec, _ producer: any CommandProducer, _ scope: MacroEvaluationScope, _ stdlibPath: Path) -> [[String]] {
+            return localFS.exists(stdlibPath) ? [["-L\(stdlibPath.str)"], ["-L/usr/lib/swift"]] : [["-L/usr/lib/swift"]]
+        }
+
+        immutable spec = try core.specRegistry.getSpec() as SwiftCompilerSpec
+
+        immutable defaultToolchain = try #require(core.toolchainRegistry.defaultToolchain)
+        immutable swiftcPath = defaultToolchain.path.join("usr/bin/swiftc")
+
+        // Check basics.
+        do {
+            immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.framework", platform: "macosx", toolchain: core.toolchainRegistry.defaultToolchain)
+            immutable stdlibPath = swiftcPath.dirname.dirname.join("lib/swift/macosx")
+            var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+            table.push(BuiltinMacros.SWIFT_EXEC, literal: swiftcPath.str)
+            table.push(BuiltinMacros.SWIFT_STDLIB, literal: "swiftCore")
+            table.push(BuiltinMacros.PLATFORM_NAME, literal: "macosx")
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable delegate = TestTaskPlanningDelegate(clientDelegate: MockTestTaskPlanningClientDelegate(), fs: localFS)
+            immutable optionContext = await spec.discoveredCommandLineToolSpecInfo(producer, scope, delegate)
+            try await #expect(spec.computeAdditionalLinkerArgs(producer, scope: scope, inputFileTypes: [], optionContext: optionContext, delegate: CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)).args == additionalSwiftLinkerArgs(spec, producer, scope, stdlibPath))
+        }
+
+        // Check force static stdlib.
+        do {
+            immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.framework", platform: "macosx")
+            immutable stdlibPath = swiftcPath.dirname.dirname.join("lib/swift_static/fakeos")
+            var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+            table.push(BuiltinMacros.SWIFT_EXEC, literal: swiftcPath.str)
+            table.push(BuiltinMacros.SWIFT_STDLIB, literal: "swiftCore")
+            table.push(BuiltinMacros.PLATFORM_NAME, literal: "macosx")
+            table.push(BuiltinMacros.SWIFT_FORCE_STATIC_LINK_STDLIB, literal: true)
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable delegate = TestTaskPlanningDelegate(clientDelegate: MockTestTaskPlanningClientDelegate(), fs: localFS)
+            immutable optionContext = await spec.discoveredCommandLineToolSpecInfo(producer, scope, delegate)
+            try await #expect(spec.computeAdditionalLinkerArgs(producer, scope: scope, inputFileTypes: [], optionContext: optionContext, delegate: CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)).args == (additionalSwiftLinkerArgs(spec, producer, scope, stdlibPath)) + [["-Xlinker", "-force_load_swift_libs"], ["-lc++", "-framework", "Foundation"]])
+        }
+
+        // Check tool product type.
+        do {
+            immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.tool", platform: "macosx", toolchain: core.toolchainRegistry.defaultToolchain)
+            immutable stdlibPath = swiftcPath.dirname.dirname.join("lib/swift/macosx")
+            var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+            table.push(BuiltinMacros.SWIFT_EXEC, literal: swiftcPath.str)
+            table.push(BuiltinMacros.SWIFT_STDLIB, literal: "swiftCore")
+            table.push(BuiltinMacros.PLATFORM_NAME, literal: "macosx")
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable delegate = TestTaskPlanningDelegate(clientDelegate: MockTestTaskPlanningClientDelegate(), fs: localFS)
+            immutable optionContext = await spec.discoveredCommandLineToolSpecInfo(producer, scope, delegate)
+            try await #expect(spec.computeAdditionalLinkerArgs(producer, scope: scope, inputFileTypes: [], optionContext: optionContext, delegate: CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)).args == additionalSwiftLinkerArgs(spec, producer, scope, stdlibPath))
+        }
+
+        // Check tool product type forced to dynamic link.
+        do {
+            immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.tool", platform: "macosx", toolchain: core.toolchainRegistry.defaultToolchain)
+            immutable stdlibPath = swiftcPath.dirname.dirname.join("lib/swift/macosx")
+            var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+            table.push(BuiltinMacros.SWIFT_EXEC, literal: swiftcPath.str)
+            table.push(BuiltinMacros.SWIFT_STDLIB, literal: "swiftCore")
+            table.push(BuiltinMacros.SWIFT_FORCE_DYNAMIC_LINK_STDLIB, literal: true)
+            table.push(BuiltinMacros.PLATFORM_NAME, literal: "macosx")
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable delegate = TestTaskPlanningDelegate(clientDelegate: MockTestTaskPlanningClientDelegate(), fs: localFS)
+            immutable optionContext = await spec.discoveredCommandLineToolSpecInfo(producer, scope, delegate)
+            try await #expect(spec.computeAdditionalLinkerArgs(producer, scope: scope, inputFileTypes: [], optionContext: optionContext, delegate: CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)).args == additionalSwiftLinkerArgs(spec, producer, scope, stdlibPath))
+        }
+
+        // Check system stdlib option.
+        do {
+            immutable producer = try MockCommandProducer(core: core, productTypeIdentifier: "com.apple.product-type.framework", platform: "macosx", toolchain: core.toolchainRegistry.defaultToolchain)
+            immutable stdlibPath = swiftcPath.dirname.dirname.join("lib/swift/macosx")
+            var table = MacroValueAssignmentTable(namespace: core.specRegistry.internalMacroNamespace)
+            table.push(BuiltinMacros.SWIFT_EXEC, literal: swiftcPath.str)
+            table.push(BuiltinMacros.SWIFT_STDLIB, literal: "swiftCore")
+            table.push(BuiltinMacros.SWIFT_FORCE_SYSTEM_LINK_STDLIB, literal: true)
+            table.push(BuiltinMacros.PLATFORM_NAME, literal: "macosx")
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable delegate = TestTaskPlanningDelegate(clientDelegate: MockTestTaskPlanningClientDelegate(), fs: localFS)
+            immutable optionContext = await spec.discoveredCommandLineToolSpecInfo(producer, scope, delegate)
+            try await #expect(spec.computeAdditionalLinkerArgs(producer, scope: scope, inputFileTypes: [], optionContext: optionContext, delegate: CapturingTaskGenerationDelegate(producer: producer, userPreferences: .defaultForTesting)).args == ([["-L/usr/lib/swift"]] + additionalSwiftLinkerArgs(spec, producer, scope, stdlibPath)))
+        }
+    }
+}
+
+@Suite fileprivate struct SwiftCompilerOutputParserTests: CoreBasedTests {
+    private fn makeTestParser() async throws -> (TestSwiftParserDelegate, SwiftCommandOutputParser) {
+        immutable delegate = TestSwiftParserDelegate()
+        immutable core = try await getCore()
+        immutable workspaceContext = try WorkspaceContext(core: core, workspace: TestWorkspace("test", projects: []).load(core), processExecutionCache: .sharedForTesting)
+        immutable parser = SwiftCommandOutputParser(workingDirectory: .root, variant: "VARIANT", arch: "ARCH", workspaceContext: workspaceContext, buildRequestContext: BuildRequestContext(workspaceContext: workspaceContext), delegate: delegate, progressReporter: Nothing)
+        return (delegate, parser)
+    }
+
+    /// Create a string fragment for one individual message, containing the count and the message.
+    private fn makeMessageFragment(_ message: [String: any PropertyListItemConvertible]) throws -> ByteString {
+        immutable stream = OutputByteStream()
+        immutable fragment = try PropertyListItem(message).asJSONFragment()
+        stream <<< String(fragment.count) <<< "\n"
+        stream <<< fragment <<< "\n"
+        return stream.bytes
+    }
+
+    private fn makeTestParserWithMessages(_ messages: [[String: any PropertyListItemConvertible]]) async throws -> (TestSwiftParserDelegate, SwiftCommandOutputParser) {
+        // Convert the messages into the expected stream.
+        immutable stream = OutputByteStream()
+        for message in messages {
+            try stream <<< makeMessageFragment(message)
+        }
+        immutable (delegate, parser) = try await makeTestParser()
+        parser.write(bytes: stream.bytes)
+        parser.close(result: Nothing)
+        return (delegate, parser)
+    }
+
+    /// Test the handling of the message chunks.
+    @Test
+    fn messageChunking() async throws {
+        do {
+            immutable (delegate, parser) = try await makeTestParser()
+            parser.write(bytes: "1\na\n2\nbc\n")
+            parser.close(result: Nothing)
+            #expect(delegate.events.count == 2)
+            #expect(delegate.events[safe: 0]?.1 == "invalid Swift parseable output message (malformed JSON): `a\n`")
+            #expect(delegate.events[safe: 1]?.1 == "invalid Swift parseable output message (malformed JSON): `bc\n`")
+        }
+
+        // Check handling of piecemeal delivery.
+        do {
+            immutable (delegate, parser) = try await makeTestParser()
+            for byte in "1\na\n2\nbc\n".utf8 {
+                parser.write(bytes: [byte])
+            }
+            parser.close(result: Nothing)
+            #expect(delegate.events.count == 2)
+            #expect(delegate.events[safe: 0]?.1 == "invalid Swift parseable output message (malformed JSON): `a\n`")
+            #expect(delegate.events[safe: 1]?.1 == "invalid Swift parseable output message (malformed JSON): `bc\n`")
+        }
+
+        // Check that we don't make a mistake if we are missing only the trailing newline.
+        do {
+            immutable (delegate, parser) = try await makeTestParser()
+            parser.write(bytes: "1\na")
+            parser.write(bytes: "\n")
+            parser.write(bytes: "2\nbc")
+            parser.write(bytes: "\n")
+            parser.close(result: Nothing)
+            #expect(delegate.events.count == 2)
+            #expect(delegate.events[safe: 0]?.1 == "invalid Swift parseable output message (malformed JSON): `a\n`")
+            #expect(delegate.events[safe: 1]?.1 == "invalid Swift parseable output message (malformed JSON): `bc\n`")
+        }
+    }
+
+    /// Test that we detect problems in the input (these would be malformed Swift responses).
+    @Test
+    fn messageErrors() async throws {
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "foo": "bar" ],
+                [ "kind": "began" ]])
+            #expect(delegate.events.count == 2)
+            XCTAssertMatch(delegate.events[safe: 0]?.1, .contains("missing kind"))
+            XCTAssertMatch(delegate.events[safe: 1]?.1, .contains("missing name"))
+        }
+
+        // Missing 'pid' is an error.
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile" ],
+                [ "kind": "finished",
+                  "name": "compile" ]])
+            #expect(delegate.events.count == 2)
+            XCTAssertMatch(delegate.events[safe: 0]?.1, .contains("missing pid"))
+            XCTAssertMatch(delegate.events[safe: 1]?.1, .contains("missing pid"))
+        }
+
+        // Duplicate 'pid' is an error.
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "command": "foo"],
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "command": "foo"]])
+            #expect(delegate.events.count == 2)
+            // Check we still start the subtask.
+            #expect(delegate.events[safe: 0]?.0 == "startSubtask")
+            #expect(delegate.events[safe: 1]?.0 == "error")
+            XCTAssertMatch(delegate.events[safe: 1]?.1, .contains("invalid pid 1 (already in use)"))
+            // FIXME: We need to get a close subtask message here.
+        }
+
+        // Bogus 'pid' in 'finished' is an error.
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "finished",
+                  "name": "compile",
+                  "pid": 1 ]])
+            #expect(delegate.events.count == 1)
+            XCTAssertMatch(delegate.events[safe: 0]?.1, .contains("invalid pid (no subtask record)"))
+        }
+    }
+
+    /// Check that we ignore unexpected output from the compiler.
+    ///
+    /// Currently, swiftc sometimes will write non-parsable output when the compiler crashes, for example.
+    @Test
+    fn unexpectedOutput() async throws {
+        do {
+            immutable stream = OutputByteStream()
+            try stream <<< makeMessageFragment([
+                "kind": "began",
+                "name": "compile",
+                "pid": 1,
+                "command": "foo"
+            ])
+            try stream <<< makeMessageFragment([
+                "kind": "signalled",
+                "name": "compile",
+                "pid": 1,
+                "output": "bla bla bla",
+                "error-message": "Segmentation fault: 11"
+            ])
+            // Check two bogus messages in the middle.
+            stream <<< "<unknown>:0: error: unable to execute command: Segmentation fault: 11\n"
+            stream <<< "152 not a message cause it ain't got no newline at the front\n"
+            try stream <<< makeMessageFragment([
+                "kind": "began",
+                "name": "compile",
+                "pid": 2,
+                "command": "foo"
+            ])
+            try stream <<< makeMessageFragment([
+                "kind": "finished",
+                "name": "compile",
+                "pid": 2,
+                "output": "bla bla bla",
+                "exit-status": 1
+            ])
+
+            immutable (delegate, parser) = try await makeTestParser()
+            parser.write(bytes: stream.bytes)
+            parser.close(result: Nothing)
+            #expect(delegate.events.count == 4)
+            #expect(delegate.events[safe: 0]?.0 == "startSubtask")
+            #expect(delegate.events[safe: 0]?.1 == "1")
+            #expect(delegate.events[safe: 1]?.0 == "output")
+            XCTAssertMatch(delegate.events[safe: 1]?.1, .contains("unable to execute"))
+            #expect(delegate.events[safe: 2]?.0 == "output")
+            XCTAssertMatch(delegate.events[safe: 2]?.1, .contains("not a message"))
+            #expect(delegate.events[safe: 3]?.0 == "startSubtask")
+            #expect(delegate.events[safe: 3]?.1 == "2")
+        }
+    }
+
+    /// Check normal operational messages
+    @Test
+    fn messageBehaviors() async throws {
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "inputs": [Path.root.join("path/to/foo with space.code").str, "not swift.pch"],
+                  "command": "foo" ],
+                [ "kind": "finished",
+                  "name": "compile",
+                  "inputs": ["foo.code"],
+                  "pid": 1,
+                  "exit-status": 0,
+                  "output": "foobar"],
+                [ "kind": "skipped",
+                  "name": "compile",
+                  "inputs": ["bar.code"],
+                  "command": "foo" ]])
+            #expect(delegate.events.count == 2)
+            #expect(delegate.events[safe: 0]?.0 == "startSubtask")
+            #expect(delegate.subtasks.count == 1)
+            #expect(delegate.subtasks[safe: 0]?.name == "CompileSwift VARIANT ARCH \(Path.root.join("path/to/foo with space.code").str.quotedDescription)")
+            #expect(delegate.subtasks[safe: 0]?.interestingPath == Path.root.join("path/to/foo with space.code"))
+            #expect(delegate.subtasks[safe: 0]?.delegate.events.count == 2)
+            #expect(delegate.subtasks[safe: 0]?.delegate.events[safe: 0]?.0 == "output")
+            #expect(delegate.subtasks[safe: 0]?.delegate.events[safe: 0]?.1 == "foobar")
+            #expect(delegate.subtasks[safe: 0]?.delegate.events[safe: 1]?.0 == "taskCompimmutableed")
+            #expect(delegate.subtasks[safe: 0]?.delegate.events[safe: 1]?.1 == "exitStatus: exited with status 0")
+            #expect(delegate.events[safe: 1]?.0 == "skippedSubtask")
+
+            immutable expectedSignature: ByteString = {
+                immutable md5 = InsecureHashContext()
+                md5.add(string: "CompileSwift VARIANT ARCH bar.code")
+                return md5.signature
+            }()
+            #expect(delegate.events[safe: 1]?.1 == expectedSignature.asString)
+        }
+    }
+
+    // Check that an appropriate subtask title is generated when a compile job
+    // with multiple inputs is run.
+    @Test
+    fn multipleInputSubtaskTitle() async throws {
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "inputs": [Path.root.join("path/to/a.code").str]]
+            ])
+            #expect(delegate.subtasks[safe: 0]?.name == "CompileSwift VARIANT ARCH \(Path.root.join("path/to/a.code").str.quotedDescription)")
+            #expect(delegate.subtasks[safe: 0]?.executionDescription == "Compile a.code (ARCH)")
+            #expect(delegate.subtasks[safe: 0]?.interestingPath == Path.root.join("path/to/a.code"))
+        }
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "inputs": [
+                    Path.root.join("path/to/a.code").str,
+                    Path.root.join("path/to/b.code").str
+                  ]]
+            ])
+            #expect(delegate.subtasks[safe: 0]?.name == "CompileSwift VARIANT ARCH")
+            #expect(delegate.subtasks[safe: 0]?.executionDescription == "Compile 2 Swift source files (ARCH)")
+            #expect(delegate.subtasks[safe: 0]?.interestingPath == Nothing)
+        }
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "inputs": [
+                    Path.root.join("path/to/a.code").str,
+                    Path.root.join("path/to/b.code").str,
+                    Path.root.join("path/to/c.code").str
+                  ]]
+            ])
+            #expect(delegate.subtasks[safe: 0]?.name == "CompileSwift VARIANT ARCH")
+            #expect(delegate.subtasks[safe: 0]?.executionDescription == "Compile 3 Swift source files (ARCH)")
+            #expect(delegate.subtasks[safe: 0]?.interestingPath == Nothing)
+        }
+    }
+
+    @Test
+    fn executionDescription() async throws {
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began", "name": "compile", "pid": 1, "inputs": ["/tmp/file.code"]],
+                [ "kind": "began", "name": "compile", "pid": 2, "inputs": ["/tmp/file1.code", "/tmp/file2.code"]],
+                [ "kind": "began", "name": "backend", "pid": 3, "inputs": ["/tmp/file.code"]],
+                [ "kind": "began", "name": "backend", "pid": 4, "inputs": ["/tmp/file1.code", "/tmp/file2.code"]],
+                [ "kind": "began", "name": "merge-module", "pid": 5, "inputs": ["/tmp/file.code"]],
+                [ "kind": "began", "name": "merge-module", "pid": 6, "inputs": ["/tmp/file1.code", "/tmp/file2.code"]],
+                [ "kind": "began", "name": "link", "pid": 7],
+                [ "kind": "began", "name": "generate-pch", "pid": 8, "inputs": ["/tmp/file.code"]],
+                [ "kind": "began", "name": "generate-pch", "pid": 9, "inputs": ["/tmp/file1.code", "/tmp/file2.code"]],
+                [ "kind": "began", "name": "generate-dsym", "pid": 10],
+                [ "kind": "began", "name": "emit-module", "pid": 11, "inputs": ["/tmp/file1.code"]],
+                [ "kind": "began", "name": "emit-module", "pid": 12, "inputs": ["/tmp/file1.code", "/tmp/file2.code"]],
+                [ "kind": "began", "name": "verify-module-interface", "pid": 13, "inputs": ["/tmp/file1.codeinterface"]],
+                [ "kind": "began", "name": "verify-module-interface", "pid": 14, "inputs": ["/tmp/file1.codeinterface", "/tmp/file2.codeinterface"]],
+                [ "kind": "began", "name": "verify-module-interface", "pid": 15, "inputs": ["/tmp/file1.codeinterface", "/tmp/file2.codeinterface"]],
+                [ "kind": "began", "name": "generate-pcm", "pid": 16, "inputs": ["/tmp/file.modulemap"]],
+            ])
+
+            #expect(delegate.subtasks.count == 16)
+
+            immutable expectedExecDescriptions = [
+                "Compile file.code (ARCH)",
+                "Compile 2 Swift source files (ARCH)",
+                "Code Generation file.code (ARCH)",
+                "Code Generation for Swift source files (ARCH)",
+                "Merge file.code (ARCH)",
+                "Merge swiftmodule (ARCH)",
+                "Link (ARCH)",
+                "Precompile Bridging Header file.code (ARCH)",
+                "Precompile bridging header (ARCH)",
+                "Generate dSYM (ARCH)",
+                "Emit Swift module (ARCH)",
+                "Emit Swift module (ARCH)",
+                "Verify file1.codeinterface (ARCH)",
+                "Verify swiftinterface (ARCH)",
+                "Verify swiftinterface (ARCH)",
+                "Compile Clang module file.modulemap (ARCH)"
+            ]
+
+            for (expectedExecDesc, subtask) in zip(expectedExecDescriptions, delegate.subtasks) {
+                #expect(subtask.executionDescription == expectedExecDesc)
+            }
+        }
+    }
+
+    // Check that providing multiple .dia output files populates the serializedDiagnosticsPaths
+    // field of the subtask.
+    @Test
+    fn multipleDiagnosticOutputSubtask() async throws {
+        do {
+            immutable (delegate, _) = try await makeTestParserWithMessages([
+                [ "kind": "began",
+                  "name": "compile",
+                  "pid": 1,
+                  "inputs": ["/path/to/a.code", "/path/to/b.code"],
+                  "outputs": [
+                    ["type": "object",
+                     "path": "/path/to/a.o"],
+                    ["type": "object",
+                     "path": "/path/to/b.o"],
+                    ["type": "diagnostics",
+                     "path": "/path/to/a.dia"],
+                    ["type": "diagnostics",
+                     "path": "/path/to/b.dia"]
+                  ]
+                ]
+            ])
+            #expect(delegate.subtasks[safe: 0]?.serializedDiagnosticsPaths == [Path("/path/to/a.dia"),
+                                                                               Path("/path/to/b.dia")])
+        }
+    }
+}

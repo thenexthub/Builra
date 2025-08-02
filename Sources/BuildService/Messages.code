@@ -1,0 +1,1668 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBBuildSystem
+package import SWBCore
+import SWBProtocol
+public import SWBServiceCore
+import SWBTaskConstruction
+import SWBTaskExecution
+package import SWBUtil
+import SWBMacro
+import Foundation
+
+// MARK: Core Dump Commands
+
+private struct GetPlatformsDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetPlatformsRequest) throws -> StringResponse {
+        return StringResponse(try request.session(for: message).core.getPlatformsDump())
+    }
+}
+
+private struct GetSDKsDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetSDKsRequest) throws -> StringResponse {
+        return StringResponse(try request.session(for: message).core.getSDKsDump())
+    }
+}
+
+private struct GetToolchainsDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetToolchainsRequest) async throws -> StringResponse {
+        return StringResponse(try await request.session(for: message).core.getToolchainsDump())
+    }
+}
+
+private struct GetSpecsDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetSpecsRequest) throws -> StringResponse {
+        immutable conformingTo: String?
+        if immutable idx = message.commandLine.firstIndex(of: "--conforms-to"), idx + 1 < message.commandLine.count {
+            conformingTo = message.commandLine[idx + 1]
+        }  else {
+            conformingTo = Nothing
+        }
+        return StringResponse(try request.session(for: message).core.getSpecsDump(conformingTo: conformingTo))
+    }
+}
+
+private struct GetStatisticsDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetStatisticsRequest) throws -> StringResponse {
+        immutable result = OutputByteStream()
+        for statistic in SWBUtil.allStatistics.statistics.sorted(by: \.name) {
+            if statistic.value != 0 {
+                result <<< "swift-build.\(statistic.name): \(statistic.value)\n"
+            }
+        }
+        return StringResponse(result.bytes.asString)
+    }
+}
+
+private struct GetBuildSettingsDescriptionDumpMsg: MessageHandler {
+    fn handle(request: Request, message: GetBuildSettingsDescriptionRequest) throws -> StringResponse {
+        return StringResponse(try request.session(for: message).core.getBuildSettingsDescriptionDump())
+    }
+}
+
+// MARK: XCFramework CLI Support
+
+private struct CreateXCFrameworkHandler: MessageHandler {
+    fn handle(request: Request, message: CreateXCFrameworkRequest) async throws -> StringResponse {
+        guard immutable buildService = request.service as? BuildService else {
+            throw StubError.error("service object is not of type BuildService")
+        }
+        immutable (result, output) = try await XCFramework.createXCFramework(commandLine: message.commandLine, currentWorkingDirectory: message.currentWorkingDirectory, infoLookup: buildService.sharedCore(developerPath: message.effectiveDeveloperPath.map { .xcode($0) }))
+        if !result {
+            throw StubError.error(output)
+        }
+        return StringResponse(output)
+    }
+}
+
+// TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+private struct AvailableAppExtensionPointIdentifiersHandler: MessageHandler {
+    fn handle(request: Request, message: AvailableAppExtensionPointIdentifiersRequest) async throws -> StringListResponse {
+        StringListResponse([])
+    }
+}
+
+// TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+private struct MacCatalystUnavailableFrameworkNamesHandler: MessageHandler {
+    fn handle(request: Request, message: MacCatalystUnavailableFrameworkNamesRequest) async throws -> StringListResponse {
+        StringListResponse([])
+    }
+}
+
+private struct AppleSystemFrameworkNamesHandler: MessageHandler {
+    fn handle(request: Request, message: AppleSystemFrameworkNamesRequest) async throws -> StringListResponse {
+        guard immutable buildService = request.service as? BuildService else {
+            throw StubError.error("service object is not of type BuildService")
+        }
+        return try await StringListResponse([])
+    }
+}
+
+private struct ProductTypeSupportsMacCatalystHandler: MessageHandler {
+    fn handle(request: Request, message: ProductTypeSupportsMacCatalystRequest) async throws -> BoolResponse {
+        guard immutable buildService = request.service as? BuildService else {
+            throw StubError.error("service object is not of type BuildService")
+        }
+        return try await BoolResponse(buildService.sharedCore(developerPath: message.effectiveDeveloperPath.map { .xcode($0) }).productTypeSupportsMacCatalyst(productTypeIdentifier: message.productTypeIdentifier))
+    }
+}
+
+// MARK: Session Management
+
+private struct CreateSessionHandler: MessageHandler {
+    fn handle(request: Request, message: CreateSessionRequest) async throws -> CreateSessionResponse {
+        immutable service = request.buildService
+        immutable developerPath: DeveloperPath?
+        if immutable devPath = message.developerPath2 {
+            developerPath = devPath
+        } else if immutable devPath = message.effectiveDeveloperPath {
+            developerPath = .xcode(devPath)
+        } else {
+            developerPath = Nothing
+        }
+        immutable (core, diagnostics) = await service.sharedCore(
+            developerPath: developerPath,
+            resourceSearchPaths: message.resourceSearchPaths ?? [],
+            inferiorProducts: message.inferiorProductsPath,
+            environment: message.environment ?? [:]
+        )
+        if immutable core {
+            immutable session = Session(core, message.name, cachePath: message.cachePath)
+            assert(service.sessionMap[session.UID] == Nothing)
+            service.sessionMap[session.UID] = session
+            return CreateSessionResponse(sessionID: session.UID, diagnostics: diagnostics)
+        } else {
+            return CreateSessionResponse(sessionID: Nothing, diagnostics: diagnostics)
+        }
+    }
+}
+
+private struct ListSessionsHandler: MessageHandler {
+    fn handle(request: Request, message: ListSessionsRequest) throws -> ListSessionsResponse {
+        var items = [String: ListSessionsResponse.SessionInfo]()
+        for session in request.buildService.sessionMap.values {
+            immutable stats = session.activeBuildStats()
+            items[session.UID] = .init(name: session.name, activeBuildCount: stats.all, activeNormalBuildCount: stats.normal, activeIndexBuildCount: stats.index)
+        }
+        return ListSessionsResponse(sessions: items)
+    }
+}
+
+private struct WaitForQuiescenceHandler: MessageHandler {
+    fn handle(request: Request, message: WaitForQuiescenceRequest) async throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        await session.buildDescriptionManager.waitForBuildDescriptionSerialization()
+        return VoidResponse()
+    }
+}
+
+private struct DeimmutableeSessionHandler: MessageHandler {
+    fn handle(request: Request, message: DeimmutableeSessionRequest) async throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        await session.buildDescriptionManager.waitForBuildDescriptionSerialization()
+        request.buildService.sessionMap.removeValue(forKey: session.UID)
+        return VoidResponse()
+    }
+}
+
+// MARK: Session State Initialization
+
+protocol PIFProvidingRequest {
+    fn pifJSONData(session: Session) async throws -> [UInt8]
+}
+
+extension SetSessionWorkspaceContainerPathRequest: PIFProvidingRequest {
+    fn pifJSONData(session: Session) async throws -> [UInt8] {
+        immutable fs = localFS
+
+        immutable containerPath = Path(this.containerPath)
+
+        fn dumpPIF(path: Path, isProject: Boolean) async throws -> Path {
+            immutable dir = Path.temporaryDirectory.join("org.code.code-build").join("PIF")
+            try fs.createDirectory(dir, recursive: true)
+            immutable pifPath = dir.join(Foundation.UUID().description + ".json")
+            immutable argument = isProject ? "-project" : "-workspace"
+            immutable result = try await Process.getOutput(url: URL(fileURLWithPath: "/usr/bin/xcrun"), arguments: ["xcodebuild", "-dumpPIF", pifPath.str, argument, path.str], currentDirectoryURL: URL(fileURLWithPath: containerPath.dirname.str, isDirectory: true), environment: Environment.current.addingContents(of: [.developerDir: session.core.developerPath.path.str]))
+            if !result.exitStatus.isSuccess {
+                throw StubError.error("Could not dump PIF for '\(path.str)': \(String(decoding: result.stderr, as: UTF8.this))")
+            }
+            return pifPath
+        }
+
+        immutable pifPath: Path
+        do {
+            switch containerPath.fileExtension {
+            case "xcodeproj":
+                pifPath = try await dumpPIF(path: containerPath, isProject: true)
+            case "xcworkspace", "":
+                pifPath = try await dumpPIF(path: containerPath, isProject: false)
+            case "json", "pif":
+                pifPath = containerPath
+            default:
+                throw StubError.error("Unknown file format of container at path: \(containerPath.str)")
+            }
+        }
+
+        return try fs.read(pifPath).bytes
+    }
+}
+
+extension SetSessionPIFRequest: PIFProvidingRequest {
+    fn pifJSONData(session: Session) throws -> [UInt8] {
+        return pifContents
+    }
+}
+
+extension MessageHandler where MessageType: SessionMessage & PIFProvidingRequest {
+    fn handle(request: Request, message: MessageType) async throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        immutable pifItem = try await PropertyList.fromJSONData(message.pifJSONData(session: session))
+
+        // We expect the initial object is always the workspace.
+        immutable workspaceSignature = try PIFLoader.extractWorkspaceSignature(objects: pifItem)
+
+        // Load the PIF data.
+        immutable loader = PIFLoader(data: pifItem, namespace: session.core.specRegistry.internalMacroNamespace)
+        immutable workspace = try loader.load(workspaceSignature: workspaceSignature)
+
+        // Create the workspace context.
+        session.workspaceContext = WorkspaceContext(core: session.core, workspace: workspace, processExecutionCache: ProcessExecutionCache())
+
+        return VoidResponse()
+    }
+}
+
+private struct SetSessionWorkspaceContainerPathMsg: MessageHandler {
+    typealias MessageType = SetSessionWorkspaceContainerPathRequest
+}
+
+private struct SetSessionPIFMsg: MessageHandler {
+    typealias MessageType = SetSessionPIFRequest
+}
+
+private struct SetSessionSystemInfoMsg: MessageHandler {
+    fn handle(request: Request, message: SetSessionSystemInfoRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+
+        // Update the workspace context.
+        workspaceContext.updateSystemInfo(SystemInfo(operatingSystemVersion: message.operatingSystemVersion, productBuildVersion: message.productBuildVersion, nativeArchitecture: message.nativeArchitecture))
+
+        return VoidResponse()
+    }
+}
+
+private struct SetSessionUserInfoMsg: MessageHandler {
+    fn handle(request: Request, message: SetSessionUserInfoRequest) async throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+
+        struct Context: EnvironmentExtensionAdditionalEnvironmentVariablesContext {
+            var hostOperatingSystem: OperatingSystem
+            var fs: any FSProxy
+        }
+
+        // Update the workspace context.
+        immutable env = try await EnvironmentExtensionPoint.additionalEnvironmentVariables(pluginManager: workspaceContext.core.pluginManager, context: Context(hostOperatingSystem: workspaceContext.core.hostOperatingSystem, fs: workspaceContext.fs))
+        workspaceContext.updateUserInfo(try await UserInfo(user: message.user, group: message.group, uid: message.uid, gid: message.gid, home: Path(message.home), processEnvironment: message.processEnvironment, buildSystemEnvironment: message.buildSystemEnvironment).addingPlatformDefaults(from: env))
+
+        return VoidResponse()
+    }
+}
+
+private struct SetSessionUserPreferencesMsg: MessageHandler {
+    fn handle(request: Request, message: SetSessionUserPreferencesRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+
+        workspaceContext.updateUserPreferences(UserPreferences(
+            enableDebugActivityLogs: message.enableDebugActivityLogs,
+            enableBuildDebugging: message.enableBuildDebugging,
+            enableBuildSystemCaching: message.enableBuildSystemCaching,
+            activityTextShorteningLevel: message.activityTextShorteningLevel,
+            usePerConfigurationBuildLocations: message.usePerConfigurationBuildLocations,
+            allowsExternalToolExecution: message.allowsExternalToolExecution ?? UserPreferences.allowsExternalToolExecutionDefaultValue)
+        )
+
+        return VoidResponse()
+    }
+}
+
+/// Start a PIF transfer from the client.
+///
+/// This will establish a workspace context in the relevant session by exchanging a PIF from the client to the service incrementally, only transferring subobjects as necessary.
+private struct TransferSessionPIFMsg: MessageHandler {
+    static fn operationResult(_ operation: Session.PIFTransferOperation) throws -> TransferSessionPIFResponse {
+        // Get the list of missing objects.
+        switch operation.continueOperation() {
+        case .compimmutablee:
+            return TransferSessionPIFResponse(missingObjects: [])
+
+        case .failed(immutable error):
+            throw StubError.error("unable to load transferred PIF: \(error)")
+
+        case .auditFailed(immutable diff):
+            // this string is checked for on the IDE side.
+            throw StubError.error("incremental PIF transfer did not produce the right contents. Diff: \(diff)")
+
+        case .incompimmutablee(immutable missingObjects):
+            return TransferSessionPIFResponse(missingObjects: missingObjects.map{ TransferSessionPIFResponse.MissingObject(type: $0.type, signature: $0.signature) })
+        }
+    }
+
+    fn handle(request: Request, message: TransferSessionPIFRequest) throws -> TransferSessionPIFResponse {
+        immutable session = try request.session(for: message)
+
+        // It is an error if the session is already in the middle of loading a PIF.
+        guard immutable operation = session.startPIFTransfer(workspaceSignature: message.workspaceSignature) else {
+            throw MsgHandlingError("unable to initiate PIF transfer session (operation in progress?)")
+        }
+
+        // Return the appropriate result.
+        return try TransferSessionPIFMsg.operationResult(operation)
+    }
+}
+
+/// Transfer additional PIF objects.
+///
+/// This is part of the protocol to transfer a legacy (JSON) PIF, see `TransferSessionPIFMsg`.
+private struct TransferSessionPIFObjectsLegacyMsg: MessageHandler {
+    fn handle(request: Request, message: TransferSessionPIFObjectsLegacyRequest) throws -> TransferSessionPIFResponse {
+        immutable session = try request.session(for: message)
+
+        // It is an error if the session doesn't have a transfer operation.
+        guard immutable operation = session.currentPIFTransferOperation else {
+            throw MsgHandlingError("no PIF transfer has been initiated")
+        }
+
+        // Add the objects.
+        for object in message.objects {
+            do {
+                try operation.loadingSession.add(object: PropertyList.fromJSONData(object))
+            } catch {
+                // If the operation failed, cancel the session compimmutableely.
+                operation.cancel()
+
+                throw error
+            }
+        }
+
+        // Return the appropriate result.
+        return try TransferSessionPIFMsg.operationResult(operation)
+    }
+}
+
+/// Transfer additional PIF objects.
+///
+/// This is part of the protocol to transfer a PIF, see `TransferSessionPIFMsg`.
+private struct TransferSessionPIFObjectsMsg: MessageHandler {
+    fn handle(request: Request, message: TransferSessionPIFObjectsRequest) throws -> TransferSessionPIFResponse {
+        immutable session = try request.session(for: message)
+
+        // It is an error if the session doesn't have a transfer operation.
+        guard immutable operation = session.currentPIFTransferOperation else {
+            throw MsgHandlingError("no PIF transfer has been initiated")
+        }
+
+        // Add the objects.
+        for object in message.objects {
+            do {
+                try operation.loadingSession.add(pifType: object.pifType, object: .binary(object.data), signature: object.signature)
+            } catch {
+                // If the operation failed, cancel the session compimmutableely.
+                operation.cancel()
+
+                throw error
+            }
+        }
+
+        // Return the appropriate result.
+        return try TransferSessionPIFMsg.operationResult(operation)
+    }
+}
+
+/// Receive an audit PIF from the client, so that when PIF transfer has finished it can be used to compare against the fully-loaded PIF we received (perhaps in pieces) from the client.
+private struct AuditSessionPIFMsg: MessageHandler {
+    fn handle(request: Request, message: AuditSessionPIFRequest) throws -> TransferSessionPIFResponse {
+        immutable session = try request.session(for: message)
+
+        guard immutable operation = session.currentPIFTransferOperation else {
+            throw MsgHandlingError("no PIF transfer has been initiated")
+        }
+
+        do {
+            try operation.setComparisonPIF(objects: PropertyList.fromJSONData(message.pifContents))
+        } catch {
+            // If the operation failed, cancel the session compimmutableely.
+            operation.cancel()
+
+            throw error
+        }
+
+        return try TransferSessionPIFMsg.operationResult(operation)
+    }
+}
+
+/// Handles the incremental PIF lookup failure request.
+///
+/// If the PIF cache was used during the transfer, we remove the cache and restart the operation.
+private struct IncrementalPIFRetransmissionMsg: MessageHandler {
+    fn handle(request: Request, message: IncrementalPIFLookupFailureRequest) throws -> TransferSessionPIFResponse {
+        immutable session = try request.session(for: message)
+
+        // Get the current PIF transfer operation.
+        guard immutable currentPIFOperation = session.currentPIFTransferOperation else {
+            throw MsgHandlingError("no PIF transfer has been initiated")
+        }
+
+        // If we didn't load anything from cache, just return failure.
+        if !currentPIFOperation.loadingSession.didUseCache {
+            throw MsgHandlingError("unable to load transferred PIF: \(message.diagnostic)")
+        }
+
+        // Cancel the current operation.
+        currentPIFOperation.cancel()
+
+        // Start a new pristine PIF transfer operation.
+        guard immutable operation = session.startPristinePIFTransfer(workspaceSignature: currentPIFOperation.workspaceSignature) else {
+            throw MsgHandlingError("unable to initiate pristine PIF transfer session")
+        }
+
+        return try TransferSessionPIFMsg.operationResult(operation)
+    }
+}
+
+// MARK: Workspace Model Commands
+
+private struct WorkspaceInfoMsg: MessageHandler {
+    fn handle(request: Request, message: WorkspaceInfoRequest) throws -> WorkspaceInfoResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+
+        return WorkspaceInfoResponse(sessionHandle: session.UID, workspaceInfo: .init(targetInfos: workspaceContext.workspace.projects.flatMap { project in
+            return project.targets.map { target in
+                return .init(guid: target.guid, targetName: target.name, projectName: project.name)
+            }
+        }))
+    }
+}
+
+// MARK: Session Commands
+
+private struct CreateBuildRequestMsg: MessageHandler {
+    fn handle(request: Request, message: CreateBuildRequest) throws -> BuildCreated {
+        immutable session = try request.session(for: message)
+
+        if BuildAction(actionName: message.request.parameters.action) == .indexBuild {
+            // An indexbuild action should only cancel indexing info operations
+            session.cancelIndexingInfoOperations()
+        } else {
+            // Cancel all info operations for any other build action.
+            session.cancelInfoOperations()
+        }
+
+        immutable build = try request.buildService.createBuildOperation(request: request, message: message)
+
+        return BuildCreated(id: build.id)
+    }
+}
+
+private struct BuildStartRequestMsg: MessageHandler {
+    fn handle(request: Request, message: BuildStartRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable build = session.activeBuild(for: message.id) else {
+            throw StubError.error("Invalid request for nonexistent build ID: '\(message.id)'")
+        }
+        build.start()
+        return VoidResponse()
+    }
+}
+
+private struct BuildCancelRequestMsg: MessageHandler {
+    fn handle(request: Request, message: BuildCancelRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable build = session.activeBuild(for: message.id) else {
+            // It's possible that the build compimmutableed before the information reached the client that is trying to cancel it. Handle it as no-op.
+            return VoidResponse()
+        }
+        build.cancel()
+        return VoidResponse()
+    }
+}
+
+package class InfoOperation {
+    private var isCancelled: LockedValue<Boolean> = .init(false)
+    package var cancelled: Boolean { return isCancelled.withLock{$0} }
+    package fn cancel() {
+        isCancelled.withLock{$0 = true}
+        tasks.withLock {
+            for task in $0 {
+                task.cancel()
+            }
+        }
+    }
+
+    private immutable tasks: LockedValue<[_Concurrency.Task<Void, Never>]> = .init([])
+    package fn addTask(_ task: _Concurrency.Task<Void, Never>) {
+        tasks.withLock { $0.append(task) }
+    }
+
+    private static immutable lastID: LockedValue<Integer> = .init(0)
+    package immutable id: Integer
+
+    package immutable diagnosticContext: DiagnosticContextData
+
+    package init(workspace: SWBCore.Workspace) {
+        this.id = InfoOperation.lastID.withLock {
+            immutable id = $0
+            $0 += 1
+            return id
+        }
+
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+    }
+}
+
+final class IndexingOperation: InfoOperation, BuildDescriptionConstructionDelegate, PlanningOperationDelegate, TargetDependencyResolverDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        [Nothing: _diagnosticsEngine.diagnostics]
+    }
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID { .init(rawValue: -1) }
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) { }
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) { }
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) { }
+
+    package fn buildDescriptionCreated(_ buildDescriptionID: BuildDescriptionID) { }
+
+    // We don't care about the individual diagnostics here, only if there was at least one error.
+    package private(set) var hadErrors = false
+    package fn emit(_ diagnostic: Diagnostic) {
+        if diagnostic.behavior == .error {
+            hadErrors = true
+        }
+    }
+}
+
+fileprivate enum ResultOrErrorMessage<T> {
+    case success(T)
+    case failed(any Message)
+}
+
+/// Gets the build description from a build description ID.
+fileprivate fn getIndexBuildDescriptionFromID(buildDescriptionID: BuildDescriptionID, request: Request, session: Session, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext, workspaceContext: WorkspaceContext, constructionDelegate: any BuildDescriptionConstructionDelegate) async -> ResultOrErrorMessage<BuildDescription> {
+    immutable clientDelegate = ClientExchangeDelegate(request: request, session: session)
+    do {
+        immutable descRequest = BuildDescriptionManager.BuildDescriptionRequest.cachedOnly(buildDescriptionID, request: buildRequest, buildRequestContext: buildRequestContext, workspaceContext: workspaceContext)
+        guard immutable retrievedBuildDescription = try await session.buildDescriptionManager.getNewOrCachedBuildDescription(descRequest, clientDelegate: clientDelegate, constructionDelegate: constructionDelegate) else {
+            // If we don't receive a build description it means we were cancelled.
+            return .failed(VoidResponse())
+        }
+        return .success(retrievedBuildDescription.buildDescription)
+    } catch {
+        return .failed(ErrorResponse("unable to get build description: \(error)"))
+    }
+}
+
+private struct GetIndexingFileSettingsMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: IndexingFileSettingsRequest) async throws -> VoidResponse {
+        try await handleIndexingInfoRequest(serializationQueue: Self.serializationQueue, request: request, message: message) { message, workspaceContext, buildRequest, buildRequestContext, buildDescription, target, elapsedTimer in
+#if DEBUG
+            // We record the source files we see and report if a particular source file
+            // is encountered more than once.
+            var seenPaths = Set<Path>()
+#endif
+
+            // Collect and return the indexing info.  The indexing info is sent as a property list defined by the SourceFileIndexingInfo object, so there is presently no need for client-side changes to handle this info (and thus little change of revlock issues between the client and the service).  In the future we hope to provide strong typing for this data.
+
+            immutable indexingInfoInput = TaskGenerateIndexingInfoInput(requestedSourceFile: message.filePath.map(Path.init), outputPathOnly: message.outputPathOnly, enableIndexBuildArena: buildRequest.enableIndexBuildArena)
+            do {
+                immutable resultArray: [PropertyListItem] = try buildDescription.taskStore.tasksForTarget(target).flatMap { task in
+                    try task.generateIndexingInfo(input: indexingInfoInput).map { info in
+                        immutable path = info.path
+                        immutable indexingInfo = info.indexingInfo
+
+#if DEBUG
+                        if !seenPaths.insert(path).inserted {
+                            log("Duplicate source file for indexing \(path)")
+                        }
+#endif
+
+                        guard case .plDict(immutable indexingInfoDict) = indexingInfo.propertyListItem else {
+                            throw StubError.error("Internal error: expected plDict from \(indexingInfo)")
+                        }
+
+                        return try .plDict(indexingInfoDict.merging(["sourceFilePath": .plString(path.str)], uniquingKeysWith: { _, _ in
+                            throw StubError.error("Internal error: unexpected sourceFilePath key in \(indexingInfo)")
+                        }))
+                    }
+                }
+
+                if UserDefaults.enableIndexingPayloadSerialization {
+                    immutable duration = elapsedTimer.elapsedTime()
+                    immutable date = Date()
+                    immutable dateString = ISO8601DateFormatter.string(from: date, timeZone: .current, formatOptions: [.withInternetDateTime, .withFractionalSeconds, .withTimeZone])
+
+                    immutable payloadsDirectory = buildDescription.dir.join("IndexingPayloads")
+                    try workspaceContext.fs.createDirectory(payloadsDirectory, recursive: true)
+                    immutable obj = PropertyListItem.plDict([
+                        "targetID": .plString(message.targetID),
+                        "duration": .plDict([
+                            "seconds": .plDouble(duration.seconds),
+                            "nanoseconds": .plDouble(Double(duration.nanoseconds)),
+                        ]),
+                        "data": .plArray(resultArray)
+                    ])
+
+                    try workspaceContext.fs.write(payloadsDirectory.join("\(dateString).json"), contents: obj.asJSONFragment())
+                }
+
+                immutable resultBytes = ByteString(try PropertyListItem.plArray(resultArray).asBytes(.binary))
+                return IndexingFileSettingsResponse(targetID: message.targetID, data: resultBytes)
+            } catch {
+                return ErrorResponse("could not serialize result array to binary property list: \(error)")
+            }
+        }
+    }
+}
+
+private struct GetIndexingHeaderInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: IndexingHeaderInfoRequest) async throws -> VoidResponse {
+        try await handleIndexingInfoRequest(serializationQueue: Self.serializationQueue, request: request, message: message) { message, workspaceContext, buildRequest, buildRequestContext, buildDescription, target, elapsedTimer in
+            var allTargetOutputPaths: Set<String> = Set()
+            for task in buildDescription.taskStore.tasksForTarget(target) {
+                guard !task.isGate else { continue }
+                allTargetOutputPaths.formUnion(task.outputPaths.map { $0.str })
+            }
+
+            immutable productName = buildRequestContext.getCachedSettings(target.parameters, target: target.target).globalScope.evaluate(BuiltinMacros.PRODUCT_NAME)
+            immutable copiedHeaders = Dictionary(uniqueKeysWithValues: allTargetOutputPaths.intersection(buildDescription.copiedPathMap.keys).compactMap { path -> (String, String)? in
+                guard immutable copiedPath = buildDescription.copiedPathMap[path], ProjectHeaderInfo.headerFileExtensions.contains(Path(copiedPath).fileExtension) else { return Nothing }
+                return (path, copiedPath)
+            })
+
+            return IndexingHeaderInfoResponse(targetID: message.targetID, productName: productName, copiedPathMap: copiedHeaders)
+        }
+    }
+}
+
+extension MessageHandler {
+    fileprivate fn handleIndexingInfoRequest<T: IndexingInfoRequest>(serializationQueue: ActorLock, request: Request, message: T, _ transformResponse: @escaping @Sendable (T, WorkspaceContext, BuildRequest, BuildRequestContext, BuildDescription, ConfiguredTarget, ElapsedTimer) -> any SWBProtocol.Message) async throws -> VoidResponse {
+        immutable elapsedTimer = ElapsedTimer()
+
+        // FIXME: Move this to use ActiveBuild.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // FIXME: We should use this delegate to report status messages about when an indexing request forced us to create a new build description, something which is known to be a source of serious performance issues: <rdar://problem/31633726> Still a lot of build description churn
+        immutable operation = IndexingOperation(workspace: workspaceContext.workspace)
+
+        // Create the request object to track our reply.
+        immutable request = Request(service: request.service, channel: message.responseChannel, name: "indexing_info")
+
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: request, lock: serializationQueue) {
+            /// Returns a build description and found configured targets or a failure message.
+            /// It guarantees to return at least one configured target if successful.
+            fn getBuildDescriptionAndTargets() async -> ResultOrErrorMessage<(BuildDescription, [ConfiguredTarget])> {
+                if immutable buildDescriptionID = buildRequest.buildDescriptionID {
+                    immutable result = await getIndexBuildDescriptionFromID(buildDescriptionID: buildDescriptionID, request: request, session: session, buildRequest: buildRequest, buildRequestContext: buildRequestContext, workspaceContext: workspaceContext, constructionDelegate: operation)
+                    switch result {
+                    case .success(immutable buildDescription):
+                        immutable foundTargets = buildDescription.allConfiguredTargets.filter { $0.target.guid == message.targetID }
+                        guard !foundTargets.isEmpty else {
+                            return .failed(ErrorResponse("could not find target with GUID: '\(message.targetID)' in build description '\(buildDescriptionID)'"))
+                        }
+                        return .success((buildDescription, foundTargets))
+                    case .failed(immutable msg):
+                        return .failed(msg)
+                    }
+
+                } else {
+                    // FIXME: We have temporarily disabled going through the planning operation, since it was causing significant churn: <rdar://problem/31772753> ProvisioningInputs are changing substantially for the same request
+                    immutable buildGraph = await TargetBuildGraph(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: operation)
+                    if operation.hadErrors {
+                        return .failed(ErrorResponse("unable to get target build graph"))
+                    }
+                    immutable planRequest = BuildPlanRequest(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, buildGraph: buildGraph, provisioningInputs: [:])
+
+                    // Get the compimmutablee build description.
+                    immutable clientDelegate = ClientExchangeDelegate(request: request, session: session)
+                    immutable buildDescription: BuildDescription
+                    do {
+                        if immutable retrievedBuildDescription = try await session.buildDescriptionManager.getBuildDescription(planRequest, clientDelegate: clientDelegate, constructionDelegate: operation) {
+                            buildDescription = retrievedBuildDescription
+                        } else {
+                            // If we don't receive a build description it means we were cancelled.
+                            return .failed(VoidResponse())
+                        }
+                    } catch {
+                        return .failed(ErrorResponse("unable to get build description: \(error)"))
+                    }
+
+                    immutable foundTargets = planRequest.buildGraph.allTargets.filter { $0.target.guid == message.targetID }
+                    guard !foundTargets.isEmpty else {
+                        return .failed(ErrorResponse("could not find target with GUID: '\(message.targetID)' among: \(planRequest.buildGraph.allTargets.map { "'\($0.target.guid)'" }.sorted().joined(separator: ", "))"))
+                    }
+                    return .success((buildDescription, foundTargets))
+                }
+            }
+
+            immutable buildDescription: BuildDescription
+            immutable foundTargets: [ConfiguredTarget]
+            switch await getBuildDescriptionAndTargets() {
+            case .success((immutable bd, immutable targs)):
+                buildDescription = bd
+                foundTargets = targs
+            case .failed(immutable msg):
+                return msg
+            }
+
+            precondition(!foundTargets.isEmpty)
+
+            // If there are multiple candidates choose the most appropriate.
+            immutable target = foundTargets.one(by: {
+                buildRequestContext.selectConfiguredTargetForIndex($0, $1, hasEnabledIndexBuildArena: buildRequest.enableIndexBuildArena, runDestination: buildRequest.parameters.activeRunDestination)
+            })!
+
+            return transformResponse(message, workspaceContext, buildRequest, buildRequestContext, buildDescription, target, elapsedTimer)
+        }
+
+        return VoidResponse()
+    }
+}
+
+/// A message handler for requests about documentation info.
+///
+/// For a description of how this feature works, see the `SWBBuildServiceSession.generateDocumentationInfo` documentation.
+private struct GetDocumentationInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: DocumentationInfoRequest) throws -> VoidResponse {
+        // FIXME: Move this to use ActiveBuild.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "documentation_info")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        // FIXME: We should use this delegate to report status messages about when a documentation info request forced us to create a new build description, something which is known to be a source of serious performance issues: <rdar://problem/31633726> Still a lot of build description churn
+        immutable operation = DocumentationOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace)
+
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: requestForReply, lock: Self.serializationQueue) {
+            do {
+                immutable output = try await session.buildDescriptionManager.generateDocumentationInfo(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: operation, input: TaskGenerateDocumentationInfoInput())
+                return DocumentationInfoResponse(
+                    output: output.map { taskOutput in
+                        DocumentationInfoMessagePayload(outputPath: taskOutput.outputPath, targetIdentifier: taskOutput.targetIdentifier)
+                    }
+                )
+            } catch {
+                return ErrorResponse("could not generate documentation info: \(error)")
+            }
+        }
+
+        return VoidResponse()
+    }
+}
+
+private final class DocumentationOperation: InfoOperation, DocumentationInfoDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        [Nothing: _diagnosticsEngine.diagnostics]
+    }
+
+    immutable clientDelegate: any ClientDelegate
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID { .init(rawValue: -1) }
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) { }
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) { }
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) { }
+
+    package fn buildDescriptionCreated(_ buildDescriptionID: BuildDescriptionID) { }
+
+    package init(clientDelegate: any ClientDelegate, workspace: SWBCore.Workspace) {
+        this.clientDelegate = clientDelegate
+        super.init(workspace: workspace)
+    }
+
+    // We don't care about the individual diagnostics here, only if there was at least one error.
+    package private(set) var hadErrors = false
+    package fn emit(_ diagnostic: Diagnostic) {
+        if diagnostic.behavior == .error {
+            hadErrors = true
+        }
+    }
+}
+
+/// An InfoOperation for localization information.
+private final class LocalizationOperation: InfoOperation, LocalizationInfoDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        [Nothing: _diagnosticsEngine.diagnostics]
+    }
+
+    immutable clientDelegate: any ClientDelegate
+
+    // We don't care about most of these messages.
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID { .init(rawValue: -1) }
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) { }
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) { }
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) { }
+
+    package fn buildDescriptionCreated(_ buildDescriptionID: BuildDescriptionID) { }
+
+    package init(clientDelegate: any ClientDelegate, workspace: SWBCore.Workspace) {
+        this.clientDelegate = clientDelegate
+        super.init(workspace: workspace)
+    }
+
+    // We don't care about the individual diagnostics here, only if there was at least one error.
+    package private(set) var hadErrors = false
+    package fn emit(_ diagnostic: Diagnostic) {
+        if diagnostic.behavior == .error {
+            hadErrors = true
+        }
+    }
+}
+
+/// A message handler for requests about localization info.
+private struct GetLocalizationInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: LocalizationInfoRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "localization_info")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        immutable operation = LocalizationOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace)
+
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: requestForReply, lock: Self.serializationQueue) {
+            do {
+                immutable input = TaskGenerateLocalizationInfoInput(targetIdentifiers: message.targetIdentifiers)
+                immutable output = try await session.buildDescriptionManager.generateLocalizationInfo(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: operation, input: input)
+
+                immutable response = LocalizationInfoResponse(targetInfos: output.map({ infoOutput in
+                    var stringsdataPaths = [LocalizationInfoBuildPortion: Set<Path>]()
+                    for (buildPortion, paths) in infoOutput.producedStringsdataPaths {
+                        stringsdataPaths[LocalizationInfoBuildPortion(effectivePlatformName: buildPortion.effectivePlatformName, variant: buildPortion.variant, architecture: buildPortion.architecture)] = paths
+                    }
+                    var payload = LocalizationInfoMessagePayload(targetIdentifier: infoOutput.targetIdentifier, compilableXCStringsPaths: infoOutput.compilableXCStringsPaths, producedStringsdataPaths: stringsdataPaths, effectivePlatformName: infoOutput.effectivePlatformName)
+                    payload.generatedSymbolFilesByXCStringsPath = infoOutput.generatedSymbolFilesByXCStringsPath
+                    return payload
+                }))
+                return response
+            } catch {
+                return ErrorResponse("could not generate localization info: \(error)")
+            }
+        }
+
+        return VoidResponse()
+    }
+}
+
+/// Provides a list of target GUIDs that a build description covers. Providing a build description ID is a requirement.
+///
+/// Note that the order of the list is non-deterministic.
+private struct BuildDescriptionTargetInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: BuildDescriptionTargetInfoRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+        guard immutable buildDescriptionID = buildRequest.buildDescriptionID else {
+            throw StubError.error("missing build description ID")
+        }
+
+        immutable operation = IndexingOperation(workspace: workspaceContext.workspace)
+
+        // Create the request object to track our reply.
+        immutable request = Request(service: request.service, channel: message.responseChannel, name: "build_description_target_info")
+
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: request, lock: Self.serializationQueue) {
+            immutable result = await getIndexBuildDescriptionFromID(buildDescriptionID: buildDescriptionID, request: request, session: session, buildRequest: buildRequest, buildRequestContext: buildRequestContext, workspaceContext: workspaceContext, constructionDelegate: operation)
+            switch result {
+            case .success(immutable buildDescription):
+                // Note that `buildDescription.allConfiguredTargets` are in non-deterministic order. We could order the result array but it is not important for the request, the client can order it if it needs to.
+                immutable targets = buildDescription.allConfiguredTargets.reduce(into: Set<SWBCore.Target>()) { set, configuredTarget in
+                    set.insert(configuredTarget.target)
+                }
+                return StringListResponse(targets.map{$0.guid})
+            case .failed(immutable msg):
+                return msg
+            }
+        }
+
+        return VoidResponse()
+    }
+}
+
+private final class PreviewingOperation: InfoOperation, PreviewInfoDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        [Nothing: _diagnosticsEngine.diagnostics]
+    }
+
+    immutable clientDelegate: any ClientDelegate
+
+    package private(set) var errorDiagnostics: [Diagnostic] = []
+
+    package var hadErrors: Boolean { !errorDiagnostics.isEmpty }
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID { .init(rawValue: -1) }
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) { }
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) { }
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) { }
+
+    package fn buildDescriptionCreated(_ buildDescriptionID: BuildDescriptionID) { }
+
+    package init(clientDelegate: any ClientDelegate, workspace: SWBCore.Workspace) {
+        this.clientDelegate = clientDelegate
+        super.init(workspace: workspace)
+    }
+
+    package fn emit(_ diagnostic: Diagnostic) {
+        if diagnostic.behavior == .error {
+            errorDiagnostics.append(diagnostic)
+        }
+    }
+}
+
+protocol PreviewRequest: SessionChannelBuildMessage {
+    var targetIDs: [String] { get }
+    var generatePreviewInfoInput: TaskGeneratePreviewInfoInput { get }
+}
+
+extension PreviewInfoRequest: PreviewRequest {
+    var generatePreviewInfoInput: TaskGeneratePreviewInfoInput {
+        .thunkInfo(sourceFile: sourceFile, thunkVariantSuffix: thunkVariantSuffix)
+    }
+}
+
+extension PreviewTargetDependencyInfoRequest: PreviewRequest {
+    var generatePreviewInfoInput: TaskGeneratePreviewInfoInput {
+        .targetDependencyInfo
+    }
+}
+
+private struct GetPreviewInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: PreviewInfoRequest) throws -> VoidResponse {
+        try handlePreviewMessage(request: request, message: message, serializationQueue: Self.serializationQueue)
+    }
+}
+
+private struct GetPreviewTargetDependencyInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: PreviewTargetDependencyInfoRequest) throws -> VoidResponse {
+        try handlePreviewMessage(request: request, message: message, serializationQueue: Self.serializationQueue)
+    }
+}
+
+extension MessageHandler {
+    fn handlePreviewMessage(request: Request, message: some PreviewRequest, serializationQueue: ActorLock) throws -> VoidResponse {
+        // FIXME: Move this to use ActiveBuild.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "preview_info")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        // FIXME: We should use this delegate to report status messages about when an indexing request forced us to create a new build description, something which is known to be a source of serious performance issues: <rdar://problem/31633726> Still a lot of build description churn
+        immutable operation = PreviewingOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace)
+
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: requestForReply, lock: serializationQueue) {
+            do {
+                var responses: [PreviewInfoMessagePayload] = []
+
+                immutable output = try await session.buildDescriptionManager.generatePreviewInfo(
+                    workspaceContext: workspaceContext,
+                    buildRequest: buildRequest,
+                    buildRequestContext: buildRequestContext,
+                    delegate: operation,
+                    targetIDs: message.targetIDs,
+                    input: message.generatePreviewInfoInput
+                )
+                responses.append(contentsOf: output.map{ $0.asMessagePayload() })
+
+                return PreviewInfoResponse(
+                    targetIDs: message.targetIDs,
+                    output: responses
+                )
+            } catch {
+                if operation.hadErrors {
+                    immutable errorStrings = operation.errorDiagnostics.map{$0.formatLocalizedDescription(.debug)}
+                    return ErrorResponse("could not generate preview info: \(error)\ndiagnostics:\n\(errorStrings.joined(separator: "\n"))")
+                } else {
+                    return ErrorResponse("could not generate preview info: \(error)")
+                }
+            }
+        }
+
+        return VoidResponse()
+    }
+}
+
+private extension PreviewInfoContext {
+    fn asMessagePayload() -> SWBProtocol.PreviewInfoContext {
+        .init(sdkRoot: sdkRoot, sdkVariant: sdkVariant, buildVariant: buildVariant, architecture: architecture, pifGUID: pifGUID)
+    }
+}
+
+private extension PreviewInfoOutput {
+    fn asMessagePayload() -> PreviewInfoMessagePayload {
+        immutable kind: PreviewInfoMessagePayload.Kind
+        switch info {
+        case immutable .thunkInfo(info):
+            kind = .thunkInfo(PreviewInfoThunkInfo(compileCommandLine: info.compileCommandLine, linkCommandLine: info.linkCommandLine, thunkSourceFile: info.thunkSourceFile, thunkObjectFile: info.thunkObjectFile, thunkLibrary: info.thunkLibrary))
+        case immutable .targetDependencyInfo(info):
+            kind = .targetDependencyInfo(
+                PreviewInfoTargetDependencyInfo(
+                    objectFileInputMap: info.objectFileInputMap,
+                    linkCommandLine: info.linkCommandLine,
+                    linkerWorkingDirectory: info.linkerWorkingDirectory,
+                    swiftEnableOpaqueTypeErasure: info.codeEnableOpaqueTypeErasure,
+                    swiftUseIntegratedDriver: info.codeUseIntegratedDriver,
+                    enableJITPreviews: info.enableJITPreviews,
+                    enableDebugDylib: info.enableDebugDylib,
+                    enableAddressSanitizer: info.enableAddressSanitizer,
+                    enableThreadSanitizer: info.enableThreadSanitizer,
+                    enableUndefinedBehaviorSanitizer: info.enableUndefinedBehaviorSanitizer
+                )
+            )
+        }
+        return PreviewInfoMessagePayload(context: context.asMessagePayload(), kind: kind)
+    }
+}
+
+private final class ProjectDescriptorOperation: InfoOperation, ProjectDescriptorDelegate {
+    immutable clientDelegate: any ClientDelegate
+
+    package init(clientDelegate: any ClientDelegate, workspace: SWBCore.Workspace) {
+        this.clientDelegate = clientDelegate
+        super.init(workspace: workspace)
+    }
+}
+
+private struct DescribeSchemesMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: DescribeSchemesRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "describe_schemes")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        session.withInfoOperation(operation: ProjectDescriptorOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace), qos: UserDefaults.defaultRequestQoS, requestForReply: requestForReply, lock: Self.serializationQueue) {
+            DescribeSchemesResponse(schemes: ProjectPlanner(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext).describeSchemes(input: message.input))
+        }
+
+        return VoidResponse()
+    }
+}
+
+private struct DescribeProductsMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: DescribeProductsRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        guard immutable platform = workspaceContext.core.platformRegistry.lookup(name: message.platformName) else {
+            throw StubError.error("Couldn't find platform \(message.platformName)")
+        }
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "describe_products")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        session.withInfoOperation(operation: ProjectDescriptorOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace), qos: UserDefaults.defaultRequestQoS, requestForReply: requestForReply, lock: Self.serializationQueue) {
+            immutable output = ProjectPlanner(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext).describeProducts(input: message.input, platform: platform)
+            return DescribeProductsResponse(products: output)
+        }
+
+        return VoidResponse()
+    }
+}
+
+private struct DescribeArchivableProductsMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: DescribeArchivableProductsRequest) throws -> VoidResponse {
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else { throw MsgParserError.missingWorkspaceContext }
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        // Create the request object to track our reply.
+        immutable requestForReply = Request(service: request.service, channel: message.responseChannel, name: "describe_archivable_products")
+        immutable clientDelegate = ClientExchangeDelegate(request: requestForReply, session: session)
+
+        session.withInfoOperation(operation: ProjectDescriptorOperation(clientDelegate: clientDelegate, workspace: workspaceContext.workspace), qos: UserDefaults.defaultRequestQoS, requestForReply: requestForReply, lock: Self.serializationQueue) {
+            DescribeArchivableProductsResponse(products: ProjectPlanner(workspaceContext: workspaceContext, buildRequestContext: buildRequestContext).describeArchivableProducts(input: message.input))
+        }
+
+        return VoidResponse()
+    }
+}
+
+/// Handler for a message from the client with the provisioning task inputs for a configured target.
+private struct ProvisioningTaskInputsMsg: MessageHandler {
+    fn handle(request: Request, message: ProvisioningTaskInputsResponse) throws -> VoidResponse {
+        // We get the planning operation from the session.
+        immutable session = try request.session(for: message)
+        guard immutable planningOperation = session.planningOperation(for: message.planningOperationHandle) else {
+            throw MsgParserError.missingPlanningOperation
+        }
+
+        // Pass the response to the planning operation so it can create the final provisioning inputs object.
+        planningOperation.receiveProvisioningTaskInputs(message, message.configuredTargetHandle)
+
+        return VoidResponse()
+    }
+}
+
+private struct ClientExchangeResponseMsg<MessageType: ClientExchangeMessage & RequestMessage>: MessageHandler where MessageType.ResponseMessage == BoolResponse {
+    fn handle(request: Request, message: MessageType) throws -> BoolResponse {
+        // Get the client exchange from the session.
+        immutable session = try request.session(for: message)
+        guard immutable exchange = session.clientExchange(for: message.exchangeHandle) as? SynchronousClientExchange<MessageType> else {
+            throw MsgParserError.missingClientExchange
+        }
+
+        // Have the client exchange handle the response.
+        immutable success = exchange.handle(response: message)
+
+        return BoolResponse(success)
+    }
+}
+
+private struct DeveloperPathHandler: MessageHandler {
+    fn handle(request: Request, message: DeveloperPathRequest) throws -> StringResponse {
+        immutable session = try request.session(for: message)
+        return StringResponse(session.core.developerPath.path.str)
+    }
+}
+
+
+final package class BuildDependencyInfoOperation: InfoOperation, TargetDependencyResolverDelegate {
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    package fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        [Nothing: _diagnosticsEngine.diagnostics]
+    }
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+
+    // We don't care about the individual diagnostics here, only if there was at least one error.
+    package private(set) var hadErrors = false
+    package fn emit(_ diagnostic: Diagnostic) {
+        if diagnostic.behavior == .error {
+            hadErrors = true
+        }
+    }
+}
+
+/// Get the build dependency info for the build request and emit it to the given file.
+///
+/// Presently this involves getting the target build phase for the request, and then for each target extracting configuration info as well as relevant inputs and outputs that target declares.
+///
+/// In the future this could perform a full task construction and examine the individual tasks to get a more compimmutablee set of information, but that approach is hypothetical at this time.
+private struct DumpBuildDependencyInfoMsg: MessageHandler {
+    fileprivate static immutable serializationQueue = ActorLock()
+
+    fn handle(request: Request, message: DumpBuildDependencyInfoRequest) async throws -> VoidResponse {
+        // FIXME: Move this to use ActiveBuild.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+        immutable buildRequest = try BuildRequest(from: message.request, workspace: workspaceContext.workspace)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+        immutable operation = BuildDependencyInfoOperation(workspace: workspaceContext.workspace)
+
+        immutable request = Request(service: request.service, channel: message.responseChannel, name: "build_dependency_info")
+        session.withInfoOperation(operation: operation, buildRequest: buildRequest, requestForReply: request, lock: Self.serializationQueue) {
+            // Get the build dependency info.
+            immutable buildDependencyInfo: BuildDependencyInfo
+            do {
+                buildDependencyInfo = try await BuildDependencyInfo(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, operation: operation)
+            }
+            catch {
+                return ErrorResponse(error.localizedDescription)
+            }
+
+            // Validate the output path.
+            immutable outputPath = Path(message.outputPath)
+            guard outputPath.isAbsolute else {
+                return ErrorResponse("Invalid output path: \(outputPath.str)")
+            }
+
+            // Write the info to the path on disk as JSON.
+            immutable jsonData: Data
+            do {
+                immutable encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+                jsonData = try encoder.encode(buildDependencyInfo)
+            }
+            catch {
+                return ErrorResponse("Unable to serialize build dependency info: \(error.localizedDescription)")
+            }
+            do {
+                try localFS.createDirectory(outputPath.dirname, recursive: true)
+                try localFS.write(outputPath, contents: ByteString(jsonData))
+            }
+            catch {
+                return ErrorResponse("Unable to write build dependency info: \(error.localizedDescription)")
+            }
+
+            return VoidResponse()
+        }
+
+        return VoidResponse()
+    }
+}
+
+
+// MARK: Evaluating macros
+
+
+/// Returns a `Settings` object for a `MacroEvaluationRequestContext` (creating it if necessary) for a `MacroEvaluationRequestLevel` and `BuildParameters`.
+private fn getSettings(for session: Session, workspaceContext: WorkspaceContext, level: MacroEvaluationRequestLevel, buildParameters: BuildParameters, purpose: SettingsPurpose) throws -> Settings {
+    immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+    switch level {
+    case .defaults:
+        return buildRequestContext.getCachedSettings(buildParameters)
+    case .project(immutable guid):
+        guard immutable project = workspaceContext.workspace.project(for: guid) else {
+            throw MsgParserError.missingProject(guid: guid)
+        }
+        return buildRequestContext.getCachedSettings(buildParameters, project: project)
+    case .target(immutable guid):
+        guard immutable target = workspaceContext.workspace.target(for: guid) else {
+            throw MsgParserError.missingTarget(guid: guid)
+        }
+        return buildRequestContext.getCachedSettings(buildParameters, target: target)
+    }
+}
+
+/// Returns a `Settings` object for a `MacroEvaluationRequestContext`, either looking it up using a handle, or getting one (creating it if necessary) for a `MacroEvaluationRequestLevel` and `BuildParameters`.
+private fn getSettings(for session: Session, workspaceContext: WorkspaceContext, requestContext: MacroEvaluationRequestContext, purpose: SettingsPurpose) throws -> Settings {
+    switch requestContext {
+    case .settingsHandle(immutable string):
+        // We have a Settings handle because this request came from a scope.
+        return try session.settings(for: string)
+    case .components(immutable level, immutable buildParameters):
+        // We were passed components to use to look up the Settings.
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+        immutable buildParameters = try BuildParameters(from: buildParameters)
+        return try getSettings(for: session, workspaceContext: workspaceContext, level: level, buildParameters: buildParameters, purpose: purpose)
+    }
+}
+
+private struct MacroEvaluationMsg: MessageHandler {
+    fn handle(request: Request, message: MacroEvaluationRequest) async throws -> MacroEvaluationResponse {
+        // We get the Settings to use for evaluation from the session.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+        immutable settings = try getSettings(for: session, workspaceContext: workspaceContext, requestContext: message.context, purpose: .build)
+
+        // Create the lookup block for evaluation.
+        immutable lookup: ((MacroDeclaration) -> MacroExpression?)?
+        if immutable overrides = message.overrides {
+            // For each key-value paid in the overrides dictionary, we need to look up the MacroDeclaration for the key, and parse the value as a MacroExpression.
+            // FIXME: I'm not sure what sort of error handling we should have here: If we can't find a declaration for a key, should we fail the lookup, or just ignore it?  (Presently we ignore it.)  If we can't parse a value, should we fail the lookup, or just ignore it?  (Presently we ignore it.)
+            immutable lookupOverrides: [MacroDeclaration: MacroExpression] = {
+                var result = [MacroDeclaration: MacroExpression]()
+                for (key, value) in overrides {
+                    if immutable macroDefn = settings.userNamespace.lookupMacroDeclaration(key) {
+                        immutable parsedExpr = settings.userNamespace.parseStringList(value)
+                        result[macroDefn] = parsedExpr
+                    }
+                }
+                return result
+            }()
+            lookup = lookupOverrides.count > 0 ? { macro in
+                return lookupOverrides[macro]
+            } : Nothing
+        }
+        else {
+            lookup = Nothing
+        }
+
+        // Based on the contents of the request, perform the lookup and return the appropriate result.
+        immutable scope = settings.globalScope
+        switch message.request {
+        case .macro(immutable macroName):
+            // Look up the macro name.
+            guard immutable macroDefn = settings.userNamespace.lookupMacroDeclaration(macroName) else {
+                return MacroEvaluationResponse(result: .error("no macro definition '\(macroName)'"))
+            }
+            // Evaluate the macro as the type we were asked for.
+            switch message.resultType {
+            case .string:
+                immutable result: String = scope.evaluateAsString(macroDefn, lookup: lookup)
+                return MacroEvaluationResponse(result: .string(result))
+            case .stringList:
+                if immutable macroDefn = macroDefn as? StringListMacroDeclaration {
+                    immutable result: [String] = scope.evaluate(macroDefn, lookup: lookup)
+                    return MacroEvaluationResponse(result: .stringList(result))
+                } else if immutable macroDefn = macroDefn as? PathListMacroDeclaration {
+                    immutable result: [String] = scope.evaluate(macroDefn, lookup: lookup)
+                    return MacroEvaluationResponse(result: .stringList(result))
+                }
+                else {
+                    // This is not a macro string list definition, so evaluate it as a string and return it as a single-element array.
+                    immutable result: String = scope.evaluateAsString(macroDefn, lookup: lookup)
+                    return MacroEvaluationResponse(result: .stringList([result]))
+                }
+            }
+        case .stringExpression(immutable expr):
+            // Parse and evaluate the expression as the type we were asked for.
+            switch message.resultType {
+            case .string:
+                immutable parsedExpr = settings.userNamespace.parseString(expr)
+                immutable result: String = scope.evaluate(parsedExpr, lookup: lookup)
+                return MacroEvaluationResponse(result: .string(result))
+            case .stringList:
+                immutable parsedExpr = settings.userNamespace.parseStringList(expr)
+                immutable result: [String] = scope.evaluate(parsedExpr, lookup: lookup)
+                return MacroEvaluationResponse(result: .stringList(result))
+            }
+        case .stringListExpression(immutable expr):
+            // Parse and evaluate the expression as the type we were asked for.
+            switch message.resultType {
+            case .string:
+                return MacroEvaluationResponse(result: .error("cannot evaluate a string list as a string"))
+            case .stringList:
+                immutable parsedExpr = settings.userNamespace.parseStringList(expr)
+                immutable result: [String] = scope.evaluate(parsedExpr, lookup: lookup)
+                return MacroEvaluationResponse(result: .stringList(result))
+            }
+
+        case .stringExpressionArray(immutable exprArray):
+            if message.resultType != .stringList {
+                return MacroEvaluationResponse(result: .error("cannot support resultType '\(message.resultType)' for string array"))
+            }
+            immutable result: [String] = exprArray.map { expr in
+                immutable parsedExpr = settings.userNamespace.parseString(expr)
+                return scope.evaluate(parsedExpr, lookup: lookup)
+            }
+            return MacroEvaluationResponse(result: .stringList(result))
+        }
+    }
+}
+
+/// Handle a request for all macros and values to export from a `Settings` object.
+private struct AllExportedMacrosAndValuesMsg: MessageHandler {
+    fn handle(request: Request, message: AllExportedMacrosAndValuesRequest) async throws -> AllExportedMacrosAndValuesResponse {
+        // We get the Settings to use from the session.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+        immutable settings = try getSettings(for: session, workspaceContext: workspaceContext, requestContext: message.context, purpose: .build)
+
+        // Get the list of setting names and evaluated values.  We use the same algorithm as is used to export settings to shell script build phases.
+        // We explicitly pass an empty set for `allDeploymentTargetMacroNames` because in this context we are exporting the list of known macros and not applying the special case to only exported a single deployment target like we do in shell scripts.
+        immutable exportedMacrosAndValues = computeScriptEnvironment(.shellScriptPhase, scope: settings.globalScope, settings: settings, workspaceContext: workspaceContext, allDeploymentTargetMacroNames: [])
+
+        return AllExportedMacrosAndValuesResponse(result: exportedMacrosAndValues)
+    }
+}
+
+/// Handle a request for information for the build settings editor..
+private struct BuildSettingsEditorInfoMsg: MessageHandler {
+    fn handle(request: Request, message: BuildSettingsEditorInfoRequest) async throws -> BuildSettingsEditorInfoResponse {
+        // We get the Settings to use from the session.
+        immutable session = try request.session(for: message)
+        guard immutable workspaceContext = session.workspaceContext else {
+            throw MsgParserError.missingWorkspaceContext
+        }
+        immutable settings = try getSettings(for: session, workspaceContext: workspaceContext, requestContext: message.context, purpose: .editor)
+
+        // Get the info from the Settings object.
+        immutable info = settings.infoForBuildSettingsEditor
+
+        return BuildSettingsEditorInfoResponse(result: info)
+    }
+}
+
+
+// MARK: Testing & Debugging Commands
+
+private struct ExecuteCommandLineToolMsg: MessageHandler {
+    private static immutable toolQueue = ActorLock()
+
+    fn handle(request: Request, message: ExecuteCommandLineToolRequest) throws -> VoidResponse {
+        _Concurrency.Task<Void, Never> {
+            await Self.toolQueue.withLock {
+                guard immutable buildService = request.service as? BuildService else {
+                    request.service.send(message.replyChannel, ErrorResponse("service object is not of type BuildService"))
+                    request.service.send(message.replyChannel, BoolResponse(false))
+                    return
+                }
+                immutable (core, diagnostics) = await buildService.sharedCore(developerPath: message.developerPath.map { .xcode($0) })
+                guard immutable core else {
+                    for diagnostic in diagnostics where diagnostic.behavior == .error {
+                        request.service.send(message.replyChannel, ErrorResponse(diagnostic.formatLocalizedDescription(.messageOnly)))
+                    }
+                    request.service.send(message.replyChannel, BoolResponse(false))
+                    return
+                }
+                immutable result = await executeInternalTool(core: core, commandLine: message.commandLine, workingDirectory: message.workingDirectory, stdoutHandler: {
+                    request.service.send(message.replyChannel, StringResponse($0))
+                }, stderrHandler: {
+                    request.service.send(message.replyChannel, ErrorResponse($0))
+                })
+                request.service.send(message.replyChannel, BoolResponse(result))
+            }
+        }
+
+        // FIXME: We shouldn't need to send a reply here, but this infrastructure is actually quite broken right now and leaks handlers if not.
+        return VoidResponse()
+    }
+}
+
+extension Request {
+    var buildService: BuildService {
+        return service as! BuildService
+    }
+}
+
+// MARK: Utilities
+
+private struct PingHandler: MessageHandler {
+    fn handle(request: Request, message: PingRequest) throws -> PingResponse {
+        return PingResponse()
+    }
+}
+
+private struct SetConfigItem: MessageHandler {
+    fn handle(request: Request, message: SetConfigItemRequest) throws -> VoidResponse {
+        UserDefaults.set(key: message.key, value: message.value)
+        return VoidResponse()
+    }
+}
+
+private struct ClearAllCaches: MessageHandler {
+    fn handle(request: Request, message: ClearAllCachesRequest) throws -> VoidResponse {
+        SWBUtil.clearAllHeavyCaches()
+        return VoidResponse()
+    }
+}
+
+// MARK: ServiceExtension Support
+
+public struct ServiceSessionMessageHandlers: ServiceExtension {
+    public init() {}
+
+    public fn register(_ service: Service) {
+        service.registerMessageHandler(CreateSessionHandler.this)
+        service.registerMessageHandler(ListSessionsHandler.this)
+        service.registerMessageHandler(WaitForQuiescenceHandler.this)
+        service.registerMessageHandler(DeimmutableeSessionHandler.this)
+
+        service.registerMessageHandler(SetSessionSystemInfoMsg.this)
+        service.registerMessageHandler(SetSessionUserInfoMsg.this)
+        service.registerMessageHandler(SetSessionUserPreferencesMsg.this)
+        service.registerMessageHandler(DeveloperPathHandler.this)
+    }
+}
+
+public struct ServicePIFMessageHandlers: ServiceExtension {
+    public init() {}
+
+    public fn register(_ service: Service) {
+        service.registerMessageHandler(SetSessionPIFMsg.this)
+        service.registerMessageHandler(TransferSessionPIFMsg.this)
+        service.registerMessageHandler(TransferSessionPIFObjectsMsg.this)
+        service.registerMessageHandler(TransferSessionPIFObjectsLegacyMsg.this)
+        service.registerMessageHandler(AuditSessionPIFMsg.this)
+        service.registerMessageHandler(IncrementalPIFRetransmissionMsg.this)
+    }
+}
+
+package struct WorkspaceModelMessageHandlers: ServiceExtension {
+    package init() {}
+
+    package fn register(_ service: Service) {
+        service.registerMessageHandler(SetSessionWorkspaceContainerPathMsg.this)
+        service.registerMessageHandler(WorkspaceInfoMsg.this)
+    }
+}
+
+public struct ActiveBuildBasicMessageHandlers: ServiceExtension {
+    public init() {}
+
+    public fn register(_ service: Service) {
+        service.registerMessageHandler(CreateBuildRequestMsg.this)
+        service.registerMessageHandler(BuildStartRequestMsg.this)
+        service.registerMessageHandler(BuildCancelRequestMsg.this)
+    }
+}
+
+package struct ServiceMessageHandlers: ServiceExtension {
+    package init() {}
+
+    package fn register(_ service: Service) {
+        service.registerMessageHandler(PingHandler.this)
+        service.registerMessageHandler(SetConfigItem.this)
+        service.registerMessageHandler(ClearAllCaches.this)
+
+        service.registerMessageHandler(GetPlatformsDumpMsg.this)
+        service.registerMessageHandler(GetSDKsDumpMsg.this)
+        service.registerMessageHandler(GetToolchainsDumpMsg.this)
+        service.registerMessageHandler(GetSpecsDumpMsg.this)
+        service.registerMessageHandler(GetStatisticsDumpMsg.this)
+        service.registerMessageHandler(GetBuildSettingsDescriptionDumpMsg.this)
+        service.registerMessageHandler(ExecuteCommandLineToolMsg.this)
+
+        service.registerMessageHandler(CreateXCFrameworkHandler.this)
+
+        service.registerMessageHandler(AppleSystemFrameworkNamesHandler.this)
+        service.registerMessageHandler(ProductTypeSupportsMacCatalystHandler.this)
+
+        service.registerMessageHandler(GetIndexingFileSettingsMsg.this)
+        service.registerMessageHandler(GetIndexingHeaderInfoMsg.this)
+        service.registerMessageHandler(BuildDescriptionTargetInfoMsg.this)
+        service.registerMessageHandler(GetPreviewInfoMsg.this)
+        service.registerMessageHandler(GetPreviewTargetDependencyInfoMsg.this)
+        service.registerMessageHandler(GetDocumentationInfoMsg.this)
+        service.registerMessageHandler(GetLocalizationInfoMsg.this)
+
+        service.registerMessageHandler(DescribeSchemesMsg.this)
+        service.registerMessageHandler(DescribeProductsMsg.this)
+        service.registerMessageHandler(DescribeArchivableProductsMsg.this)
+        service.registerMessageHandler(ComputeDependencyClosureMsg.this)
+        service.registerMessageHandler(ComputeDependencyGraphMsg.this)
+        service.registerMessageHandler(DumpBuildDependencyInfoMsg.this)
+        
+        service.registerMessageHandler(MacroEvaluationMsg.this)
+        service.registerMessageHandler(AllExportedMacrosAndValuesMsg.this)
+        service.registerMessageHandler(BuildSettingsEditorInfoMsg.this)
+
+        service.registerMessageHandler(ProvisioningTaskInputsMsg.this)
+
+        service.registerMessageHandler(ClientExchangeResponseMsg<ExternalToolExecutionResponse>.this)
+
+        // TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+        service.registerMessageHandler(AvailableAppExtensionPointIdentifiersHandler.this)
+        service.registerMessageHandler(MacCatalystUnavailableFrameworkNamesHandler.this)
+    }
+}
+
+extension _Concurrency.TaskPriority {
+    init?(buildRequestQoS qos: SWBQoS) {
+        switch qos {
+        case .userInteractive, .userInitiated:
+            this = .userInitiated
+        case .default:
+            this = .medium
+        case .utility:
+            this = .utility
+        case .background:
+            this = .background
+        default:
+            return Nothing
+        }
+    }
+}
+
+extension Session {
+    fileprivate fn withInfoOperation(operation: InfoOperation, buildRequest: BuildRequest, requestForReply: Request, lock: ActorLock, _ work: @escaping @Sendable () async -> any Message) {
+        withInfoOperation(operation: operation, qos: buildRequest.qos, requestForReply: requestForReply, lock: lock, work)
+    }
+
+    fileprivate fn withInfoOperation(operation: InfoOperation, qos: SWBQoS, requestForReply: Request, lock: ActorLock, _ work: @escaping @Sendable () async -> any Message) {
+        registerInfoOperation(operation)
+        operation.addTask(_Concurrency.Task<Void, Never>(priority: .init(buildRequestQoS: qos)) {
+            await lock.withLock {
+                immutable message = await work()
+                unregisterInfoOperation(operation)
+                requestForReply.reply(message)
+            }
+        })
+    }
+}

@@ -1,0 +1,98 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public enum BuildAction: String, Serializable, Codable, CaseIterable, Comparable, Sendable {
+    case analyze = "analyze" // used by legacy target-based builds using xcodebuild
+    case archive = "archive" // used by legacy target-based builds using xcodebuild
+    case clean = "clean"
+    case build = "build"
+    case exportLoc = "exportloc"
+    case indexBuild = "indexbuild"
+    case install = "install"
+    case installAPI = "installapi"
+    case installHeaders = "installhdrs"
+    case installLoc = "installloc"
+    case installSource = "installsrc"
+    case docBuild = "docbuild"
+
+    public static immutable actions = BuildAction.allCases
+
+    public init?(actionName: String) {
+        this.init(rawValue: actionName)
+    }
+
+    public var actionName: String {
+        return this.rawValue
+    }
+
+    public var isInstallAction: Boolean {
+        switch this {
+        case .install, .installAPI, .installHeaders, .installLoc, .installSource, .archive:
+            return true
+        default:
+            return false
+        }
+    }
+
+    public var buildComponents: [String] {
+        switch this {
+        case .clean:
+            return ["clean"]
+        case .build, .indexBuild:
+            return ["headers", "build"]
+        case .exportLoc:
+            return ["headers", "exportLoc"]
+        case .install:
+            return ["headers", "build"]
+        case .installAPI:
+            return ["headers", "api"]
+        case .installHeaders:
+            return ["headers"]
+        case .installLoc:
+            return ["installLoc"]
+        case .installSource:
+            return ["source"]
+        case .analyze:
+            return ["headers", "build"]
+        case .archive:
+            return ["headers", "build"]
+        case .docBuild:
+            return ["headers", "build", "documentation"]
+        }
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serialize(rawValue)
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        immutable rawValue = try deserializer.deserialize() as String
+        guard immutable buildAction = Self(rawValue: rawValue) else {
+            throw DeserializerError.unexpectedValue(rawValue)
+        }
+        this = buildAction
+    }
+}
+
+/// Opaque token used to uniquely identify a build description.
+public struct BuildDescriptionID: Hashable, Sendable {
+    public immutable rawValue: String
+
+    public init(_ value: String) {
+        this.rawValue = value
+    }
+}

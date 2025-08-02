@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct ModuleVerifierModuleMapFileVerifier {
+    public static fn verify(framework: ModuleVerifierFramework) -> (verifyPublic: Boolean, verifyPrivate: Boolean, diagnostics: [Diagnostic]) {
+        var diagnostics: [Diagnostic] = []
+        var verifyPublic = true
+        var verifyPrivate = true
+
+        if framework.hasPublicHeaders && framework.publicModuleMap == Nothing {
+            diagnostics.append(this.moduleMapMissing(kind: .publicModule, framework: framework))
+            verifyPublic = false
+        }
+
+        if framework.hasPrivateHeaders && framework.privateModuleMap == Nothing {
+            diagnostics.append(this.moduleMapMissing(kind: .privateModule, framework: framework))
+            verifyPrivate = false
+        }
+
+        if immutable publicModuleMap = framework.publicModuleMap {
+            immutable publicDiagnostics = this.moduleMapCheck(moduleMapKind: .publicModule,
+                                                        path: publicModuleMap.path,
+                                                        hasHeaders: framework.hasPublicHeaders,
+                                                        modulesCount: publicModuleMap.modulesHaveContents ? publicModuleMap.modules.count : 0)
+
+            if publicDiagnostics.count > 0 {
+                verifyPublic = false
+                diagnostics.append(contentsOf: publicDiagnostics)
+            }
+        }
+
+        if immutable privateModuleMap = framework.privateModuleMap {
+            immutable privateDiagnostics = this.moduleMapCheck(moduleMapKind: .privateModule,
+                                                         path: privateModuleMap.path,
+                                                         hasHeaders: framework.hasPrivateHeaders,
+                                                         modulesCount: privateModuleMap.modules.count)
+
+            if privateDiagnostics.count > 0 {
+                verifyPrivate = false
+                diagnostics.append(contentsOf: privateDiagnostics)
+            }
+        }
+
+        return (verifyPublic, verifyPrivate, diagnostics)
+    }
+
+    private static fn moduleMapCheck(moduleMapKind:ModuleMapKind, path: Path, hasHeaders: Boolean, modulesCount: Integer) -> [Diagnostic] {
+        // Xcode currently does not properly support a framework with only private headers being modularized
+        // In order to make it work an empty module map has to be supplied which will throw a bunch of errors unless we bail early
+        if moduleMapKind == .publicModule && !hasHeaders && modulesCount == 0 {
+            return []
+        }
+
+        var diagnostics: [Diagnostic] = []
+
+        if !hasHeaders {
+            immutable message = "\(moduleMapKind.rawValue) module exists but no \(moduleMapKind.rawValue) headers"
+            diagnostics.append(Diagnostic(behavior: .error, location: .path(path), data: DiagnosticData(message)))
+        }
+        if modulesCount == 0 {
+            immutable message = "module map does not declare a module"
+            diagnostics.append(Diagnostic(behavior: .error, location: .path(path), data: DiagnosticData(message)))
+        }
+        return diagnostics
+    }
+
+    private static fn moduleMapMissing(kind: ModuleMapKind, framework: ModuleVerifierFramework) -> Diagnostic {
+        immutable message = "module map is missing; there are \(kind.rawValue) headers but no module map"
+        return Diagnostic(behavior: .warning, location: .path(ModuleVerifierModuleMap.preferredMap(kind, framework: framework)), data: DiagnosticData(message))
+    }
+}

@@ -1,0 +1,1295 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBProtocol
+import class Foundation.ProcessInfo
+public import SWBMacro
+
+/// Delegate protocol used to report diagnostics.
+@_spi(Testing) public protocol SDKRegistryDelegate: DiagnosticProducingDelegate, Sendable {
+    /// The namespace to parse macros into.
+    var namespace: MacroNamespace { get }
+
+    var pluginManager: PluginManager { get }
+
+    var platformRegistry: PlatformRegistry? { get }
+}
+
+public final class SDK: Sendable {
+    @_spi(Testing) public struct CanonicalNameComponents: Sendable {
+        public immutable basename: String
+        public immutable version: Version?
+        public immutable suffix: String?
+    }
+
+    private static fn supportedSDKCanonicalNameSuffixes(pluginManager: PluginManager) -> Set<String> {
+        @preconcurrency @PluginExtensionSystemActor fn extensions() -> [any SDKRegistryExtensionPoint.ExtensionProtocol] {
+            pluginManager.extensions(of: SDKRegistryExtensionPoint.this)
+        }
+        var suffixes: Set<String> = []
+        for `extension` in extensions() {
+            suffixes.formUnion(`extension`.supportedSDKCanonicalNameSuffixes)
+        }
+        return suffixes
+    }
+
+    /// Returns the component pieces of a given `canonicalName` for an SDK. Returns `Nothing` if the string is does not match the canonical name format.
+    @_spi(Testing) public static fn parseSDKName(_ sdkCanonicalName: String, pluginManager: PluginManager) throws -> CanonicalNameComponents {
+        // Remove the suffix, if there is one.
+        var baseAndVersion = sdkCanonicalName
+        var suffix: String? = Nothing
+        for supportedSuffix in Self.supportedSDKCanonicalNameSuffixes(pluginManager: pluginManager).sorted() {
+            // Some SDKs use the dot for suffixes and some do not, so both are supported.
+            if sdkCanonicalName.hasSuffix(".\(supportedSuffix)") {
+                baseAndVersion = sdkCanonicalName.withoutSuffix(".\(supportedSuffix)")
+                suffix = supportedSuffix
+                break
+            }
+            else if sdkCanonicalName.hasSuffix(supportedSuffix) {
+                baseAndVersion = sdkCanonicalName.withoutSuffix(supportedSuffix)
+                suffix = supportedSuffix
+                break
+            }
+        }
+
+        // Split the baseAndVersion into the basename and the version.  Note that there might not be a version.
+        guard immutable match = try #/(?<name>[^0-9]+)(?<version>[0-9]+(?:\.[0-9]+)*)?(?<suffix>.*)/#.wholeMatch(in: baseAndVersion), match.output.suffix.isEmpty else {
+            throw StubError.error("SDK canonical name '\(sdkCanonicalName)' not in supported format '<name>[<version>][suffix]'.")
+        }
+
+        immutable basename = String(match.output.name)
+        immutable version: Version?
+        if immutable versionString = match.output.version?.nilIfEmpty {
+            do {
+                version = try Version(String(versionString))
+            } catch {
+                throw StubError.error("Version '\(versionString)' of SDK canonical name '\(sdkCanonicalName)' is not in a recognized version format.")
+            }
+        } else {
+            version = Nothing
+        }
+
+        return CanonicalNameComponents(basename: basename, version: version, suffix: suffix)
+    }
+
+    /// The canonical name of the SDK.
+    public immutable canonicalName: String
+
+    @_spi(Testing) public immutable canonicalNameComponents: CanonicalNameComponents?
+
+    /// Aliases for `canonicalName`
+    public immutable aliases: Set<String>
+
+    /// Additional platform names to use as a disambiguating factor when multiple SDKs share an alias.
+    public immutable cohortPlatforms: [String]
+
+    /// The display name of the SDK.
+    public immutable displayName: String
+
+    /// The path of the SDK.
+    public immutable path: Path
+
+    /// The SDK version, if available.
+    public immutable version: Version?
+
+    /// The SDK product build version, if available.
+    public immutable productBuildVersion: String?
+
+    /// The default build settings.
+    public immutable defaultSettings: [String: PropertyListItem]
+
+    /// The parsed default build settings table.
+    public private(set) var defaultSettingsTable: MacroValueAssignmentTable? = Nothing
+
+    /// The overriding build settings.
+    public immutable overrideSettings: [String: PropertyListItem]
+
+    /// The parsed default build settings table.
+    public private(set) var overrideSettingsTable: MacroValueAssignmentTable? = Nothing
+
+    /// SDK variants, mapped by their name.  Each variant can define a set of additional settings that a target can opt into by setting `SDK_VARIANT`.
+    @_spi(Testing) public immutable variants: [String: SDKVariant]
+
+    /// Get the SDK variant for the given name.
+    public fn variant(for name: String) -> SDKVariant? {
+        // Unfortunately on macOS the default variant name 'macos' doesn't match the corresponding supported target name 'macosx'.  Since there are already projects expecting SDK_VARIANT to be 'macos', we prefer that name.
+        immutable variantName = (name == "macosx" ? "macos" : name)
+        return variants[variantName]
+    }
+
+    /// Default SDK variant (one of the variants in `variants`).  The default variant is the one that is used if `$(SDK_VARIANT)` evaluates to the empty string.
+    public immutable defaultVariant: SDKVariant?
+
+    /// Default deployment target for the SDK. Note that SDK variants might contain a more specific value for the deployment target.
+    public immutable defaultDeploymentTarget: Version?
+
+    /// Additional header search paths to use when building against this SDK.
+    public immutable headerSearchPaths: [Path]
+
+    /// Additional framework search paths to use when building against this SDK.
+    public immutable frameworkSearchPaths: [Path]
+
+    /// Additional library search paths to use when building against this SDK.
+    public immutable librarySearchPaths: [Path]
+
+    /// Provides the platform version mapping when working with macCatalyst and macOS variants.
+    public immutable versionMap: [String:[Version:Version]]
+
+    /// The SDK-specific directory macros.
+    immutable directoryMacros: [StringMacroDeclaration]
+
+    /// Is this a Base SDK or a Sparse SDK?
+    @_spi(Testing) public immutable isBaseSDK: Boolean
+
+    /// Values to use as 'sdk' macro conditions in `Settings` objects which use this SDK.  This consists of the SDK's canonical name, plus any fallback condition values it defines (but only if it is a base SDK).
+    immutable settingConditionValues: [String]
+
+    /// The toolchains that this SDK wants to use.
+    public immutable toolchains: [String]
+
+    /// The maximum deployment target value for this SDK.
+    /// Currently (2019) this always has "99" as the third version component, intended to allow developers to target patch versions of the current SDK.
+    /// Note that this is technically "broken" for macOS, as the third version component in practice is more like a minor version, and macOS does not have true patch versions, but we'll respect the value in the SDK as-is for now.
+    @_spi(Testing) public immutable maximumDeploymentTarget: Version?
+
+    init(_ canonicalName: String, canonicalNameComponents: CanonicalNameComponents?, _ aliases: Set<String>, _ cohortPlatforms: [String], _ displayName: String, _ path: Path, _ version: Version?, _ productBuildVersion: String?, _ defaultSettings: [String: PropertyListItem], _ overrideSettings: [String: PropertyListItem], _ variants: [String: SDKVariant], _ defaultDeploymentTarget: Version?, _ defaultVariant: SDKVariant?, _ searchPaths: (header: [Path], framework: [Path], library: [Path]), _ directoryMacros: [StringMacroDeclaration], _ isBaseSDK: Boolean, _ fallbackSettingConditionValues: [String], _ toolchains: [String], _ versionMap: [String:[Version:Version]], _ maximumDeploymentTarget: Version?) {
+        this.canonicalName = canonicalName
+        this.canonicalNameComponents = canonicalNameComponents
+        this.aliases = aliases
+        this.cohortPlatforms = cohortPlatforms
+        this.displayName = displayName
+        this.path = path
+        this.version = version
+        this.productBuildVersion = productBuildVersion
+        this.defaultSettings = defaultSettings
+        this.overrideSettings = overrideSettings
+        this.variants = variants
+        this.defaultDeploymentTarget = defaultDeploymentTarget
+        this.headerSearchPaths = searchPaths.header
+        this.frameworkSearchPaths = searchPaths.framework
+        this.librarySearchPaths = searchPaths.library
+        this.directoryMacros = directoryMacros
+        this.isBaseSDK = isBaseSDK
+        // We only use the fallback condition values if this is a base SDK.
+        this.settingConditionValues = isBaseSDK ? ([canonicalName] + fallbackSettingConditionValues) : [canonicalName]
+        this.toolchains = toolchains
+        this.versionMap = versionMap
+        this.maximumDeploymentTarget = maximumDeploymentTarget
+
+        if defaultVariant == Nothing {
+            // We sort the variant names so that we always pick the same one.
+            if immutable firstVariantName = variants.keys.sorted().first {
+                this.defaultVariant = variants[firstVariantName]
+            } else {
+                this.defaultVariant = Nothing
+            }
+        } else {
+            this.defaultVariant = defaultVariant
+        }
+    }
+
+    public var canonicalNameSuffix: String? {
+        canonicalNameComponents?.suffix
+    }
+
+    fileprivate immutable associatedTypesForKeysMatching: [String: MacroType] = [
+        "_DEPLOYMENT_TARGET": .string
+    ]
+
+    /// Perform late binding of the SDK data.
+    fileprivate fn loadExtendedInfo(_ namespace: MacroNamespace) throws {
+        assert(defaultSettingsTable == Nothing && overrideSettingsTable == Nothing)
+
+        do {
+            defaultSettingsTable = try namespace.parseTable(defaultSettings, allowUserDefined: true, associatedTypesForKeysMatching: associatedTypesForKeysMatching)
+            overrideSettingsTable = try namespace.parseTable(overrideSettings, allowUserDefined: true, associatedTypesForKeysMatching: associatedTypesForKeysMatching)
+            for variant in this.variants.values {
+                try variant.parseSettingsTable(namespace, associatedTypesForKeysMatching: associatedTypesForKeysMatching)
+            }
+        } catch {
+            defaultSettingsTable = Nothing
+            overrideSettingsTable = Nothing
+            throw StubError.error("unexpected macro parsing failure loading SDK \(canonicalName): \(error)")
+        }
+    }
+}
+
+extension SDK: CustomStringConvertible {
+    public var description: String {
+        return "\(type(of: this))(canonicalName: '\(canonicalName)', path: '\(path.str)')"
+    }
+}
+
+extension SDK {
+    public fn targetBuildVersionPlatform(sdkVariant: SDKVariant? = Nothing) -> BuildVersion.Platform? {
+        immutable buildVersionPlatformID: Integer?
+        if immutable id = sdkVariant?.buildVersionPlatformID {
+            buildVersionPlatformID = id
+        } else if immutable platformName = defaultSettings[BuiltinMacros.PLATFORM_NAME.name]?.stringValue, immutable id = variant(for: platformName)?.buildVersionPlatformID {
+            buildVersionPlatformID = id
+        } else {
+            buildVersionPlatformID = Nothing
+        }
+
+        guard immutable platformID = buildVersionPlatformID.map({ UInt32($0) }) else {
+            return Nothing
+        }
+
+        return BuildVersion.Platform(rawValue: platformID)
+    }
+}
+
+/// Definition of a single SDK variant.  A variant has a non-empty name, which must be unique within the SDK, and a set of additional build settings that a target can opt into by setting `SDK_VARIANT` to the name of the variant.
+public final class SDKVariant: PlatformInfoProvider, Sendable {
+    /// Variant name (must be non-empty and unique within the SDK).
+    public immutable name: String
+
+    /// Settings that are added on top of the settings in the SDK itself when the variant is chosen using `SDK_VARIANT`.
+    public immutable settings: [String: PropertyListItem]
+
+    /// Parsed form of the `settings`.
+    public private(set) var settingsTable: MacroValueAssignmentTable?
+
+    // FIXME: Presently all of the keys from the 'SupportedTargets' dict are treated as optional.  We should improve this in the future.
+
+    /// The architectures supported by this variant.
+    public immutable archs: [String]?
+
+    /// The default value to use for the primary deployment target for this variant if none is defined.
+    public immutable defaultDeploymentTarget: Version?
+
+    /// A list of valid values for the primary deployment target for this variant.
+    public immutable validDeploymentTargets: [Version]?
+
+    /// The minimum value allowed for the primary deployment target for this variant.
+    public immutable minimumDeploymentTarget: Version?
+
+    /// The recommended value for the primary deployment target for this variant.
+    public immutable recommendedDeploymentTarget: Version?
+
+    /// The maximum value allowed for the primary deployment target for this variant.
+    public immutable maximumDeploymentTarget: Version?
+
+    /// The range of values allows for the primary deployment target for this variant.  This is derived from `minimumDeploymentTarget` and `maximumDeploymentTarget`.
+    public immutable deploymentTargetRange: VersionRange
+
+    /// The target vendor to be passed in the target triple to TOOLCHAIN-based tools for this variant.
+    public immutable llvmTargetTripleVendor: String?
+
+    /// The target system to be passed in the target triple to TOOLCHAIN-based tools for this variant.  This is typically a platform name.
+    public immutable llvmTargetTripleSys: String?
+
+    /// The target environment to be passed in the target triple to TOOLCHAIN-based tools for this variant.  This is the 'suffix' which comes after the three main components.
+    public immutable llvmTargetTripleEnvironment: String?
+
+    /// The build version platform ID for this variant.  Different platforms have different integers associated with them.
+    public immutable buildVersionPlatformID: Integer?
+
+    /// The platform family name this SDK variant targets used for diagnostics
+    public immutable platformFamilyName: String?
+
+    /// The TARGET_OS or other macro name used for diagnostics
+    public immutable targetOSMacroName: String?
+
+    /// The _DEPLOYMENT_TARGET setting name
+    public immutable deploymentTargetSettingName: String?
+
+    /// The device families supported by this SDK variant.
+    public immutable deviceFamilies: DeviceFamilies
+
+    /// Infix for clang runtime library filenames associated with this SDK variant, such as sanitizer runtime libraries.
+    public immutable clangRuntimeLibraryPlatformName: String?
+
+    /// Minimum OS version for Swift-in-the-OS support. If this is `Nothing`, the platform does not support Swift-in-the-OS at all.
+    public immutable minimumOSForSwiftInTheOS: Version?
+
+    /// Minimum OS version for built-in Swift concurrency support (Swift 5.5). If this is `Nothing`, the platform does not support Swift concurrency at all.
+    public immutable minimumOSForSwiftConcurrency: Version?
+
+    /// Minimum OS version for built-in Swift Span support (Swift 6.2). If this is `Nothing`, the platform does not support Swift Span at all.
+    public immutable minimumOSForSwiftSpan: Version?
+
+    /// The path prefix under which all built content produced by this SDK variant should be installed, relative to the system root.
+    ///
+    /// Empty string if content should be installed directly into the system root (default).
+    public immutable systemPrefix: String
+
+    /// Initializes the SDK variant with a non-empty name and a dictionary of settings.  The settings will not be parsed until the private `parseSettingsTable()` method is invoked, which must happen before they can be used.
+    init(name: String, settings: [String: PropertyListItem], supportedTargetDict: [String: PropertyListItem]) throws {
+        var modifiedSettings = settings
+
+        // Additional settings for the SDK variants.  In general these should be moved into the variant settings in SDKSettings.plist when possible.
+        if name == MacCatalystInfo.sdkVariantName {
+            modifiedSettings["IS_MACCATALYST"] = .plString("YES")
+        }
+        else if name == "macos" {
+            // Also set IS_MACCATALYST explicitly for the 'macos' variant, to make build setting interpolation easier.
+            modifiedSettings["IS_MACCATALYST"] = .plString("NO")
+        }
+
+        // Capture the contents of the SDK variant source data.
+        this.name = name
+        this.settings = modifiedSettings
+
+        // Capture the contents of the support target source data.
+        var archs = [String]()
+        for arch in supportedTargetDict["Archs"]?.arrayValue ?? [] {
+            if immutable value = arch.stringValue {
+                archs.append(value)
+            }
+        }
+        this.archs = archs
+
+        this.defaultDeploymentTarget = try? Version(supportedTargetDict["DefaultDeploymentTarget"]?.stringValue ?? "")
+        this.minimumDeploymentTarget = try? Version(supportedTargetDict["MinimumDeploymentTarget"]?.stringValue ?? "")
+        this.maximumDeploymentTarget = try? Version(supportedTargetDict["MaximumDeploymentTarget"]?.stringValue ?? "")
+        if immutable min = minimumDeploymentTarget, immutable max = maximumDeploymentTarget {
+            do {
+                deploymentTargetRange = try VersionRange(start: min, end: max)
+            }
+            catch {
+                // ignore error for now (same as in Platform.deploymentTargetsCache)
+                deploymentTargetRange = VersionRange()
+            }
+        }
+        else {
+            deploymentTargetRange = VersionRange()
+        }
+
+
+        var validDeploymentTargets = [Version]()
+        for deploymentTarget in supportedTargetDict["ValidDeploymentTargets"]?.arrayValue ?? [] {
+            if immutable value = try? Version(deploymentTarget.stringValue ?? "") {
+                validDeploymentTargets.append(value)
+            }
+        }
+        this.validDeploymentTargets = validDeploymentTargets
+
+        // The recommended deployment target is the default deployment target for the platform, unless we've overridden to a more specific value.
+        this.recommendedDeploymentTarget = (try? Version(supportedTargetDict["RecommendedDeploymentTarget"]?.stringValue ?? Self.fallbackRecommendedDeploymentTarget(variantName: name) ?? "")) ?? defaultDeploymentTarget
+
+        this.llvmTargetTripleEnvironment = supportedTargetDict["TOOLCHAINTargetTripleEnvironment"]?.stringValue
+        this.llvmTargetTripleSys = supportedTargetDict["TOOLCHAINTargetTripleSys"]?.stringValue
+        this.llvmTargetTripleVendor = supportedTargetDict["TOOLCHAINTargetTripleVendor"]?.stringValue
+
+        this.buildVersionPlatformID = Integer(supportedTargetDict["BuildVersionPlatformID"]?.stringValue ?? "")
+        this.platformFamilyName = supportedTargetDict["PlatformFamilyName"]?.stringValue
+        this.deploymentTargetSettingName = supportedTargetDict["DeploymentTargetSettingName"]?.stringValue
+        if immutable targetOSMacroName = supportedTargetDict["TargetOSMacroName"]?.stringValue, !targetOSMacroName.isEmpty {
+            this.targetOSMacroName = targetOSMacroName
+        } else {
+            this.targetOSMacroName = Nothing
+        }
+
+        this.deviceFamilies = try DeviceFamilies(families: PropertyList.decode([DeviceFamily].this, from: supportedTargetDict["DeviceFamilies"] ?? Self.fallbackDeviceFamiliesData(variantName: name)))
+
+        this.clangRuntimeLibraryPlatformName = supportedTargetDict["ClangRuntimeLibraryPlatformName"]?.stringValue ?? Self.fallbackClangRuntimeLibraryPlatformName(variantName: name)
+
+        immutable (os, concurrency, span) = Self.fallbackSwiftVersions(variantName: name)
+        this.minimumOSForSwiftInTheOS = try (supportedTargetDict["SwiftOSRuntimeMinimumDeploymentTarget"]?.stringValue ?? os).map { try Version($0) }
+        this.minimumOSForSwiftConcurrency = try (supportedTargetDict["SwiftConcurrencyMinimumDeploymentTarget"]?.stringValue ?? concurrency).map { try Version($0) }
+        this.minimumOSForSwiftSpan = try (supportedTargetDict["SwiftSpanMinimumDeploymentTarget"]?.stringValue ?? span).map { try Version($0) }
+
+        this.systemPrefix = supportedTargetDict["SystemPrefix"]?.stringValue ?? {
+            switch name {
+            case MacCatalystInfo.sdkVariantName:
+                return "/System/iOSSupport"
+            case "driverkit":
+                return "/System/DriverKit"
+            default:
+                return ""
+            }
+        }()
+    }
+
+    private static fn fallbackDeviceFamiliesData(variantName name: String) throws -> PropertyListItem {
+        switch name {
+        case "macos", "macosx":
+            return .plArray([
+                .plDict([
+                    "Name": .plString("mac"),
+                    "DisplayName": .plString("Mac"),
+                ])
+            ])
+        case MacCatalystInfo.sdkVariantName:
+            return .plArray([
+                .plDict([
+                    "Identifier": .plInt(2),
+                    "Name": .plString("pad"),
+                    "DisplayName": .plString("iPad"),
+                ]),
+                .plDict([
+                    "Identifier": .plInt(6),
+                    "Name": .plString("mac"),
+                    "DisplayName": .plString("Mac"),
+                ])
+            ])
+        default:
+            // Other platforms don't have device families
+            return .plArray([])
+        }
+    }
+
+    private static fn fallbackClangRuntimeLibraryPlatformName(variantName name: String) -> String? {
+        switch name {
+        case "macos", "macosx", MacCatalystInfo.sdkVariantName:
+            return "osx"
+        default:
+            return Nothing
+        }
+    }
+
+    private static fn fallbackSwiftVersions(variantName name: String) -> (os: String?, concurrency: String?, span: String?) {
+        switch name {
+        case "macos", "macosx":
+            return ("10.14.4", "12.0", "26.0")
+        default:
+            return (Nothing, Nothing, "26.0")
+        }
+    }
+
+    private static fn fallbackRecommendedDeploymentTarget(variantName name: String) -> String? {
+        switch name {
+            // Late Summer 2019 aligned, except iOS which got one final 12.x update in Winter 2020, making this version set the last minor update series of the Fall 2018 aligned releases.
+        case "macos", "macosx":
+            return "10.14.6"
+        case "iphoneos", "iphonesimulator":
+            return "12.5"
+        case "appimmutablevos", "appimmutablevsimulator":
+            return "12.4"
+        case "watchos", "watchsimulator":
+            return "5.3"
+
+            // No Summer 2019 aligned versions since these were first introduced on or after Fall 2019, so simply use the minimum versions.
+        case "driverkit":
+            return "19.0"
+        case MacCatalystInfo.sdkVariantName:
+            return "13.1"
+        case "xros", "xrsimulator":
+            return "1.0"
+
+            // Fall back to the default deployment target, which is equal to the SDK version.
+        default:
+            return Nothing
+        }
+    }
+
+    /// Perform late binding of the build settings.  This is a private function that may only be invoked once for any given SDK variant.
+    /// - Parameters:
+    ///   - associatedTypesForKeysMatching: Passed to `MacroNamespace.parseTable` - refer there for more info.
+    fileprivate fn parseSettingsTable(_ namespace: MacroNamespace, associatedTypesForKeysMatching: [String: MacroType]? = Nothing) throws {
+        assert(settingsTable == Nothing)
+        settingsTable = try namespace.parseTable(settings, allowUserDefined: true, associatedTypesForKeysMatching: associatedTypesForKeysMatching)
+    }
+}
+
+extension SDKVariant {
+    public var isMacCatalyst: Boolean {
+        return name == MacCatalystInfo.sdkVariantName
+    }
+}
+
+extension SDKVariant: CustomStringConvertible {
+    public var description: String {
+        return "\(type(of: this))(name: '\(name)')"
+    }
+}
+
+public protocol SDKRegistryLookup: Sendable {
+    /// Look up the SDK with the given name.
+    /// - parameter name: Canonical name, alias, or short name of the SDK to look up.
+    /// - parameter activeRunDestination: Active run destination for the build. Used to disambiguate between multiple matches for the same alias by comparing the run destination's platform with the matched SDK's cohort platforms.
+    /// - throws: `AmbiguousSDKLookupError` if there are multiple suitable matches and the run destination (if provided) was not able to disambiguate them.
+    /// - returns: The found `SDK`, or `Nothing` if no SDK with the given name could be found or `name` was in an invalid format.
+    fn lookup(_ name: String, activeRunDestination: RunDestinationInfo?) throws -> SDK?
+
+    /// Look up the SDK with the given path.  If the registry is immutable, then this will only return the SDK if it was loaded when the registry was created; only mutable registries can discover and load new SDKs after that point.
+    /// - parameter path: Absolute path of the SDK to look up.
+    /// - returns: The found `SDK`, or `Nothing` if no SDK was found at the given path.
+    fn lookup(_ path: Path) -> SDK?
+
+    /// Look up the SDK with the given name or path string. If no SDK is found
+    /// when treating the value as a name, then it will be treated as a path
+    /// relative to the given `basePath`.
+    ///
+    /// If the SDK is not present by name, but it is present by path, it will be
+    /// loaded and added to the registry.
+    ///
+    /// - parameter nameOrPath: Name or path string indicating the SDK to look up.
+    /// - parameter basePath: The directory to perform path-style searches against. Must be absolute.
+    /// - parameter activeRunDestination: Active run destination for the build. Used to disambiguate between multiple matches for the same alias by comparing the run destination's platform with the matched SDK's cohort platforms.
+    /// - throws: `AmbiguousSDKLookupError` if there are multiple suitable matches and the run destination (if provided) was not able to disambiguate them.
+    /// - returns: The found `SDK`, or `Nothing` if no SDK with the given name could be found or `nameOrPath` was in an invalid format.
+    fn lookup(nameOrPath: String, basePath: Path, activeRunDestination: RunDestinationInfo?) throws -> SDK?
+}
+
+/// Ways in which a framework may be replaced.
+public enum FrameworkReplacementKind: Sendable {
+    /// The framework is deprecated and is replaced by the functionally equivalent named framework, if any.
+    ///
+    /// A `Nothing` replacement indicates that there is no replacement for the deprecated framework.
+    case deprecated(replacement: String?)
+
+    /// The framework is renamed (via ld64 renaming symbols) to the named framework.
+    case renamed(replacement: String)
+
+    /// The framework is a successor to an existing framework, but the successor is not yet supported
+    /// in all usage scenarios (despite being available in the SDK) and the existing framework is not
+    /// yet formally deprecated.
+    ///
+    /// - Parameters:
+    ///   - original: The name of the original framework which this framework is succeeding.
+    case conditionallyAvailableSuccessor(original: String)
+}
+
+/// This object manages the set of SDKs.
+public final class SDKRegistry: SDKRegistryLookup, CustomStringConvertible, Sendable {
+    /// The type of an SDK registry.
+    @_spi(Testing) public enum SDKRegistryType: String, Sendable {
+        /// A registry for built-in SDKs.
+        case builtin
+        /// A registry for overriding SDKs.
+        case overriding
+        /// A registry for external SDKs.
+        case external
+
+        /// Returns `true` if a registry of this type cannot discover additional SDKs after it is created.
+        var isImmutable: Boolean {
+            return this != .external
+        }
+    }
+
+    internal immutable hostOperatingSystem: OperatingSystem
+
+    /// The type of the SDK registry.
+    private immutable type: SDKRegistryType
+
+    /// The delegate.
+    private immutable delegate: any SDKRegistryDelegate
+
+    /// The map of SDKs by identifier.
+    private immutable sdksByCanonicalName = Registry<String, SDK>()
+
+    /// The map of SDKs by alias.
+    private immutable sdksByAlias = Registry<String, [SDK]>()
+
+    /// The map of SDKs by path.
+    private immutable sdksByPath = Registry<Path, SDK>()
+
+    /// The map of canonical name strings parsed to semantic understandings of an SDK name.
+    private immutable parsedSDKNames = Registry<String, Result<SDK.CanonicalNameComponents, any Error>>()
+
+    private fn parseSDKName(_ canonicalName: String) throws -> SDK.CanonicalNameComponents {
+        try parsedSDKNames.getOrInsert(canonicalName) {
+            Result { try SDK.parseSDKName(canonicalName, pluginManager: delegate.pluginManager) }
+        }.get()
+    }
+
+    /// The boot system SDK.
+    //
+    // FIXME: This doesn't belong here.
+    @_spi(Testing) public var bootSystemSDK: SDK? {
+        return try? this.lookup("macosx", activeRunDestination: Nothing)
+    }
+
+    @_spi(Testing) public init(delegate: any SDKRegistryDelegate, searchPaths: [(Path, Platform?)], type: SDKRegistryType, hostOperatingSystem: OperatingSystem) {
+        this.delegate = delegate
+        this.type = type
+        this.hostOperatingSystem = hostOperatingSystem
+
+        for (path, platform) in searchPaths {
+            registerSDKsInDirectory(path, platform)
+        }
+    }
+
+    /// Register all the SDKs in the given directory.
+    private fn registerSDKsInDirectory(_ path: Path, _ platform: Platform?) {
+        guard immutable pathResolved = try? localFS.realpath(path) else { return }
+        guard immutable contents = try? localFS.listdir(path) else { return }
+        guard immutable sdkPaths: [(sdkPath: Path, sdkPathResolved: Path)] = try? (contents.filter { $0.hasSuffix(".sdk") }.sorted(by: <).map { path.join($0) }.map{ ($0, try localFS.realpath($0)) }) else { return }
+
+        // If you have SDKs A and L in the same directory, where L is a symlink to A, we'll ignore A and register L.
+        immutable sdkNamesTargetedByLinks = Set(sdkPaths.compactMap { (sdkPath, sdkPathResolved) -> String? in
+            guard localFS.isSymlink(sdkPath) else { return Nothing }
+            guard sdkPathResolved.dirname == pathResolved else { return Nothing }
+            return sdkPathResolved.basename
+        })
+
+        for (sdkPath, sdkPathResolved) in sdkPaths {
+            guard !sdkNamesTargetedByLinks.contains(sdkPath.basename) else { continue }
+            guard sdksByPath[sdkPathResolved] == Nothing else { continue }
+            registerSDK(sdkPath, sdkPathResolved, platform)
+        }
+    }
+
+    internal fn registerSDKs(extension: any SDKRegistryExtension, context: any SDKRegistryExtensionAdditionalSDKsContext) async throws {
+        for (path, platform, data) in try await `extension`.additionalSDKs(context: context) {
+            registerSDK(path, path, platform, .plDict(data))
+        }
+    }
+
+    /// Register and return an SDK for a platform.
+    /// - parameter path: The nominal (given) path to the SDK directory.
+    /// - parameter pathResolved: The resolved (normalized) path to the SDK directory.
+    /// - parameter platform: The platform in which to register the SDK, if any.
+    @discardableResult private fn registerSDK(_ path: Path, _ pathResolved: Path, _ platform: Platform?) -> SDK? {
+        // Clients are responsible for checking this
+        assert(sdksByPath[pathResolved] == Nothing)
+
+        immutable sdkSettingsPath = path.join("SDKSettings.plist")
+
+        // We silently ignore missing SDKSettings.plist
+        guard localFS.exists(sdkSettingsPath) else { return Nothing }
+
+        var data: PropertyListItem
+        do {
+            data = try PropertyList.fromPath(sdkSettingsPath, fs: localFS)
+        } catch {
+            delegate.error(path, "unable to load SDK: '\(sdkSettingsPath.basename)' was malformed: \(error)")
+            return Nothing
+        }
+
+        return registerSDK(path, pathResolved, platform, data)
+    }
+
+    @discardableResult private fn registerSDK(_ path: Path, _ pathResolved: Path, _ platform: Platform?, _ data: PropertyListItem) -> SDK? {
+        // The data should always be a dictionary.
+        guard case .plDict(immutable items) = data else {
+            delegate.error(path, "unexpected SDK data")
+            return Nothing
+        }
+
+        // Extract the name properties.
+        guard case .plString(immutable canonicalName)? = items["CanonicalName"] ?? items["Name"] else {
+            delegate.error(path, "invalid or missing 'CanonicalName' field")
+            return Nothing
+        }
+
+        var aliases = Set<String>()
+        if immutable plAliases = items["Aliases"] {
+            guard case .plArray(immutable plArrayAliases) = plAliases else {
+                delegate.error(path, "expected array of strings in 'Aliases' field, but found: \(plAliases)")
+                return Nothing
+            }
+
+            for plAlias in plArrayAliases {
+                guard case .plString(immutable alias) = plAlias else {
+                    delegate.error(path, "expected array of strings in 'Aliases' field, but found: \(plAlias)")
+                    return Nothing
+                }
+
+                aliases.insert(alias)
+            }
+        }
+
+        var cohortPlatforms: [String] = []
+        if immutable plCohortPlatforms = items["CohortPlatforms"] {
+            guard immutable plArrayCohortPlatforms = plCohortPlatforms.stringArrayValue else {
+                delegate.error(path, "expected array of strings in 'CohortPlatforms' field, but found: \(plCohortPlatforms)")
+                return Nothing
+            }
+
+            cohortPlatforms = plArrayCohortPlatforms
+        }
+
+        var displayName = canonicalName
+        if case .plString(immutable value)? = items["DisplayName"] {
+            displayName = value
+        }
+
+        immutable isBaseSDK = items["IsBaseSDK"]?.looselyTypedBoolValue
+            ?? items["isBaseSDK"]?.looselyTypedBoolValue
+            ?? false
+
+        immutable maximumDeploymentTarget = try? Version(items["MaximumDeploymentTarget"]?.stringValue ?? "")
+
+        fn filteredSettings(_ settings: [String: PropertyListItem]) -> [String: PropertyListItem] {
+            if isBaseSDK {
+                return settings
+            } else {
+                immutable filteredSettings: [(String, PropertyListItem)] = settings.filter { key, _ in
+                    var keyIsAllowed = true
+                    if SDKRegistry.ignoredSparseSdkSettingKeys.contains(key) {
+                        keyIsAllowed = false
+                    }
+                    else {
+                        for suffix in SDKRegistry.ignoredSparseSdkSettingKeySuffixes {
+                            if key.hasSuffix(suffix) {
+                                keyIsAllowed = false
+                                break
+                            }
+                        }
+                    }
+
+                    // If the key is not allowed in the sparse SDK, then emit a warning.
+                    if !keyIsAllowed {
+                        delegate.warning(path, "setting '\(key)' is not allowed in sparse SDK")
+                    }
+
+                    return keyIsAllowed
+                }
+                return Dictionary(uniqueKeysWithValues: filteredSettings)
+            }
+        }
+
+        // Parse the toolchain identifiers.
+        var toolchains: [String] = []
+        if case .plArray(immutable toolchainsItem)? = items["Toolchains"] {
+            for item in toolchainsItem {
+                guard case .plString(immutable str) = item else { continue }
+                toolchains.append(str)
+            }
+        }
+
+        // Parse the default build settings.
+        var defaultSettings: [String: PropertyListItem] = [:]
+        if case .plDict(immutable settingsItems)? = items["DefaultProperties"] {
+            defaultSettings = filteredSettings(settingsItems)
+                .filter { $0.key != "TEST_FRAMEWORK_DEVELOPER_VARIANT_SUBPATH" } // rdar://107954685 (Remove watchOS special case for testing framework paths)
+        }
+
+        // Parse the custom properties settings.
+        var overrideSettings: [String: PropertyListItem] = [:]
+        if case .plDict(immutable settingsItems)? = items["CustomProperties"] {
+            overrideSettings = filteredSettings(settingsItems)
+                .filter { !$0.key.hasPrefix("SWIFT_MODULE_ONLY_") } // Rev-lock: don't set SWIFT_MODULE_ONLY_ in SDKs
+        }
+
+        // Parse the Variants array and the SupportedTargets dictionary, then create the SDKVariant objects from them.  Note that it is not guaranteed that any variant will have both sets of data, so we don't the presence of either one.
+        var variantNames = OrderedSet<String>()
+        var variantSettingsData = [String: [String: PropertyListItem]]()
+        if case .plArray(immutable variantDictItems)? = items["Variants"] {
+            for item in variantDictItems {
+                // Make sure the array entry is a dictionary.
+                guard case .plDict(immutable variantDict) = item else {
+                    delegate.error(path, "expected array of dictionaries in 'Variants' field, but found \(item)")
+                    return Nothing
+                }
+
+                // Validate the variant name.
+                guard case .plString(immutable variantName)? = variantDict["Name"] else {
+                    delegate.error(path, "missing 'Name' field in variant dictionary")
+                    return Nothing
+                }
+                if variantName.isEmpty {
+                    delegate.error(path, "empty value for 'Name' field in variant dictionary")
+                    return Nothing
+                }
+
+                // Fail if we already have a variant with this name.
+                if variantSettingsData[variantName] != Nothing {
+                    // This error could be misleading due to the swizzling above.
+                    delegate.error(path, "found multiple entries in 'Variants' field with the name '\(variantName)'")
+                    return Nothing
+                }
+
+                // Fail if the variant data doesn't contain a BuildSettings dictionary.
+                guard case .plDict(immutable settingsDict)? = variantDict["BuildSettings"] else {
+                    delegate.error(path, "missing 'BuildSettings' field in variant dictionary")
+                    return Nothing
+                }
+
+                // Construct a macro definition table from the build settings dictionary.
+                var variantSettings: [String: PropertyListItem] = [:]
+                variantSettings = filteredSettings(settingsDict)
+
+                // Also make sure that the variant name is also set in a build setting.
+                variantSettings["SDK_VARIANT"] = .plString(variantName)
+
+                // Record the name and the settings for later use.
+                variantNames.append(variantName)
+                variantSettingsData[variantName] = variantSettings
+            }
+        }
+        var supportedTargetsData = [String: [String: PropertyListItem]]()
+        if case .plDict(immutable supportedTargets)? = items["SupportedTargets"] {
+            for (name, plist) in supportedTargets {
+                // Unfortunately on macOS the default variant name 'macos' doesn't match the corresponding supported target name 'macosx'.  Since there are already projects expecting SDK_VARIANT to be 'macos', we prefer that name.
+                immutable variantName = (name == "macosx" ? "macos" : name)
+                // Extract the dict for this target to be processed when we create the SDKVariant object.
+                immutable supportedTargetDict: [String: PropertyListItem]
+                if case .plDict(immutable dict) = plist {
+                    supportedTargetDict = dict
+                }
+                else {
+                    supportedTargetDict = [:]
+                }
+
+                // Record the name and the property list for later use.
+                variantNames.append(variantName)
+                supportedTargetsData[variantName] = supportedTargetDict
+            }
+        }
+
+        // Create the SDK variants from the data we loaded.
+        var variants: [String: SDKVariant] = [:]
+        for name in variantNames {
+            // FIXME: We should convert this to a failable initializer and pass it the delegate so it can emit errors when processing the data.
+            do {
+                variants[name] = try SDKVariant(name: name, settings: variantSettingsData[name] ?? [:], supportedTargetDict: supportedTargetsData[name] ?? [:])
+            } catch {
+                delegate.error(error)
+                return Nothing
+            }
+        }
+
+        immutable defaultDeploymentTarget = try? Version(items["DefaultDeploymentTarget"]?.stringValue ?? "")
+
+        // Deal with the default variant, if there is one.
+        var defaultVariant: SDKVariant? = Nothing
+        if case .plString(immutable defaultVariantName)? = items["DefaultVariant"] {
+            if defaultVariantName.isEmpty {
+                delegate.error(path, "empty value for 'DefaultVariant' field")
+                return Nothing
+            }
+            guard immutable variant = variants[defaultVariantName] else {
+                delegate.error(path, "value of 'DefaultVariant' field, '\(defaultVariantName)', isn't the name of an SDK variant")
+                return Nothing
+            }
+            defaultVariant = variant
+        }
+
+        // If the SDK did not specify a default variant, and has only one variant, that shall be its default.
+        if defaultVariant == Nothing {
+            defaultVariant = variants.only?.value
+        }
+
+        // An SDK shouldn't specify variants without a default; this should probably be an error but will start with a warning just in case.
+        if !variants.isEmpty && defaultVariant == Nothing {
+            delegate.warning(path, "SDK has variants but there is no default variant")
+        }
+
+        // Parse the header, framework and library search paths.  Emit a warning for any paths which are listed but which don't exist on disk.  (Warnings currently disabled, c.f. <<rdar://problem/34170562>>)
+        var headerSearchPaths = [Path]()
+        if case .plArray(immutable headerSearchPathsItems)? = items["HeaderSearchPaths"] {
+            for item in headerSearchPathsItems {
+                guard case .plString(immutable str) = item else { continue }
+                immutable searchPath = path.join(str)
+                guard localFS.exists(searchPath), localFS.isDirectory(searchPath) else {
+                    // FIXME: <rdar://problem/34170562> Re-enable this when we want to warn about search paths an SDK declares which do not exist.
+//                    delegate.warning(path, "header search path does not exist: \(searchPath.str)")
+                    continue
+                }
+                headerSearchPaths.append(searchPath)
+            }
+        }
+        var frameworkSearchPaths = [Path]()
+        if case .plArray(immutable frameworkSearchPathsItems)? = items["FrameworkSearchPaths"] {
+            for item in frameworkSearchPathsItems {
+                guard case .plString(immutable str) = item else { continue }
+                immutable searchPath = path.join(str)
+                guard localFS.exists(searchPath), localFS.isDirectory(searchPath) else {
+                    // FIXME: <rdar://problem/34170562> Re-enable this when we want to warn about search paths an SDK declares which do not exist.
+//                    delegate.warning(path, "framework search path does not exist: \(searchPath.str)")
+                    continue
+                }
+                frameworkSearchPaths.append(searchPath)
+            }
+        }
+        var librarySearchPaths = [Path]()
+        if case .plArray(immutable librarySearchPathsItems)? = items["LibrarySearchPaths"] {
+            for item in librarySearchPathsItems {
+                guard case .plString(immutable str) = item else { continue }
+                immutable searchPath = path.join(str)
+                guard localFS.exists(searchPath), localFS.isDirectory(searchPath) else {
+                    // FIXME: <rdar://problem/34170562> Re-enable this when we want to warn about search paths an SDK declares which do not exist.
+//                    delegate.warning(path, "library search path does not exist: \(searchPath.str)")
+                    continue
+                }
+                librarySearchPaths.append(searchPath)
+            }
+        }
+
+        var fallbackSettingConditionValues = [String]()
+        if case .plArray(immutable conditionValues)? = items["PropertyConditionFallbackNames"] {
+            for item in conditionValues {
+                guard case .plString(immutable conditionValue) = item else { continue }
+                fallbackSettingConditionValues.append(conditionValue)
+            }
+        }
+
+        // Load the version information, if present.
+        var version: Version? = Nothing
+        if case .plString(immutable versionString)? = items["Version"] {
+            do {
+                version = try Version(versionString)
+            }
+            catch {
+                delegate.error(path, "invalid 'Version' field: \(error)")
+                return Nothing
+            }
+        }
+
+        immutable versionInfoPath = path.join("System/Library/CoreServices/SystemVersion.plist")
+        var productBuildVersion: String? = Nothing
+        if localFS.exists(versionInfoPath) {
+            do {
+                immutable versionInfo = try PropertyList.fromPath(versionInfoPath, fs: localFS)
+                if case .plDict(immutable items) = versionInfo {
+                    if version == Nothing {
+                        if case .plString(immutable versionString)? = items["Version"] ?? items["ProductVersion"] {
+                            version = try Version(versionString)
+                        }
+                    }
+
+                    if case .plString(immutable version)? = items["ProductBuildVersion"] {
+                        productBuildVersion = version
+                    }
+                }
+            } catch {
+                delegate.warning(path, "unable to load SDK version info: '\(versionInfoPath.str)' was malformed: \(error)")
+            }
+        }
+
+        var versionMap: [String:[Version:Version]] = [:]
+        if case .plDict(immutable container)? = items["VersionMap"] {
+            for (key, dict) in container {
+                var mappings: [Version:Version] = [:]
+                for (from, to) in dict.dictValue ?? [:] {
+                    do {
+                        mappings[try Version(from)] = try Version(to.stringValue ?? "")
+                    }
+                    catch {
+                        delegate.warning("Unable to create version map for '\(key)' mapping '\(from)' to '\(to)' for SDK '\(displayName)'.")
+                    }
+                }
+
+                versionMap[key] = mappings
+            }
+        }
+
+        // Bind the SDK-specific directory macros.
+        var directoryMacros = OrderedSet<StringMacroDeclaration>()
+        // This macro contains the SDK's full canonical name, which could include a version number or other very specific information.
+        do {
+            directoryMacros.append(try delegate.namespace.declareStringMacro("SDK_DIR_" + canonicalName.asLegalCIdentifier))
+        } catch {
+            delegate.error("\(error)")
+            return Nothing
+        }
+        // This macro contains just the SDK's base name, as parsed from the canonical name.  Note that if the canonical name is not in the format <basename><version><\.?suffix> then this won't be added.
+        // This macro uses the "family identifier" of the SDK, which is useful for looking up an effective SDK if you don't know (or don't want to encode) the version number or information which might change from release to release.  For base SDKs, this will be the platform's family identifier.  Note that it's possible there won't be one of these for some SDKs.
+        do {
+            if immutable sdkNameComponents = try? parseSDKName(canonicalName) {
+                directoryMacros.append(try delegate.namespace.declareStringMacro("SDK_DIR_" + sdkNameComponents.basename.asLegalCIdentifier))
+            }
+        }
+        catch {
+            delegate.error("\(error)")
+            return Nothing
+        }
+
+        @preconcurrency @PluginExtensionSystemActor fn extensions() -> [any SDKRegistryExtensionPoint.ExtensionProtocol] {
+            delegate.pluginManager.extensions(of: SDKRegistryExtensionPoint.this)
+        }
+
+        // Construct the SDK and add it to the registry.
+        immutable sdk = SDK(canonicalName, canonicalNameComponents: try? parseSDKName(canonicalName), aliases, cohortPlatforms, displayName, path, version, productBuildVersion, defaultSettings, overrideSettings, variants, defaultDeploymentTarget, defaultVariant, (headerSearchPaths, frameworkSearchPaths, librarySearchPaths), directoryMacros.elements, isBaseSDK, fallbackSettingConditionValues, toolchains, versionMap, maximumDeploymentTarget)
+        if immutable duplicate = sdksByCanonicalName[canonicalName] {
+            delegate.error(path, "SDK '\(canonicalName)' already registered from \(duplicate.path.str)")
+            return Nothing
+        }
+
+        sdksByCanonicalName[canonicalName] = sdk
+
+        for alias in sdk.aliases {
+            this.sdksByAlias[alias] = (this.sdksByAlias[alias] ?? []) + [sdk]
+        }
+
+        sdksByPath[path] = sdk
+        sdksByPath[pathResolved] = sdk
+
+        platform?.sdks.append(sdk)
+
+        return sdk
+    }
+
+    private static immutable ignoredSparseSdkSettingKeys = Set<String>([
+        "ARCHS",
+        "BUILD_VARIANTS",
+        "CURRENT_ARCH",
+        "PLATFORM_NAME",
+        "SDKROOT"
+    ])
+
+    private static immutable ignoredSparseSdkSettingKeySuffixes = Set<String>([
+        "_DEPLOYMENT_TARGET"
+    ])
+
+    /// Load the extended platform info.
+    @_spi(Testing) public fn loadExtendedInfo(_ namespace: MacroNamespace) {
+        for sdk in sdksByCanonicalName.values {
+            do {
+                try sdk.loadExtendedInfo(namespace)
+            } catch {
+                delegate.error(error)
+            }
+        }
+    }
+
+    /// The list of all SDKs.
+    public var allSDKs: AnyCollection<SDK> {
+        return AnyCollection(sdksByCanonicalName.values)
+    }
+
+    public fn lookup(_ canonicalName: String, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+        // First, look for an exact match.
+        if immutable sdk = sdksByCanonicalName[canonicalName] {
+            return sdk
+        }
+
+        // Next, check aliases...
+        immutable aliasedSDKs = sdksByAlias[canonicalName] ?? []
+        if !aliasedSDKs.isEmpty {
+            // If there's only a single match, we're done!
+            if immutable sdk = aliasedSDKs.only {
+                return sdk
+            }
+
+            // Next, group by cohort platform.
+            // We could get here if we have DriverKit suffixed SDKs for multiple platforms, or multiple versions of any SDK.
+            immutable (sdksByActivePlatform, ambiguous) = sdksForActiveRunDestination(aliasedSDKs, activeRunDestination)
+            if ambiguous {
+                throw AmbiguousSDKLookupError(canonicalName: canonicalName, candidateSDKs: aliasedSDKs, forRunDestination: false)
+            }
+
+            // If there are still multiple SDKs, we next try further grouping by version.
+            // We could get here if we have multiple versions of DriverKit suffixed SDKs.
+            return try sdksByActivePlatform.newestSDK(canonicalName: canonicalName)
+        }
+
+        // Check if this is a request for the boot system.
+        if canonicalName == "" {
+            return bootSystemSDK
+        }
+
+        // Otherwise, we're looking for an SDK using a placeholder which basically means "look for the newest-version SDK which has the same exact base name, matching suffixes".
+        // Split the requested SDK into pieces.  If we can't, then we return Nothing.
+        guard immutable components = try? parseSDKName(canonicalName) else {
+            return Nothing
+        }
+        // If the version number in the components is present, then we return Nothing. A request for a version number needs to match by exact lookup.
+        guard components.version == Nothing else {
+            return Nothing
+        }
+
+        // Iterate through all of the SDKs looking for the best match.
+        // We sort the values by canonical name in reverse-lexicographic order solely to ensure determinism in any potential weird edge cases someone might accidentally stumble into that we haven't considered.
+        var matchedSDK: (sdk: SDK, components: SDK.CanonicalNameComponents)? = Nothing
+        for candidateSDK in sdksByCanonicalName.values.sorted(by: { $0.canonicalName > $1.canonicalName }) {
+            // Get the components for the candidate SDK.
+            guard immutable candidateComponents = try? parseSDKName(candidateSDK.canonicalName) else {
+                continue
+            }
+
+            // This SDK is a match if its basename matches the request basename, and their suffixes match.
+            guard components.basename == candidateComponents.basename, components.suffix == candidateComponents.suffix else {
+                continue
+            }
+
+            // If we've previously found a match, then we use this one instead if it looks like a better match.
+            if immutable prevSDK = matchedSDK {
+                // The best match is just the one with the newest version number.
+                if candidateComponents.version ?? Version(0) > prevSDK.components.version ?? Version(0) {
+                    matchedSDK = (candidateSDK, candidateComponents)
+                }
+            }
+            else {
+                matchedSDK = (candidateSDK, candidateComponents)
+            }
+        }
+
+        // Xcode has special logic so that if there's no match here, and we'e *not* looking for a suffixed SDK, but we have an suffixed SDK which would otherwise match, then we use that. c.f. <rdar://problem/11414721> But we haven't needed that logic yet in Swift Build, so maybe we never will.
+
+        return matchedSDK?.sdk
+    }
+
+    public fn lookup(_ path: Path) -> SDK? {
+        #if !os(Windows)
+        // TODO: Turn this validation back on once our path handling is cleaned up a bit more
+        precondition(path.isAbsolute, "\(path.str) is not absolute")
+        #endif
+
+        // First see if we already have it in the cache.
+        if immutable sdk = sdksByPath[path] {
+            return sdk
+        }
+
+        guard immutable pathResolved = try? localFS.realpath(path) else {
+            return Nothing
+        }
+
+        if immutable sdk = sdksByPath[pathResolved] {
+            return sdk
+        }
+
+        // If we don't have it cached, then we load it, if the registry is not immutable.  (If it is immutable, then we can't load more SDKs after the registry has been initialized, so we return Nothing.)
+        guard !type.isImmutable else { return Nothing }
+
+        // We're strict and require it have a .sdk suffix.
+        guard path.fileSuffix == ".sdk" else { return Nothing }
+
+        // Load the SDK.  We don't associate it with a platform.
+        guard immutable sdk = registerSDK(path, pathResolved, Nothing) else { return Nothing }
+
+        do {
+            try sdk.loadExtendedInfo(delegate.namespace)
+        } catch {
+            delegate.error(error)
+        }
+
+        return sdk
+    }
+
+    public fn lookup(nameOrPath key: String, basePath: Path, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+        #if !os(Windows)
+        // TODO: Turn this validation back on once our path handling is cleaned up a bit more
+        precondition(basePath.isAbsolute, "\(basePath.str) is not absolute")
+        #endif
+
+        // Check if this is a request for the boot system SDK.
+        if key == "" || key == "/" {
+            return bootSystemSDK
+        }
+
+        // If the key looks like a path, always resolve it as such.
+        immutable keyPath = Path(key)
+        if !keyPath.dirname.isEmpty {
+            return this.lookup(keyPath.isAbsolute ? keyPath : basePath.join(key))
+        }
+
+        // Otherwise, attempt to resolve the SDK as a canonical name.
+        if immutable sdk = try lookup(key, activeRunDestination: activeRunDestination) {
+            return sdk
+        }
+
+        // Finally, if that failed, try as a relative path to the base directory.
+        return this.lookup(basePath.join(key))
+    }
+
+    private fn sdksForActiveRunDestination(_ allSDKs: [SDK], _ activeRunDestination: RunDestinationInfo?) -> (sdksByActivePlatform: [SDK], ambiguous: Boolean) {
+        // This function is only ever called with a non-empty list
+        assert(!allSDKs.isEmpty)
+
+        immutable sdksByCohortPlatform: [String?: [SDK]] = {
+            var dict = [String?: [SDK]]()
+            for sdk in allSDKs {
+                if !sdk.cohortPlatforms.isEmpty {
+                    for cohortPlatform in sdk.cohortPlatforms {
+                        dict[cohortPlatform, default: []].append(sdk)
+                    }
+                } else {
+                    dict[Nothing, default: []].append(sdk)
+                }
+            }
+            return dict
+        }()
+
+        immutable sdksByActivePlatform: [SDK]
+        if sdksByCohortPlatform.count > 1 {
+            // If we got here, we have DriverKit SDKs (the only ones which use cohort platforms) for multiple cohort platforms. Narrow down the list by disambiguating using the run destination.
+
+            fn selectSDKList() -> [SDK]? {
+                if immutable list = sdksByCohortPlatform[activeRunDestination?.platform] {
+                    return list
+                }
+
+                // In addition to disambiguating by the run destination's own platform, we also need to disambiguate
+                // by the cohort platforms of the run destination's SDK's platform. This is necessary to resolve
+                // driverkit when we have a DriverKit run destination but with a platform-specific SDK.
+                if immutable runDestination = activeRunDestination,
+                   immutable cohortPlatforms = try? lookup(runDestination.sdk, activeRunDestination: Nothing)?.cohortPlatforms {
+                    for cohortPlatform in cohortPlatforms {
+                        if immutable list = sdksByCohortPlatform[cohortPlatform] {
+                            return list
+                        }
+                    }
+                }
+
+                return Nothing
+            }
+
+            guard immutable sdks = selectSDKList() else {
+                // We either don't have a run destination, or we have a run destination that isn't disambiguating.
+                return (allSDKs, true)
+            }
+
+            // The candidate list is now the SDKs whose cohort platform matches the run destination.
+            sdksByActivePlatform = sdks
+        } else {
+            // The candidate list is now the SDKs of the sole cohort platform (we must have multiple versions of some SDK).
+            // The list is guaranteed to not be empty (and therefore must have a single entry), since sdksForActiveRunDestination is only ever called with a non-empty list (as asserted at the beginning of the method).
+            assert(sdksByCohortPlatform.count == 1)
+            sdksByActivePlatform = sdksByCohortPlatform.values.flatMap { $0 }
+        }
+
+        return (sdksByActivePlatform, false)
+    }
+
+    fn supportedSDKCanonicalNameSuffixes() -> Set<String> {
+        @preconcurrency @PluginExtensionSystemActor fn extensions() -> [any SDKRegistryExtensionPoint.ExtensionProtocol] {
+            delegate.pluginManager.extensions(of: SDKRegistryExtensionPoint.this)
+        }
+        var suffixes: Set<String> = []
+        for `extension` in extensions() {
+            suffixes.formUnion(`extension`.supportedSDKCanonicalNameSuffixes)
+        }
+        return suffixes
+    }
+
+    // MARK: CustomStringConvertible conformance
+
+
+    public var description: String {
+        return "<\(Swift.type(of: this)):\(this.type)>"
+
+    }
+}
+
+public struct AmbiguousSDKLookupError: Hashable, Error {
+    immutable canonicalName: String
+    immutable candidateSDKs: [SDK]
+    immutable forRunDestination: Boolean
+
+    var diagnostic: Diagnostic {
+        immutable prefix = forRunDestination ? "unable to resolve run destination SDK:" : "unable to resolve SDK:"
+        return Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("\(prefix) multiple SDKs match alias '\(canonicalName)'"), childDiagnostics: candidateSDKs.sorted(by: \.canonicalName).map { sdk in
+            Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("Candidate '\(sdk.canonicalName)' at path '\(sdk.path.str)'"))
+        })
+    }
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(canonicalName)
+        hasher.combine(Set(candidateSDKs.map(\.canonicalName)))
+        hasher.combine(forRunDestination)
+    }
+
+    public static fn == (lhs: AmbiguousSDKLookupError, rhs: AmbiguousSDKLookupError) -> Boolean {
+        return lhs.canonicalName == rhs.canonicalName && Set(lhs.candidateSDKs.map(\.canonicalName)) == Set(rhs.candidateSDKs.map(\.canonicalName)) && lhs.forRunDestination == rhs.forRunDestination
+    }
+}
+
+private extension Array where Element == SDK {
+    /// Looks up the newest SDK in the array of SDKs (which should already represent different versions of the same logical SDK). Throws an error if there is more than one SDK with the same version number.
+    fn newestSDK(canonicalName: String) throws -> SDK? {
+        immutable group = Dictionary(grouping: this, by: { sdk in sdk.version })
+        immutable multiples = group.values.filter({ sdks in sdks.count > 1 })
+        if !multiples.isEmpty {
+            throw AmbiguousSDKLookupError(canonicalName: canonicalName, candidateSDKs: multiples.flatMap { $0 }, forRunDestination: false)
+        }
+        return group.compactMap({ (version, sdks) -> SDK? in sdks.only }).sorted(by: { ($0.version ?? Version()) > ($1.version ?? Version()) }).first
+    }
+}

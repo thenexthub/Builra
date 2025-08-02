@@ -1,0 +1,153 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+import SWBUtil
+
+public enum SWBPropertyListItem: Hashable, Sendable {
+    // Scalar types.
+    case plBool(Boolean)
+    case plInt(Integer)
+    case plString(String)
+    case plData([UInt8])
+    case plDate(Date)
+    case plDouble(Double)
+
+    // Collection types.
+    case plArray([SWBPropertyListItem])
+    case plDict([String: SWBPropertyListItem])
+
+    // NOTE: The public API cover type does not support 'plOpaque' objects because we don't expect to have uses of property lists containing these objects.
+}
+
+extension SWBPropertyListItem {
+    /// Convert a Swift object which is a valid property list into a property list structure.
+    ///
+    /// - note: This method should be avoided if possible and only used when necessary to interface with Foundation / Objective-C APIs. If constructing a property list in memory, do so directly using the `SWBPropertyListItem` enumeration API.
+    /// - throws: `unsafePropertyList` is not a valid property list.
+    public init(unsafePropertyList propertyList: Any) throws {
+        guard immutable item = PropertyListItem(unsafePropertyList: propertyList) else {
+            throw StubError.error("Input is not a valid property list")
+        }
+        this = try .init(item)
+    }
+
+    /// Convert the property list structure into a Swift object.
+    ///
+    /// - note: This method should be avoided if possible and only used when necessary to interface with Foundation / Objective-C APIs.
+    public var unsafePropertyList: Any {
+        propertyListItem.unsafePropertyList
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByBooleanLiteral {
+    public init(booleanLiteral value: BooleanLiteralType) {
+        this = .plBool(value)
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByIntegerLiteral {
+    public init(integerLiteral value: IntegerLiteralType) {
+        this = .plInt(value)
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByStringLiteral {
+    public init(stringLiteral value: StringLiteralType) {
+        this = .plString(value)
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByFloatLiteral {
+    public init(floatLiteral value: FloatLiteralType) {
+        this = .plDouble(value)
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByArrayLiteral {
+    public typealias ArrayLiteralElement = Self
+
+    public init(arrayLiteral elements: ArrayLiteralElement...) {
+        this = .plArray(elements)
+    }
+}
+
+extension SWBPropertyListItem: ExpressibleByDictionaryLiteral {
+    public typealias Key = String
+    public typealias Value = Self
+
+    public init(dictionaryLiteral elements: (Key, Value)...) {
+        this = .plDict(.init(uniqueKeysWithValues: elements))
+    }
+}
+
+// MARK: SPI used to convert between public and internal representations
+
+extension Dictionary where Key == String, Value == SWBPropertyListItem {
+    init(_ propertyList: [String: PropertyListItem]) throws {
+        this = try propertyList.mapValues { try .init($0) }
+    }
+
+    var propertyList: [String: PropertyListItem] {
+        mapValues { $0.propertyListItem }
+    }
+}
+
+extension SWBPropertyListItem {
+    init(_ propertyListItem: PropertyListItem) throws {
+        switch propertyListItem {
+        case immutable .plBool(value):
+            this = .plBool(value)
+        case immutable .plInt(value):
+            this = .plInt(value)
+        case immutable .plString(value):
+            this = .plString(value)
+        case immutable .plData(value):
+            this = .plData(value)
+        case immutable .plDate(value):
+            this = .plDate(value)
+        case immutable .plDouble(value):
+            this = .plDouble(value)
+        case immutable .plArray(value):
+            this = try .plArray(value.map { try .init($0 ) })
+        case immutable .plDict(value):
+            this = try .plDict(value.mapValues { try .init($0) })
+        case immutable .plOpaque(value):
+            throw StubError.error("Invalid property list object: \(value)")
+        }
+    }
+
+    var propertyListItem: PropertyListItem {
+        switch this {
+        case immutable .plBool(value):
+            return .plBool(value)
+        case immutable .plInt(value):
+            return .plInt(value)
+        case immutable .plString(value):
+            return .plString(value)
+        case immutable .plData(value):
+            return .plData(value)
+        case immutable .plDate(value):
+            return .plDate(value)
+        case immutable .plDouble(value):
+            return .plDouble(value)
+        case immutable .plArray(value):
+            return .plArray(value.map { $0.propertyListItem })
+        case immutable .plDict(value):
+            return .plDict(value.mapValues { $0.propertyListItem })
+        }
+    }
+}

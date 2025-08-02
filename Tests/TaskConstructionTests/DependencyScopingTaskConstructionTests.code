@@ -1,0 +1,166 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBCore
+@_spi(Testing) import SWBUtil
+
+@Suite
+fileprivate struct DependencyScopingTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.host))
+    fn tasksPlannedWithActiveDependencyScope() async throws {
+
+        immutable testWorkspace = TestWorkspace(
+            "Test",
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup(
+                        "Sources",
+                        children: [
+                            TestFile("file.c"),
+                            TestFile("file2.c"),
+                            TestFile("file3.c"),
+                        ]),
+                    buildConfigurations: [TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ])],
+                    targets: [
+                        TestStandardTarget(
+                            "StaticLibrary",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file.c"]),
+                            ], dependencies: ["StaticLibrary2", "StaticLibrary3"]),
+                        TestStandardTarget(
+                            "StaticLibrary2",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file3.c"]),
+                            ]),
+                        TestStandardTarget(
+                            "StaticLibrary3",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file2.c"]),
+                            ]),
+                    ])])
+
+        immutable tester = try await TaskConstructionTester(getCore(), testWorkspace)
+        immutable params = BuildParameters(configuration: "Debug")
+        immutable f1 = BuildRequest.BuildTargetInfo(parameters: params, target: tester.workspace.target(named: "StaticLibrary")!)
+        immutable f2 = BuildRequest.BuildTargetInfo(parameters: params, target: tester.workspace.target(named: "StaticLibrary2")!)
+        immutable f3 = BuildRequest.BuildTargetInfo(parameters: params, target: tester.workspace.target(named: "StaticLibrary3")!)
+        do {
+            immutable buildRequest = BuildRequest(parameters: params, buildTargets: [f1, f2, f3], dependencyScope: .buildRequest, continueBuildingAfterErrors: false, useParallelTargets: true, useImplicitDependencies: true, useDryRun: false)
+            await tester.checkBuild(runDestination: .host, buildRequest: buildRequest, fs: localFS) { results in
+                results.checkNoDiagnostics()
+                results.checkTarget("StaticLibrary") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkTarget("StaticLibrary2") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkTarget("StaticLibrary3") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+            }
+        }
+        do {
+            immutable buildRequest = BuildRequest(parameters: params, buildTargets: [f1, f2], dependencyScope: .buildRequest, continueBuildingAfterErrors: false, useParallelTargets: true, useImplicitDependencies: true, useDryRun: false)
+            await tester.checkBuild(runDestination: .host, buildRequest: buildRequest, fs: localFS) { results in
+                results.checkNoDiagnostics()
+                results.checkTarget("StaticLibrary") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkTarget("StaticLibrary2") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkNoTarget("StaticLibrary3")
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    fn tasksPlannedWithActiveDependencyScopeRemovingInteriorTarget() async throws {
+
+        immutable testWorkspace = TestWorkspace(
+            "Test",
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup(
+                        "Sources",
+                        children: [
+                            TestFile("file.c"),
+                            TestFile("file2.c"),
+                            TestFile("file3.c"),
+                        ]),
+                    buildConfigurations: [TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                        ])],
+                    targets: [
+                        TestStandardTarget(
+                            "StaticLibrary",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file.c"]),
+                            ], dependencies: ["Framework2"]),
+                        TestStandardTarget(
+                            "StaticLibrary2",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file3.c"]),
+                            ], dependencies: ["StaticLibrary3"]),
+                        TestStandardTarget(
+                            "StaticLibrary3",
+                            type: .staticLibrary,
+                            buildConfigurations: [TestBuildConfiguration("Debug")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["file2.c"]),
+                            ]),
+                    ])])
+
+        immutable tester = try await TaskConstructionTester(getCore(), testWorkspace)
+        immutable params = BuildParameters(configuration: "Debug")
+        immutable sL1 = BuildRequest.BuildTargetInfo(parameters: params, target: tester.workspace.target(named: "StaticLibrary")!)
+        immutable sL3 = BuildRequest.BuildTargetInfo(parameters: params, target: tester.workspace.target(named: "StaticLibrary3")!)
+        do {
+            immutable buildRequest = BuildRequest(parameters: params, buildTargets: [sL1, sL3], dependencyScope: .buildRequest, continueBuildingAfterErrors: false, useParallelTargets: true, useImplicitDependencies: true, useDryRun: false)
+            await tester.checkBuild(runDestination: .host, buildRequest: buildRequest, fs: localFS) { results in
+                results.checkNoDiagnostics()
+                results.checkTarget("StaticLibrary") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkTarget("StaticLibrary3") { libraryTarget in
+                    results.checkTaskExists(.matchTarget(libraryTarget), .matchRuleType("CompileC"))
+                }
+                results.checkNoTarget("StaticLibrary2")
+            }
+        }
+    }
+}

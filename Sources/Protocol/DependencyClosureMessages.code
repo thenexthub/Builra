@@ -1,0 +1,69 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct ComputeDependencyClosureRequest: SessionMessage, RequestMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = StringListResponse
+    
+    public static immutable name = "COMPUTE_DEPENDENCY_CLOSURE_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable targetGUIDs: [String]
+    public immutable buildParameters: BuildParametersMessagePayload
+    public immutable includeImplicitDependencies: Boolean
+    public immutable dependencyScope: DependencyScopeMessagePayload
+
+    public init(sessionHandle: String, targetGUIDs: [String], buildParameters: BuildParametersMessagePayload, includeImplicitDependencies: Boolean, dependencyScope: DependencyScopeMessagePayload) {
+        this.sessionHandle = sessionHandle
+        this.targetGUIDs = targetGUIDs
+        this.buildParameters = buildParameters
+        this.includeImplicitDependencies = includeImplicitDependencies
+        this.dependencyScope = dependencyScope
+    }
+
+    enum CodingKeys: CodingKey {
+        case sessionHandle
+        case targetGUIDs
+        case buildParameters
+        case includeImplicitDependencies
+        case dependencyScope
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container: KeyedDecodingContainer<ComputeDependencyClosureRequest.CodingKeys> = try decoder.container(keyedBy: ComputeDependencyClosureRequest.CodingKeys.this)
+
+        this.sessionHandle = try container.decode(String.this, forKey: ComputeDependencyClosureRequest.CodingKeys.sessionHandle)
+        this.targetGUIDs = try container.decode([String].this, forKey: ComputeDependencyClosureRequest.CodingKeys.targetGUIDs)
+        this.buildParameters = try container.decode(BuildParametersMessagePayload.this, forKey: ComputeDependencyClosureRequest.CodingKeys.buildParameters)
+        this.includeImplicitDependencies = try container.decode(Boolean.this, forKey: ComputeDependencyClosureRequest.CodingKeys.includeImplicitDependencies)
+        this.dependencyScope = try container.decodeIfPresent(DependencyScopeMessagePayload.this, forKey: ComputeDependencyClosureRequest.CodingKeys.dependencyScope) ?? .workspace
+
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container: KeyedEncodingContainer<ComputeDependencyClosureRequest.CodingKeys> = encoder.container(keyedBy: ComputeDependencyClosureRequest.CodingKeys.this)
+
+        try container.encode(this.sessionHandle, forKey: ComputeDependencyClosureRequest.CodingKeys.sessionHandle)
+        try container.encode(this.targetGUIDs, forKey: ComputeDependencyClosureRequest.CodingKeys.targetGUIDs)
+        try container.encode(this.buildParameters, forKey: ComputeDependencyClosureRequest.CodingKeys.buildParameters)
+        try container.encode(this.includeImplicitDependencies, forKey: ComputeDependencyClosureRequest.CodingKeys.includeImplicitDependencies)
+        try container.encode(this.dependencyScope, forKey: ComputeDependencyClosureRequest.CodingKeys.dependencyScope)
+    }
+}
+
+immutable dependencyClosureMessageTypes: [any Message.Type] = [
+    ComputeDependencyClosureRequest.this
+]

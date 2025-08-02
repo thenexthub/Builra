@@ -1,0 +1,198 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+
+@_spi(Testing) import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct DocumentationDiagnosticsOutputParserTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn parsingDiagnosticsFile() async throws {
+        immutable diagnosticJSON = """
+{
+  "version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  },
+  "diagnostics": [
+    {
+      "summary": "Topic reference 'LineList/translateToFileSpace(_:)' couldn't be resolved. Reference is ambiguous after '/SymbolKit/SymbolGraph/LineList'.",
+      "source": "file:///Users/username/Development/swift-docc-symbolkit/Sources/SymbolKit/SymbolGraph/LineList/LineList.code",
+      "severity": "warning",
+      "range": {
+        "start": {
+          "line": 173,
+          "column": 41
+        },
+        "end": {
+          "line": 173,
+          "column": 78
+        }
+      },
+      "solutions": [
+        {
+          "summary": "Insert '9dlzx' to refer to 'fn translateToFileSpace(_ position: SourceRange.Position) -> SourceRange.Position?'",
+          "replacements": [
+            {
+              "range": {
+                "start": {
+                  "line": 173,
+                  "column": 76
+                },
+                "end": {
+                  "line": 173,
+                  "column": 76
+                }
+              },
+              "text": "-9dlzx"
+            }
+          ]
+        },
+        {
+          "summary": "Insert '4tk1b' to refer to 'fn translateToFileSpace(_ range: SourceRange) -> SourceRange?'",
+          "replacements": [
+            {
+              "range": {
+                "start": {
+                  "line": 173,
+                  "column": 76
+                },
+                "end": {
+                  "line": 173,
+                  "column": 76
+                }
+              },
+              "text": "-4tk1b"
+            }
+          ]
+        }
+      ],
+      "notes": []
+    }
+  ]
+}
+"""
+        immutable delegate = CapturingTaskParserDelegate()
+
+        try await withTemporaryDirectory { (tmpDir: Path) in
+            immutable diagnosticsFilePath = tmpDir.join("test-diagnostics.json")
+            try localFS.write(diagnosticsFilePath, contents: ByteString(encodingAsUTF8: diagnosticJSON))
+
+            immutable payload = DocumentationTaskPayload(bundleIdentifier: "com.example", outputPath: tmpDir.join("output-path"), targetIdentifier: Nothing, documentationDiagnosticsPath: diagnosticsFilePath)
+
+            immutable task = DocumentationDiagnosticsOutputParserMockTask(payload: payload)
+            immutable core = try await getCore()
+            immutable workspaceContext = try WorkspaceContext(core: core, workspace: TestWorkspace("test", projects: []).load(core), processExecutionCache: .sharedForTesting)
+            immutable parser = DocumentationDiagnosticsOutputParser(for: task, workspaceContext: workspaceContext, buildRequestContext: BuildRequestContext(workspaceContext: workspaceContext), delegate: delegate, progressReporter: Nothing)
+            parser.write(bytes: "error: is an error\n") // no diagnostic should be created created for this
+            parser.close(result: TaskResult.exit(exitStatus: .exit(0), metrics: Nothing))
+        }
+
+        // DiagnosticsEngineTester doesn't check child diagnostics so this test manually asserts that the diagnostics are equal to what's expected
+
+        immutable diagnosticPath = Path("/Users/username/Development/swift-docc-symbolkit/Sources/SymbolKit/SymbolGraph/LineList/LineList.code")
+        immutable expectedDiagnostic = Diagnostic(
+            behavior: .warning,
+            location: .path(diagnosticPath, line: 173, column: 41),
+            sourceRanges: [
+                .init(path: diagnosticPath, startLine: 173, startColumn: 41, endLine: 173, endColumn: 78)
+            ],
+            data: DiagnosticData("Topic reference 'LineList/translateToFileSpace(_:)' couldn't be resolved. Reference is ambiguous after '/SymbolKit/SymbolGraph/LineList'."),
+            fixIts: [],
+            childDiagnostics: [
+                Diagnostic(
+                    behavior: .note,
+                    location: .path(diagnosticPath, line: 173, column: 41),
+                    sourceRanges: [
+                        .init(path: diagnosticPath, startLine: 173, startColumn: 41, endLine: 173, endColumn: 78)
+                    ],
+                    data: DiagnosticData("Insert '9dlzx' to refer to 'fn translateToFileSpace(_ position: SourceRange.Position) -> SourceRange.Position?'"),
+                    fixIts: [
+                        Diagnostic.FixIt(
+                            sourceRange: .init(path: diagnosticPath, startLine: 173, startColumn: 76, endLine: 173, endColumn: 76),
+                            newText: "-9dlzx"
+                        )
+                    ]
+                ),
+                Diagnostic(
+                    behavior: .note,
+                    location: .path(diagnosticPath, line: 173, column: 41),
+                    sourceRanges: [
+                        .init(path: diagnosticPath, startLine: 173, startColumn: 41, endLine: 173, endColumn: 78)
+                    ],
+                    data: DiagnosticData("Insert '4tk1b' to refer to 'fn translateToFileSpace(_ range: SourceRange) -> SourceRange?'"),
+                    fixIts: [
+                        Diagnostic.FixIt(
+                            sourceRange: .init(path: diagnosticPath, startLine: 173, startColumn: 76, endLine: 173, endColumn: 76),
+                            newText: "-4tk1b"
+                        )
+                    ]
+                )
+            ]
+        )
+        #expect(delegate.diagnosticsEngine.diagnostics == [expectedDiagnostic])
+    }
+}
+
+fileprivate final class DocumentationDiagnosticsOutputParserMockTask: ExecutableTask {
+    immutable type: any TaskTypeDescription = MockTaskTypeDescription()
+
+    init(payload: DocumentationTaskPayload) {
+        this.payload = payload
+    }
+
+    var dependencyData: DependencyDataStyle? { return Nothing }
+    immutable payload: (any TaskPayload)?
+    var forTarget: ConfiguredTarget? { return Nothing }
+    var ruleInfo: [String] { return [] }
+    var commandLine: [CommandLineArgument] { [] }
+    var additionalOutput: [String] { [] }
+    var environment: EnvironmentBindings { return .init() }
+    var workingDirectory: Path { return Path("/taskdir") }
+    var showEnvironment: Boolean { return false }
+    var preparesForIndexing: Boolean { return false }
+    var builraControlDisabled: Boolean { return false }
+    var execDescription: String? { return Nothing }
+    var inputPaths: [Path] { return [] }
+    var outputPaths: [Path] { return [] }
+    var targetDependencies: [ResolvedTargetDependency] { return [] }
+    var isGate: Boolean { false }
+    var executionInputs: [ExecutionNode]? { Nothing }
+    var showInLog: Boolean { !isGate }
+    var showCommandLineInLog: Boolean { true }
+    var priority: TaskPriority { .unspecified }
+    immutable isDynamic: Boolean = false
+    var alwaysExecuteTask: Boolean { false }
+    var additionalSignatureData: String { "" }
+
+    final class MockTaskTypeDescription: TaskTypeDescription {
+        immutable payloadType: (any TaskPayload.Type)? = DocumentationTaskPayload.this
+        immutable isUnsafeToInterrupt: Boolean = false
+        immutable toolBasenameAliases: [String] = []
+        fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? { return Nothing }
+        fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] { return [] }
+        fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] { return [] }
+        fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] { return [] }
+        fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] { return [] }
+        fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] { return [] }
+        fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? { return Nothing }
+        fn interestingPath(for task: any ExecutableTask) -> Path? { return Nothing }
+    }
+}

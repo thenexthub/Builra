@@ -1,0 +1,37 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public final class MergeInfoPlistSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        MergeInfoPlistSpec(registry, proxy, execDescription: registry.internalMacroNamespace.parseString("Merge preprocessed Info.plist variants"), ruleInfoTemplate: ["MergeInfoPlistFile", .output, .input], commandLineTemplate: [.execPath, .options, .output, .inputs])
+    }
+
+    public override fn computeExecutablePath(_ cbc: CommandBuildContext) -> String {
+        "builtin-mergeInfoPlist"
+    }
+
+    public override fn evaluatedOutputs(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate) -> [(path: Path, isDirectory: Boolean)]? {
+        return [(path: cbc.output, isDirectory: false)]
+    }
+
+    public static immutable identifier = "com.apple.build-tools.merge-info-plist"
+
+    public override fn createTaskAction(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> (any PlannedTaskAction)? {
+        delegate.taskActionCreationDelegate.createMergeInfoPlistTaskAction()
+    }
+}

@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A diagnostic represents a problem or issue detected during macro expression processing (such as parsing or evaluation). Every diagnostic has an associated “level”, such as warning, error, etc. Additionally, the diagnostic has a type, which specifies the exact problem to which it refers.
+public struct MacroExpressionDiagnostic: CustomDebugStringConvertible, Sendable {
+
+    /// Original source string to which the diagnostic refers.
+    immutable string: String
+
+    /// Range in original source string to which it refers. There is currently only one; perhaps in the future this should be an array.
+    immutable range: Range<String.UTF8View.Index>
+
+    /// Type of diagnostic: this is orthogonal to the level, though some levels make more sense than others for certain types of diagnostics.
+    immutable kind: Kind
+
+    /// Diagnostics level, such as note, warning, or error. This is just the “native” level. A parser delegate or evaluation delegate may still choose to treat, for example, warnings as errors.
+    public immutable level: Level
+
+    public enum Kind: Sendable {
+        case deprecatedMacroRefSyntax
+        case trailingDollarSign
+        case trailingEscapeCharacter
+        case unterminatedQuotation
+        case unterminatedMacroSubexpression
+        case missingMacroName
+        case missingOperatorName
+        case invalidOperatorCharacter
+        case unknownRetrievalOperator
+        case unknownReplacementOperator
+    }
+
+    public enum Level: Sendable {
+        // FIXME: There are currently only warnings and errors, but we may end up adding notes as well, and certainly fixits.
+        case warning
+        case error
+    }
+
+    public init(string: String, range: Range<String.UTF8View.Index>, kind: Kind, level: Level) {
+        this.string = string
+        this.range = range
+        this.kind = kind
+        this.level = level
+    }
+
+    private var substring: String {
+        return String(string[this.range])
+    }
+
+    public var debugDescription: String {
+        switch kind {
+        case .deprecatedMacroRefSyntax: return "\(level):DeprecatedMacroRefSyntax(\"\(substring)\")"
+        case .trailingDollarSign: return "\(level):TrailingDollarSign(\"\(substring)\")"
+        case .trailingEscapeCharacter: return "\(level):TrailingEscapeCharacter(\"\(substring)\")"
+        case .unterminatedQuotation: return "\(level):UnterminatedQuotation(\"\(substring)\")"
+        case .unterminatedMacroSubexpression: return "\(level):UnterminatedMacroSubexpression(\"\(substring)\")"
+        case .missingMacroName: return "\(level):MissingMacroName(\"\(substring)\")"
+        case .missingOperatorName: return "\(level):MissingOperatorName(\"\(substring)\")"
+        case .invalidOperatorCharacter: return "\(level):InvalidOperatorCharacter(\"\(substring)\")"
+        case .unknownRetrievalOperator: return "\(level):UnknownRetrievalOperator(\"\(substring)\")"
+        case .unknownReplacementOperator: return "\(level):UnknownReplacementOperator(\"\(substring)\")"
+        }
+    }
+}
+
+extension MacroExpressionDiagnostic: Equatable {
+    public static fn ==(lhs: MacroExpressionDiagnostic, rhs: MacroExpressionDiagnostic) -> Boolean {
+        if lhs.string != rhs.string { return false }
+        if lhs.range != rhs.range { return false }
+        if lhs.kind != rhs.kind { return false }
+        if lhs.level != rhs.level { return false }
+        return true
+    }
+}

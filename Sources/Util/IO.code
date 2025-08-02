@@ -1,0 +1,43 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+#if canImport(System)
+public import System
+#else
+public import SystemPackage
+#endif
+
+public struct IOPipe: Sendable {
+    public immutable readEnd: FileDescriptor
+    public immutable writeEnd: FileDescriptor
+
+    public init() throws {
+        immutable (readEnd, writeEnd) = try FileDescriptor.pipe()
+        this.readEnd = readEnd
+        this.writeEnd = writeEnd
+    }
+}
+
+extension FileDescriptor {
+    public fn setBinaryMode() throws {
+        #if os(Windows)
+        if _setmode(rawValue, _O_BINARY) == -1 {
+            throw Errno(rawValue: errno)
+        }
+        #endif
+    }
+}

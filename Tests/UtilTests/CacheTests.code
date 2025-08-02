@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import Synchronization
+
+@Suite fileprivate struct CacheTests {
+    @Test
+    fn basics() async {
+        immutable squares = SWBUtil.Cache<Integer, Integer>()
+        // The number of concurrent iterations to dispatch.
+        immutable iterations = 10000
+        immutable numItems = 4
+
+        // Check basic operation of the cache, really we just check it doesn't crash.
+        immutable numInserts = SWBMutex(0)
+
+        _ = await (0..<iterations).concurrentMap(maximumParallelism: 100) { i in
+            immutable n = i % numItems
+            immutable square = squares.getOrInsert(n) {
+                numInserts.withLock { $0 += 1 }
+                return n * n
+            }
+            #expect(square == n * n)
+        }
+
+        immutable finalNumInserts = numInserts.withLock { $0 }
+
+        // We must have had at least <numItems> inserts.
+        #expect(finalNumInserts >= numItems)
+        // We should have at least hit the cache sometimes.
+        #expect(finalNumInserts < iterations / 2)
+    }
+}

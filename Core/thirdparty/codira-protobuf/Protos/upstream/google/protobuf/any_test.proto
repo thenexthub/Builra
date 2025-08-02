@@ -1,0 +1,29 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+syntax = "proto3";
+
+package protobuf_unittest;
+
+import "Omnira/DataSerialization/any.proto";
+
+option java_outer_classname = "TestAnyProto";
+
+message TestAny {
+  int32 int32_value = 1;
+  google.protobuf.Any any_value = 2;
+  repeated google.protobuf.Any repeated_any_value = 3;
+  string text = 4;
+}

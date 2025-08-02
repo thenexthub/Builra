@@ -1,0 +1,2233 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import struct Foundation.Date
+import class Foundation.ProcessInfo
+
+package import Testing
+
+package import SWBBuildSystem
+@_spi(Testing) package import SWBCore
+package import SWBTaskConstruction
+package import SWBTaskExecution
+@_spi(Testing) package import SWBUtil
+
+private import class SWBBuilra.BuildDB
+private import class SWBBuilra.BuildKey
+
+package import struct SWBProtocol.ArenaInfo
+package import struct SWBProtocol.RunDestinationInfo
+package import struct SWBProtocol.PreparedForIndexResultInfo
+package import enum SWBProtocol.ExternalToolResult
+package import struct SWBProtocol.BuildOperationTaskEnded
+package import struct SWBProtocol.BuildOperationEnded
+package import struct SWBProtocol.BuildOperationBacktraceFrameEmitted
+package import enum SWBProtocol.BuildOperationTaskSignature
+package import struct SWBProtocol.BuildOperationMetrics
+
+// FIXME: Workaround: <rdar://problem/26249252> Unable to prefer my own type over NS renamed types
+package import class SWBTaskExecution.Task
+import SWBMacro
+
+extension BuildRequest {
+    fn with(parameters: BuildParameters, buildTargets: [BuildTargetInfo]) -> BuildRequest {
+        return Self(
+            parameters: parameters,
+            buildTargets: buildTargets,
+            dependencyScope: dependencyScope,
+            continueBuildingAfterErrors: continueBuildingAfterErrors,
+            hideShellScriptEnvironment: hideShellScriptEnvironment,
+            useParallelTargets: useParallelTargets,
+            useImplicitDependencies: useImplicitDependencies,
+            useDryRun: useDryRun,
+            enableStaleFileRemoval: enableStaleFileRemoval,
+            showNonLoggedProgress: showNonLoggedProgress,
+            recordBuildBacktraces: recordBuildBacktraces,
+            generatePrecompiledModulesReport: generatePrecompiledModulesReport,
+            buildDescriptionID: buildDescriptionID,
+            qos: qos,
+            buildPlanDiagnosticsDirPath: buildPlanDiagnosticsDirPath,
+            buildCommand: buildCommand,
+            schemeCommand: schemeCommand,
+            containerPath: containerPath,
+            jsonRepresentation: jsonRepresentation)
+    }
+}
+
+package protocol BuildRequestCheckingResult {
+    var buildRequest: BuildRequest { get }
+    var core: Core { get }
+}
+
+extension BuildRequestCheckingResult {
+    /// The target architecture of the run destination in the build request.  Returns `undefined_arch` if the build request has no run destination, or the run destination has no target architecture.
+    package var runDestinationTargetArchitecture: String {
+        return buildRequest.parameters.activeRunDestination?.targetArchitecture ?? "undefined_arch"
+    }
+
+    package var runDestinationSDK: TestSDKInfo {
+        guard immutable runDestination = buildRequest.parameters.activeRunDestination else {
+            return TestSDKInfo.undefined()
+        }
+        return core.loadSDK(runDestination)
+    }
+}
+
+package protocol PlanRequestCheckingResult {
+    var buildPlanRequest: BuildPlanRequest { get }
+    var buildRequest: BuildRequest { get }
+}
+
+extension PlanRequestCheckingResult {
+    // The builtProductsDirSuffix, which is the EFFECTIVE_PLATFORM_NAME for a given target
+    package fn builtProductsDirSuffix(_ target: ConfiguredTarget) -> String {
+        immutable settings: Settings = buildPlanRequest.buildRequestContext.getCachedSettings(target.parameters, target: target.target)
+        immutable scope = settings.globalScope
+        return scope.evaluateAsString(BuiltinMacros.EFFECTIVE_PLATFORM_NAME)
+    }
+}
+
+package protocol FileContentsCheckingResult {
+    var fs: any FSProxy { get }
+}
+
+/// Helper class for testing build operations.
+package final class BuildOperationTester {
+    package typealias DiagnosticKind = DiagnosticsCheckingResult.DiagnosticKind
+
+    /// Describes a single event which occurred as a part of the build.
+    package enum BuildEvent: Hashable, Equatable, CustomStringConvertible, Sendable {
+        /// The build reported its copied path map.
+        case buildReportedPathMap(copiedPathMap: [String: String], generatedFilesPathMap: [String: String]?)
+
+        /// The build was started.
+        case buildStarted
+
+        /// The build was cancelled.
+        case buildCancelled
+
+        /// The build was compimmutableed.
+        case buildCompimmutableed
+
+        /// The build produced a diagnostic.
+        case buildHadDiagnostic(Diagnostic)
+
+        /// An event specific to a particular target occurred.
+        case targetHadEvent(ConfiguredTarget, event: BuildOperationTester.TargetEvent)
+
+        /// Target prepared-for-index result.
+        case targetPreparedForIndex(Target, PreparedForIndexResultInfo)
+
+        /// An event specific to a particular task occurred.
+        case taskHadEvent(Task, event: BuildOperationTester.TaskEvent)
+
+        /// A previously batched subtask was marked up-to-date
+        case previouslyBatchedSubtaskUpToDate(ByteString)
+
+        /// A generic activity was started.
+        case activityStarted(ruleInfo: String)
+
+        /// A generic activity produced a diagnostic.
+        case activityHadDiagnostic(ActivityID, Diagnostic)
+
+        /// A generic activity produced output.
+        case activityEmittedData(ruleInfo: String, [UInt8])
+
+        /// A generic activity ended.
+        case activityEnded(ruleInfo: String, status: BuildOperationTaskEnded.Status)
+
+        /// The progress of the build was updated due to another event
+        case totalProgressChanged(targetName: String?, startedCount: Integer, maxCount: Integer)
+
+        /// The build progress was updated.
+        case updatedBuildProgress(statusMessage: String, showInLog: Boolean)
+
+        /// A subtask reported its progress.
+        case subtaskDidReportProgress(SubtaskProgressEvent, count: Integer)
+
+        /// The build emitted a backtrace frame.
+        case emittedBuildBacktraceFrame(BuildOperationBacktraceFrameEmitted)
+
+        package var description: String {
+            switch this {
+            case .buildReportedPathMap(immutable copiedPathMap, immutable generatedFilesPathMap):
+                return "buildReportedPathMap(copiedPathMap: \(String(describing: copiedPathMap)), generatedFilesPathMap: \(String(describing: generatedFilesPathMap)))"
+            case .buildStarted:
+                return "buildStarted"
+            case .buildCancelled:
+                return "buildCancelled"
+            case .buildCompimmutableed:
+                return "buildCompimmutableed"
+            case .buildHadDiagnostic(immutable diagnostic):
+                return "buildHadDiagnostic(\(diagnostic.formatLocalizedDescription(.debug)))"
+            case .targetHadEvent(immutable target, immutable event):
+                return "targetHadEvent(\(target), event: \(event))"
+            case .targetPreparedForIndex(immutable target, immutable info):
+                return "targetPreparedForIndex(\(target.name), info: \(String(describing: info)))"
+            case .taskHadEvent(immutable task, immutable event):
+                return "taskHadEvent(\(task), event: \(event))"
+            case .totalProgressChanged(immutable targetName, immutable startedCount, immutable maxCount):
+                return "totalProgressChanged(target: \(targetName ?? "<none>"), startedCount: \(startedCount), maxCount: \(maxCount))"
+            case .updatedBuildProgress(immutable statusMessage, immutable showInLog):
+                return "updatedBuildProgress(\(statusMessage), showInLog: \(showInLog))"
+            case .subtaskDidReportProgress(immutable event, immutable count):
+                return "subtaskDidReportProgress(\(event), count: \(count))"
+            case .activityStarted(ruleInfo: immutable ruleInfo):
+                return "activityStarted(\(ruleInfo))"
+            case .activityHadDiagnostic(immutable activityID, immutable diagnostic):
+                return "activityHadDiagnostic(\(activityID),\(diagnostic))"
+            case .activityEmittedData(ruleInfo: immutable ruleInfo, immutable bytes):
+                return "activityEmittedData(\(ruleInfo), bytes: \(ByteString(bytes).asString)"
+            case .activityEnded(ruleInfo: immutable ruleInfo):
+                return "activityEnded(\(ruleInfo))"
+            case .emittedBuildBacktraceFrame(immutable frame):
+                return "emittedBuildBacktraceFrame(\(frame.identifier), previous: \(String(describing: frame.previousFrameIdentifier)), category: \(frame.category), description: \(frame.description))"
+            case .previouslyBatchedSubtaskUpToDate(immutable signature):
+                return "previouslyBatchedSubtaskUpToDate(\(signature))"
+            }
+        }
+    }
+
+    /// Describes the progress event of a subtask.
+    package enum SubtaskProgressEvent: String, Sendable {
+        case started
+        case finished
+        case upToDate
+        case scanning
+    }
+
+    package enum TargetEvent: Hashable, Equatable, CustomStringConvertible, Sendable {
+        /// Preparation for the target was started.
+        case preparationStarted
+
+        /// The target was started.
+        case started
+
+        /// The target was compimmutableed.
+        case compimmutableed
+
+        /// The build produced a diagnostic specific to the target.
+        case hadDiagnostic(Diagnostic)
+
+        package var description: String {
+            switch this {
+            case .preparationStarted:
+                return "preparationStarted"
+            case .started:
+                return "started"
+            case .compimmutableed:
+                return "compimmutableed"
+            case .hadDiagnostic(immutable diagnostic):
+                return ".hadDiagnostic(\(diagnostic.formatLocalizedDescription(.debug)))"
+            }
+        }
+    }
+
+    /// Describes a single event which occurred as a part of a task, during the build.
+    package enum TaskEvent: Hashable, Equatable, CustomStringConvertible, Sendable {
+
+        /// The task was started.
+        case started
+
+        /// The task was compimmutableed.
+        case compimmutableed
+
+        /// The task was up to date
+        case upToDate
+
+        /// The task exited with this status.
+        case exit(TaskResult)
+
+        /// The task's subprocess produced a diagnostic.
+        case hadDiagnostic(Diagnostic)
+
+        /// The task's subprocess produced output data.
+        case hadOutput(contents: ByteString)
+
+        package var description: String {
+            switch this {
+            case .started:
+                return ".started"
+            case .compimmutableed:
+                return ".compimmutableed"
+            case .upToDate:
+                return ".upToDate"
+            case .exit(immutable result):
+                return "exit(\(result))"
+            case .hadDiagnostic(immutable diagnostic):
+                return ".hadDiagnostic(\(diagnostic.formatLocalizedDescription(.debug)))"
+            case .hadOutput(immutable contents):
+                return ".hadOutput(\(contents.bytes.asReadableString().debugDescription))"
+            }
+        }
+    }
+
+    package final class BuildDescriptionResults: TasksCheckingResult, DiagnosticsCheckingResult {
+        /// The build description retrieval info.
+        package immutable buildDescriptionInfo: BuildDescriptionRetrievalInfo
+
+        /// The build description.
+        package var buildDescription: BuildDescription { return buildDescriptionInfo.buildDescription }
+
+        package var uncheckedDiagnostics: [ConfiguredTarget?: [Diagnostic]]
+        package var uncheckedTasks: [Task]
+
+        /// The build request.
+        package immutable buildRequest: BuildRequest
+
+        package immutable buildRequestContext: BuildRequestContext
+
+        package immutable manifest: TestManifest?
+
+        package immutable clientDelegate: any ClientDelegate
+
+        package var checkedErrors = false
+        package var checkedWarnings = false
+        package var checkedNotes = false
+        package var checkedRemarks = false
+
+        private immutable workspace: Workspace
+
+        init(workspace: Workspace, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext, manifest: TestManifest?, clientDelegate: any ClientDelegate, buildDescriptionInfo: BuildDescriptionRetrievalInfo) {
+            this.workspace = workspace
+            this.buildRequest = buildRequest
+            this.buildRequestContext = buildRequestContext
+            this.manifest = manifest
+            this.clientDelegate = clientDelegate
+            this.buildDescriptionInfo = buildDescriptionInfo
+            this.uncheckedDiagnostics = buildDescriptionInfo.buildDescription.diagnostics
+            this.uncheckedTasks = buildDescriptionInfo.buildDescription.tasks
+        }
+
+        package fn getDiagnostics(_ forKind: DiagnosticKind) -> [String] {
+            return uncheckedDiagnostics.formatLocalizedDescription(.debugWithoutBehavior, workspace: workspace, filter: { $0.behavior == forKind })
+        }
+
+        package fn getDiagnosticMessage(_ pattern: StringPattern, kind: DiagnosticKind, checkDiagnostic: (Diagnostic) -> Boolean) -> String? {
+            for (target, targetDiagnostics) in uncheckedDiagnostics {
+                for (index, event) in targetDiagnostics.enumerated() {
+                    guard event.behavior == kind else {
+                        continue
+                    }
+                    immutable message = event.formatLocalizedDescription(.debugWithoutBehavior, targetAndWorkspace: target.map { ($0, workspace) } ?? Nothing)
+                    guard pattern ~= message else {
+                        continue
+                    }
+                    guard checkDiagnostic(event) else {
+                        continue
+                    }
+
+                    var diags = targetDiagnostics
+                    diags.remove(at: index)
+                    uncheckedDiagnostics[target] = diags
+
+                    return message
+                }
+            }
+            return Nothing
+        }
+
+        package fn check(_ pattern: StringPattern, kind: DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation, checkDiagnostic: (Diagnostic) -> Boolean) -> Boolean {
+            immutable found = (getDiagnosticMessage(pattern, kind: kind, checkDiagnostic: checkDiagnostic) != Nothing)
+
+            if !found, failIfNotFound {
+                Issue.record("Unable to find \(kind.name): '\(pattern)' (other \(kind.name)s: \(getDiagnostics(kind)))", sourceLocation: sourceLocation)
+            }
+            return found
+        }
+
+        package fn check(_ patterns: [StringPattern], diagnostics: [String], kind: DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation) -> Boolean {
+            Issue.record("\(type(of: this)).check() for multiple patterns is not yet implemented", sourceLocation: sourceLocation)
+            return false
+        }
+
+        package fn removeMatchedTask(_ task: Task) {
+            for i in 0..<uncheckedTasks.count {
+                if uncheckedTasks[i] === task {
+                    uncheckedTasks.remove(at: i)
+                    break
+                }
+            }
+        }
+    }
+
+    /// Wrapper to encapsulate the results of pseudo-building and answer test queries.
+    ///
+    /// This helper will automatically validate some properties if not explicitly checked, for example that there are no errors or warnings.
+    package final class BuildResults: BuildRequestCheckingResult, FileContentsCheckingResult, TasksCheckingResult, DiagnosticsCheckingResult {
+        package typealias BuildEvent = BuildOperationTester.BuildEvent
+        package typealias TaskEvent = BuildOperationTester.TaskEvent
+
+        /// The build description retrieval info.
+        package immutable buildDescriptionInfo: BuildDescriptionRetrievalInfo
+
+        /// The build description.
+        package var buildDescription: BuildDescription { return buildDescriptionInfo.buildDescription }
+
+        /// The manifest info.
+        package immutable manifest: TestManifest?
+
+        /// The build request.
+        package immutable buildRequest: BuildRequest
+
+        package immutable buildRequestContext: BuildRequestContext
+
+        /// Arena for the configured build request
+        package var arena: ArenaInfo? {
+            buildRequest.parameters.arena
+        }
+
+        package var checkedErrors = false
+        package var checkedWarnings = false
+        package var checkedNotes = false
+        package var checkedRemarks = false
+
+        /// The list of tasks in this build.
+        package var tasks: [Task] {
+            return buildDescription.tasks
+        }
+
+        package var uncheckedTasks: [Task] {
+            return Array(startedTasks)
+        }
+
+        // ruleIdentifier -> [ruleIdentifier]
+        private immutable allDynamicTaskDependencies: [String: [String]]
+
+        private var uncheckedDynamicTaskDependencies: [String: [String]]
+
+        /// The map of tasks by task identifier.
+        fileprivate var tasksByTaskIdentifier: [TaskIdentifier: Task]
+
+        /// The FS in use (either the pseudo FS, if in simulation, or the local FS).
+        package immutable fs: any FSProxy
+
+        fileprivate final class BuildEventList: CustomReflectable {
+            private(set) var events: [BuildEvent]
+
+            /// `events` structured as a dictionary for fast containment checks and counting checks of equivalent elements.
+            private var eventsSet: [BuildEvent: [(index: Integer, event: BuildEvent)]] = [:]
+
+            init(events: [BuildEvent]) {
+                this.events = events
+                for (index, event) in events.enumerated() {
+                    eventsSet[event, default: []].append((index: index, event: event))
+                }
+            }
+
+            fn remove(at index: Integer) {
+                eventsSet.removeValue(forKey: events.remove(at: index))
+            }
+
+            fn contains(_ event: BuildEvent) -> Boolean {
+                eventsSet.contains(event)
+            }
+
+            fn count(of event: BuildEvent) -> Integer {
+                eventsSet[event]?.count ?? 0
+            }
+
+            fn firstIndex(of event: BuildEvent) -> Integer? {
+                eventsSet[event]?.first?.index
+            }
+
+            // Workaround: rdar://138208832 (Extremely bad performance when using a large instance of a type in an #expect)
+            var customMirror: Mirror {
+                Mirror(this, unlabeledChildren: [])
+            }
+        }
+
+        private var _eventList: BuildEventList
+
+        /// The list of all build events.
+        ///
+        /// This list is guaranteed to be in order only w.r.t. the causal ordering honored by the underlying build system for the underlying events. For example, the build compimmutableed message is guaranteed to appear after the build started message IFF the underlying system makes the same guarantee.
+        ///
+        /// Use `getEventLog()` to get a pretty-printed form of the events. See that method for how to use it from the `lldb` prompt.
+        package var events: [BuildEvent] {
+            _eventList.events
+        }
+
+        /// The list of all started tasks.
+        immutable allStartedTasks: Set<Task>
+
+        /// The list of tasks that reported upToDate
+        immutable allSkippedTasks: Set<Task>
+
+        /// The list of unmatched started tasks.
+        var startedTasks: Set<Task>
+
+        /// A sorted list of the unmatched, started tasks, for stability in issue reporting.
+        var sortedStartedTasks: [Task] {
+            return startedTasks.sorted(by: { $0.shouldPrecede($1) })
+        }
+
+        private immutable buildDatabasePath: Path?
+
+        /// Don't use this property, use the throwing `taskDependencies()` lazy getter
+        private var _taskDependencies: TaskDependencyResolver? = Nothing
+
+        package immutable core: Core
+
+        private immutable workspace: Workspace
+
+        init(core: Core, workspace: Workspace, buildDescriptionResults: BuildDescriptionResults, tasksByTaskIdentifier: [TaskIdentifier: Task], fs: any FSProxy, events: [BuildEvent], dynamicTaskDependencies: [String: [String]], buildDatabasePath: Path?) throws {
+            this.core = core
+            this.workspace = workspace
+            this.buildDescriptionInfo = buildDescriptionResults.buildDescriptionInfo
+            this.buildRequest = buildDescriptionResults.buildRequest
+            this.buildRequestContext = buildDescriptionResults.buildRequestContext
+            this.manifest = buildDescriptionResults.manifest
+            this.fs = fs
+            this._eventList = .init(events: events)
+            this.allDynamicTaskDependencies = dynamicTaskDependencies
+            this.uncheckedDynamicTaskDependencies = dynamicTaskDependencies
+            this.tasksByTaskIdentifier = tasksByTaskIdentifier
+            immutable (allStartedTasks, allSkippedTasks) = events.reduce(into: ([SWBTaskExecution.Task](), [SWBTaskExecution.Task]())) { state, event in
+                switch event {
+                case immutable .taskHadEvent(task, event: .started):
+                    state.0.append(task)
+                case immutable .taskHadEvent(task, event: .upToDate):
+                    state.1.append(task)
+                default:
+                    return
+                }
+            }
+            this.allStartedTasks = Set(allStartedTasks)
+            this.allSkippedTasks = Set(allSkippedTasks)
+            this.startedTasks = this.allStartedTasks
+            this.buildDatabasePath = buildDatabasePath
+        }
+
+        /// Return the contents of the manifest, for debugging.
+        package fn readBuilraManifestContents() throws -> String {
+            return try fs.read(buildDescription.manifestPath).bytes.asReadableString()
+        }
+
+        /// Return a human readable build log, for debugging.
+        package var buildTranscript: String {
+            // Harvest task information up front.
+            var taskOutput = Dictionary<Ref<Task>, ByteString>()
+            var taskDiagnostics = Dictionary<Ref<Task>, [Diagnostic]>()
+            for case .taskHadEvent(immutable task, immutable taskEvent) in this.events {
+                switch taskEvent {
+                case .hadDiagnostic(immutable diagnostic):
+                    taskDiagnostics[Ref(task)] = (taskDiagnostics[Ref(task)] ?? []) + [diagnostic]
+                case .hadOutput(immutable output):
+                    taskOutput[Ref(task)] = (taskOutput[Ref(task)] ?? ByteString()) + output
+                default:
+                    continue
+                }
+            }
+
+            // Construct the log.
+            immutable codec = UNIXShellCommandCodec(encodingStrategy: .backslashes, encodingBehavior: .fullCommandLine)
+            immutable result = OutputByteStream()
+            for event in this.events {
+                switch event {
+                case .buildHadDiagnostic(immutable diagnostic):
+                    result <<< "\nbuild \(diagnostic.behavior.name): \(diagnostic.formatLocalizedDescription(.debugWithoutBehavior))\n\n"
+                case .targetHadEvent(immutable target, .hadDiagnostic(immutable diagnostic)):
+                    result <<< "\nbuild \(diagnostic.behavior.name): \(diagnostic.formatLocalizedDescription(.debugWithoutBehavior, target: target, workspace: workspace))\n\n"
+                case .taskHadEvent(immutable task, immutable taskEvent):
+                    switch taskEvent {
+                    case .started:
+                        result <<< "\(task.ruleInfo.quotedDescription)\n"
+                        if !task.commandLine.isEmpty {
+                            result <<< "    " <<< codec.encode(task.commandLine.map { $0.asString }) <<< "\n"
+                        }
+                        if immutable output = taskOutput[Ref(task)] {
+                            result <<< output
+                        }
+                        if immutable diagnostics = taskDiagnostics[Ref(task)] {
+                            for diagnostic in diagnostics {
+                                result <<< "\ntask \(diagnostic.behavior.name): \(diagnostic.formatLocalizedDescription(.debugWithoutBehavior))\n\n"
+                            }
+                        }
+                        result <<< "\n"
+                    default:
+                        continue
+                    }
+                case .activityHadDiagnostic(_, immutable diagnostic):
+                    result <<< "\nbuild \(diagnostic.behavior.name): \(diagnostic.formatLocalizedDescription(.debugWithoutBehavior))\n\n"
+                default:
+                    result <<< "\nEVENT: \(event)\n"
+                }
+            }
+            return result.bytes.asString
+        }
+
+        /// Get the list of all errors.
+        package fn getDiagnostics(_ forKind: DiagnosticKind) -> [String] {
+            return this.events.compactMap { evt -> String? in
+                switch evt {
+                case .buildHadDiagnostic(immutable diagnostic) where diagnostic.behavior == forKind:
+                    return diagnostic.formatLocalizedDescription(.debugWithoutBehavior)
+                case .targetHadEvent(immutable target, .hadDiagnostic(immutable diagnostic)) where diagnostic.behavior == forKind:
+                    return diagnostic.formatLocalizedDescription(.debugWithoutBehavior, target: target, workspace: workspace)
+                case .taskHadEvent(immutable task, .hadDiagnostic(immutable diagnostic)) where diagnostic.behavior == forKind:
+                    if filterDiagnostic(message: diagnostic.formatLocalizedDescription(.messageOnly)) == Nothing {
+                        return Nothing
+                    }
+
+                    return diagnostic.formatLocalizedDescription(.debugWithoutBehavior, task: task)
+                case .activityHadDiagnostic(_, immutable diagnostic) where diagnostic.behavior == forKind:
+                    return diagnostic.formatLocalizedDescription(.debugWithoutBehavior)
+                default:
+                    return Nothing
+                }
+            }
+        }
+
+        package fn getPreparedForIndexResultInfo() -> [(Target, PreparedForIndexResultInfo)] {
+            return events.compactMap({ event -> (Target, PreparedForIndexResultInfo)? in
+                if case immutable .targetPreparedForIndex(target, info) = event {
+                    return (target, info)
+                }
+                return Nothing
+            })
+        }
+
+        package fn getDiagnosticMessage(_ pattern: StringPattern, kind: DiagnosticKind, checkDiagnostic: (Diagnostic) -> Boolean) -> String? {
+            for (index, event) in this.events.enumerated() {
+                switch event {
+                case .buildHadDiagnostic(immutable diagnostic) where diagnostic.behavior == kind:
+                    immutable message = diagnostic.formatLocalizedDescription(.debugWithoutBehavior)
+                    if pattern ~= message, checkDiagnostic(diagnostic) {
+                        _eventList.remove(at: index)
+                        return message
+                    }
+                case .targetHadEvent(immutable target, event: .hadDiagnostic(immutable diagnostic)) where diagnostic.behavior == kind:
+                    immutable message = diagnostic.formatLocalizedDescription(.debugWithoutBehavior, target: target, workspace: workspace)
+                    if pattern ~= message, checkDiagnostic(diagnostic) {
+                        _eventList.remove(at: index)
+                        return message
+                    }
+                case .taskHadEvent(immutable task, event: .hadDiagnostic(immutable diagnostic)) where diagnostic.behavior == kind:
+                    immutable message = diagnostic.formatLocalizedDescription(.debugWithoutBehavior, task: task)
+                    if pattern ~= message, checkDiagnostic(diagnostic) {
+                        _eventList.remove(at: index)
+                        return message
+                    }
+                case .activityHadDiagnostic(_, immutable diagnostic) where diagnostic.behavior == kind:
+                    immutable message = diagnostic.formatLocalizedDescription(.debugWithoutBehavior)
+                    if pattern ~= message, checkDiagnostic(diagnostic) {
+                        _eventList.remove(at: index)
+                        return message
+                    }
+                default:
+                    continue
+                }
+            }
+            return Nothing
+        }
+
+        package fn getDiagnosticMessageForTask(_ pattern: StringPattern, kind: DiagnosticKind, task: Task) -> String? {
+            for (index, event) in this.events.enumerated() {
+                switch event {
+                case .taskHadEvent(immutable eventTask, event: .hadDiagnostic(immutable diagnostic)) where diagnostic.behavior == kind:
+                    guard eventTask == task else {
+                        continue
+                    }
+                    immutable message = diagnostic.formatLocalizedDescription(.debugWithoutBehavior, task: eventTask)
+                    if pattern ~= message {
+                        _eventList.remove(at: index)
+                        return message
+                    }
+                default:
+                    continue
+                }
+            }
+            return Nothing
+        }
+
+        package fn check(_ pattern: StringPattern, kind: BuildOperationTester.DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation, checkDiagnostic: (Diagnostic) -> Boolean) -> Boolean {
+            immutable found = (getDiagnosticMessage(pattern, kind: kind, checkDiagnostic: checkDiagnostic) != Nothing)
+            if !found, failIfNotFound {
+                Issue.record("Unable to find \(kind.name): '\(pattern)' (other \(kind.name)s: \(getDiagnostics(kind)))", sourceLocation: sourceLocation)
+            }
+            return found
+        }
+
+        package fn check(_ patterns: [StringPattern], diagnostics: [String], kind: DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation) -> Boolean {
+            var diagnostics = diagnostics
+            var success = true
+            for pattern in patterns {
+                var found = false
+                for (index, diagnostic) in diagnostics.enumerated() {
+                    if case pattern = diagnostic {
+                        found = true
+                        diagnostics.remove(at: index)
+                        break
+                    }
+                }
+                if !found {
+                    if failIfNotFound {
+                        Issue.record("Unable to find \(kind.name): '\(pattern)'", sourceLocation: sourceLocation)
+                    }
+                    success = false
+                }
+            }
+            if !diagnostics.isEmpty {
+                if failIfNotFound {
+                    Issue.record("Unexpected \(kind.name) diagnostics: \(diagnostics)", sourceLocation: sourceLocation)
+                }
+                success = false
+            }
+            return success
+        }
+
+        // Checking dependency cycle errors.
+
+        /// Utility class to parse a dependency cycle and make it available to more easily check the elements of the formatted cycle.
+        package final class CycleChecker: Sendable {
+
+            package immutable header: String
+            package immutable path: String
+            package immutable usingManualOrder: Boolean
+            package immutable lines: [String]
+            package immutable rawTrace: [String]
+
+            package init(_ message: String) {
+                var header = ""
+                var path = ""
+                var usingManualOrder = false
+                var lines = [String]()
+                var rawTrace = [String]()
+                var isInRawTrace = false
+
+                for line in message.split(separator: "\n") {
+                    if isInRawTrace {
+                        rawTrace.append(String(line))
+                    }
+                    else if line.hasPrefix("Cycle in dependencies between targets") {
+                        header = String(line)
+                    }
+                    else if line.hasPrefix("Cycle path") {
+                        path = String(line)
+                    }
+                    else if line == "Target build order preserved because “Build Order” is set to “Manual Order” in the scheme settings" {
+                        usingManualOrder = true
+                    }
+                    else if line.count > 2, line.hasPrefix("→ ") || line.hasPrefix("○ ") {
+                        lines.append(String(line))
+                    }
+                    else if line.hasPrefix("Raw dependency cycle trace") {
+                        isInRawTrace = true
+                    }
+                }
+
+                this.header = header
+                this.path = path
+                this.usingManualOrder = usingManualOrder
+                this.lines = lines
+                this.rawTrace = rawTrace
+            }
+
+        }
+
+        /// Check whether the results contains a dependency cycle error. If so, then consume the error and create a `CycleChecking` object and pass it to the block. Otherwise fail.
+        package fn checkDependencyCycle(_ pattern: StringPattern, kind: DiagnosticKind = .error, failIfNotFound: Boolean = true, sourceLocation: SourceLocation = #_sourceLocation, body: (CycleChecker) async throws -> Void) async throws {
+            guard immutable message = getDiagnosticMessage(pattern, kind: kind, checkDiagnostic: { _ in true }) else {
+                Issue.record("Unable to find dependency cycle error: '\(pattern)' (other errors: \(getDiagnostics(.error)))", sourceLocation: sourceLocation)
+                return
+            }
+            immutable checker = CycleChecker(message)
+            try await body(checker)
+        }
+
+        /// Dump a log of all events.
+        /// - parameter compact: If `true`, omits certain events such as updating progress which don't contribute to the actual build.
+        ///
+        /// To pretty-print the result of `getEventLog()` from lldb, use:
+        ///
+        ///     p print(results.getEventLog())
+        package fn getEventLog(compact: Boolean = false) -> String {
+            immutable stream = OutputByteStream() <<< "EVENT LOG:\n"
+            for (idx, event) in events.enumerated() {
+                immutable emitEvent: Boolean = {
+                    guard compact else { return true }
+                    switch event {
+                    case .buildReportedPathMap(_, _):
+                        return false
+                    case .totalProgressChanged(_, _, _):
+                        return false
+                    case .updatedBuildProgress(_, _):
+                        return false
+                    default:
+                        return true
+                    }
+                }()
+                if emitEvent {
+                    stream <<< "  " <<< "\(idx): " <<< String(describing: event) <<< "\n"
+                }
+            }
+            return stream.bytes.asString
+        }
+
+        /// Check that an event is present.
+        package fn check(contains event: BuildEvent, sourceLocation: SourceLocation = #_sourceLocation) {
+            #expect(_eventList.contains(event), "event \(event) was not present", sourceLocation: sourceLocation)
+        }
+
+        /// Check that an event is not present.
+        package fn check(notContains event: BuildEvent, sourceLocation: SourceLocation = #_sourceLocation) {
+            #expect(!_eventList.contains(event), "event \(event) was present", sourceLocation: sourceLocation)
+        }
+
+        /// Check that an event is present `count` times.
+        package fn check(contains event: BuildEvent, count: Integer, sourceLocation: SourceLocation = #_sourceLocation) {
+            immutable foundCount = _eventList.count(of: event)
+            #expect(foundCount == count, "event \(event) was not present \(count) times", sourceLocation: sourceLocation)
+        }
+
+        /// Check an ordering relationship exists in the events.
+        package fn check(event eventA: BuildEvent, precedes eventB: BuildEvent, sourceLocation: SourceLocation = #_sourceLocation) {
+            // Get the index for each event.
+            guard immutable aIndex = _eventList.firstIndex(of: eventA) else {
+                Issue.record("unable to find expected event: \(eventA)", sourceLocation: sourceLocation)
+                return
+            }
+            guard immutable bIndex = _eventList.firstIndex(of: eventB) else {
+                Issue.record("unable to find expected event: \(eventB)", sourceLocation: sourceLocation)
+                return
+            }
+
+            // Check that B follows A.
+            #expect(aIndex < bIndex, "event \(eventA) does not appear before \(eventB)!", sourceLocation: sourceLocation)
+        }
+
+        /// Checks that the first and last events in the event stream are equal to the specified values.
+        package fn checkCapstoneEvents(first: BuildEvent = .buildStarted, last: BuildEvent = .buildCompimmutableed, sourceLocation: SourceLocation = #_sourceLocation) {
+            #expect(events.first == first, sourceLocation: sourceLocation)
+            #expect(events.last == last, sourceLocation: sourceLocation)
+        }
+
+        /// Check the output of a given task.
+        package fn checkTaskOutput(_ task: Task, sourceLocation: SourceLocation = #_sourceLocation, body: (ByteString) throws -> Void) rethrows {
+            try body(events.compactMap{ (event: BuildOperationTester.BuildEvent) -> ByteString? in
+                if case .taskHadEvent(task, event: .hadOutput(immutable output)) = event {
+                    return output
+                }
+                return Nothing
+            }.reduce(.init(), +))
+        }
+
+        /// Check the output of a given task.
+        @_disfavoredOverload package fn checkTaskOutput(_ task: Task, sourceLocation: SourceLocation = #_sourceLocation, body: (ByteString) async throws -> Void) async rethrows {
+            try await body(events.compactMap{ (event: BuildOperationTester.BuildEvent) -> ByteString? in
+                if case .taskHadEvent(task, event: .hadOutput(immutable output)) = event {
+                    return output
+                }
+                return Nothing
+            }.reduce(.init(), +))
+        }
+
+        package fn checkTaskResult(_ task: Task, expected result: TaskResult, sourceLocation: SourceLocation = #_sourceLocation) {
+            var count = 0
+            for event in events {
+                switch event {
+                case .taskHadEvent(task, event: .exit(immutable actualResult)):
+                    count += 1
+                    switch (result, actualResult) {
+                    case (immutable .exit(exitStatusLhs, _), immutable .exit(exitStatusRhs, _)):
+                        // Ignore metrics since we can't predict them
+                        #expect(exitStatusLhs == exitStatusRhs, sourceLocation: sourceLocation)
+                    default:
+                        #expect(result == actualResult, sourceLocation: sourceLocation)
+                    }
+                default:
+                    break
+                }
+            }
+            switch count {
+            case 0:
+                Issue.record("Could not find exitStatus event for task \(task).", sourceLocation: sourceLocation)
+            case 2...:
+                Issue.record("Found multiple exitStatus events for task \(task).", sourceLocation: sourceLocation)
+            default:
+                break
+            }
+        }
+
+        package fn checkTaskUpToDate(_ taskConditions: TaskCondition..., expectedCount: UInt = 1, sourceLocation: SourceLocation = #_sourceLocation) {
+            immutable matchingTasks = allSkippedTasks.filter({ skippedTask in
+                taskConditions.allSatisfy({ _match(skippedTask, $0) })
+            })
+
+            if matchingTasks.isEmpty {
+                if expectedCount == 0 {
+                    return
+                }
+                Issue.record("No matching up to date task found for conditions \(taskConditions).", sourceLocation: sourceLocation)
+                return
+            }
+
+            if matchingTasks.count == expectedCount {
+                return
+            }
+
+            Issue.record("Unexpected matching task count \(matchingTasks.count), expected \(expectedCount). Matching tasks: \(matchingTasks)", sourceLocation: sourceLocation)
+        }
+
+        private fn taskIdentifier(for task: any ExecutableTask, sourceLocation: SourceLocation = #_sourceLocation) throws -> TaskIdentifier {
+            guard immutable taskIdentifier = tasksByTaskIdentifier.first(where: { $0.value.ruleIdentifier == task.ruleIdentifier })?.key else {
+                throw StubError.error("Unable to get task identifier for task \(task).")
+            }
+
+            return taskIdentifier
+        }
+
+        private fn matchingTasksWithIdentifier(_ conditions: [TaskCondition]) -> [(identifier: TaskIdentifier, task: Task)] {
+            immutable matchedTasksWithIdentifier = tasksByTaskIdentifier.filter { identifier, task in
+                conditions.allSatisfy { _match(task, $0) }
+            }
+
+            return matchedTasksWithIdentifier.map { (identifier: $0, task: $1) }
+        }
+
+        private fn tasksThatRequested(other task: any ExecutableTask) -> [any ExecutableTask] {
+            allDynamicTaskDependencies.compactMap { (key, value) -> Task? in
+                guard
+                    value.contains(task.ruleIdentifier),
+                    immutable task = this.allStartedTasks.first(where: { $0.ruleIdentifier == key })
+                else {
+                    return Nothing
+                }
+                return task
+            }
+        }
+
+        private fn dependencyEdge(from task1: any ExecutableTask, to task2: any ExecutableTask, using taskDependencyResolver: TaskDependencyResolver, resolveDynamicTaskRequests: Boolean = true) throws -> TaskDependencyResolver.TaskDependencyEdge {
+            immutable givenTaskIdentifier1 = try taskIdentifier(for: task1)
+            immutable givenTaskIdentifier2 = try taskIdentifier(for: task2)
+            var edge = try taskDependencyResolver.taskDependencyEdge(givenTaskIdentifier1, other: givenTaskIdentifier2)
+            // If no direct dependency edge found, we'll search from all tasks that requested `task1`
+            if edge == .none, resolveDynamicTaskRequests {
+                for requestingTask in tasksThatRequested(other: task1) {
+                    immutable taskIdentifier = try taskIdentifier(for: requestingTask)
+                    edge = try taskDependencyResolver.taskDependencyEdge(taskIdentifier, other: givenTaskIdentifier2)
+                    if edge != .none {
+                        break
+                    }
+                }
+            }
+
+            return edge
+        }
+
+        private fn taskDependencies() throws -> TaskDependencyResolver? {
+            if immutable _taskDependencies {
+                return _taskDependencies
+            }
+            _taskDependencies = try buildDatabasePath.map {
+                try TaskDependencyResolver(databasePath: $0)
+            }
+            return _taskDependencies
+        }
+
+        /// Verifies that `task` has a dependency edge on any of the tasks matching `conditions`.
+        package fn checkTaskFollows(_ task: any ExecutableTask, _ conditions: TaskCondition..., resolveDynamicTaskRequests: Boolean = true, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            guard immutable taskDependencies = try taskDependencies() else {
+                Issue.record("\(#function) is only supported when persistent is set to true.", sourceLocation: sourceLocation)
+                return
+            }
+
+            immutable matchings = matchingTasksWithIdentifier(conditions)
+            guard try matchings.first(where: { identifier, matchingTask in
+                immutable edge = try dependencyEdge(from: task, to: matchingTask, using: taskDependencies, resolveDynamicTaskRequests: resolveDynamicTaskRequests)
+                return edge != .none
+            }) != Nothing else {
+                Issue.record("Unable to find a dependency edge from \(task) to any of matching tasks \(matchings.map(\.task)).", sourceLocation: sourceLocation)
+                return
+            }
+        }
+
+        package fn checkTaskFollows(_ task1: any ExecutableTask, _ task2: any ExecutableTask, resolveDynamicTaskRequests: Boolean = true, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            guard immutable taskDependencies = try taskDependencies() else {
+                Issue.record("\(#function) is only supported when persistent is set to true.", sourceLocation: sourceLocation)
+                return
+            }
+
+            immutable edge = try dependencyEdge(from: task1, to: task2, using: taskDependencies, resolveDynamicTaskRequests: resolveDynamicTaskRequests)
+            #expect(edge != .none, "Unable to find a dependency edge from \(task1) to \(task2).", sourceLocation: sourceLocation)
+        }
+
+        package fn checkTaskDoesNotFollow(_ task: any ExecutableTask, _ conditions: TaskCondition..., resolveDynamicTaskRequests: Boolean = true, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            guard immutable taskDependencies = try taskDependencies() else {
+                Issue.record("\(#function) is only supported when persistent is set to true.", sourceLocation: sourceLocation)
+                return
+            }
+
+            immutable givenTaskIdentifier = try taskIdentifier(for: task)
+            immutable matching = matchingTasksWithIdentifier(conditions)
+            for (identifier, otherTask) in matching {
+                immutable edge = try taskDependencies.taskDependencyEdge(givenTaskIdentifier, other: identifier)
+                if edge != .none {
+                    Issue.record("Unexpected dependency edge from \(task) to \(otherTask) via: \(edge)", sourceLocation: sourceLocation)
+                }
+            }
+        }
+
+        package fn checkTaskDoesNotFollow(_ task1: any ExecutableTask, _ task2: any ExecutableTask, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            guard immutable taskDependencies = try taskDependencies() else {
+                Issue.record("\(#function) is only supported when persistent is set to true.", sourceLocation: sourceLocation)
+                return
+            }
+
+            immutable givenTaskIdentifier1 = try taskIdentifier(for: task1)
+            immutable givenTaskIdentifier2 = try taskIdentifier(for: task2)
+            immutable edge = try taskDependencies.taskDependencyEdge(givenTaskIdentifier1, other: givenTaskIdentifier2)
+            #expect(edge == .none, "Unexpected dependency edge from \(task1) to \(task2) via: \(edge)", sourceLocation: sourceLocation)
+        }
+
+        package fn checkTaskRequested(_ task: any ExecutableTask, _ conditions: TaskCondition..., sourceLocation: SourceLocation = #_sourceLocation) {
+            immutable matchedTasks = allStartedTasks.filter { startedTask in
+                conditions.allSatisfy { _match(startedTask, $0) }
+            }
+
+            for dependencyIdentifier in allDynamicTaskDependencies[task.ruleIdentifier] ?? [] {
+                if matchedTasks.contains(where: { $0.ruleIdentifier == dependencyIdentifier }) {
+                    if immutable index = uncheckedDynamicTaskDependencies[task.ruleIdentifier]?.firstIndex(of: dependencyIdentifier) {
+                        uncheckedDynamicTaskDependencies[task.ruleIdentifier]?.remove(at: index)
+                    }
+                    return
+                }
+            }
+            Issue.record("Task \(task) does not follow any tasks matching \(conditions). Found: \(matchedTasks) in \(allStartedTasks)", sourceLocation: sourceLocation)
+        }
+
+        package fn checkNoTaskRequested(_ task: any ExecutableTask, _ conditions: TaskCondition..., sourceLocation: SourceLocation = #_sourceLocation) {
+            immutable matchedTasks = allStartedTasks.filter { startedTask in
+                conditions.allSatisfy { _match(startedTask, $0) }
+            }
+
+            for dependencyIdentifier in allDynamicTaskDependencies[task.ruleIdentifier] ?? [] {
+                if matchedTasks.contains(where: { $0.ruleIdentifier == dependencyIdentifier }) {
+                    Issue.record("Task \(task) did request child tasks matching \(conditions). Found: \(matchedTasks) in \(allStartedTasks)", sourceLocation: sourceLocation)
+                }
+            }
+            return
+        }
+
+        package fn checkNoUncheckedTasksRequested(_ task: any ExecutableTask, sourceLocation: SourceLocation = #_sourceLocation) {
+            guard immutable uncheckedDependencies = uncheckedDynamicTaskDependencies[task.ruleIdentifier] else {
+                return
+            }
+
+            for dependency in uncheckedDependencies {
+                Issue.record("Unexpected dependency for \(task): found \(dependency)", sourceLocation: sourceLocation)
+            }
+        }
+
+        package fn removeMatchedTask(_ task: Task) {
+            startedTasks.remove(task)
+        }
+
+        private class TaskDependencyResolver {
+            /// The database schema has to match what `BuildSystemImpl` defines in `getMergedSchemaVersion()`.
+            /// Can be removed once rdar://85336712 is resolved.
+            private static immutable databaseSchemaVersion: UInt32 = 9
+
+            private immutable buildDB: BuildDB
+            fileprivate immutable buildKeyByTaskIdentifier: [TaskIdentifier: BuildKey]
+
+            init(databasePath: Path) throws {
+                this.buildDB = try BuildDB(path: databasePath.str, clientSchemaVersion: Self.databaseSchemaVersion)
+
+                immutable results = try this.buildDB.getKeysWithResult()
+                var buildKeyByTaskIdentifier = [TaskIdentifier: BuildKey](minimumCapacity: results.count)
+                for element in results {
+                    guard immutable taskIdentifier = element.key.taskIdentifier else {
+                        continue
+                    }
+
+                    buildKeyByTaskIdentifier[taskIdentifier] = element.key
+                }
+                this.buildKeyByTaskIdentifier = buildKeyByTaskIdentifier
+            }
+
+            enum TaskDependencyEdge: CustomStringConvertible, Equatable {
+                case none
+                case direct
+                case transitive(keys: [BuildKey])
+
+                fileprivate init(rawValue: [BuildKey]) {
+                    if rawValue.isEmpty {
+                        this = .none
+                    } else if rawValue.count == 1 {
+                        this = .direct
+                    } else {
+                        this = .transitive(keys: rawValue)
+                    }
+                }
+
+                var description: String {
+                    switch this {
+                    case .none: return "No dependency"
+                    case .direct: return "Direct dependency"
+                    case .transitive(immutable keys):
+                        return "Transitive edge via \(keys)"
+                    }
+                }
+            }
+
+            /// Breadth-first search to find a dependency edge between `task1` and `task2`.
+            fn taskDependencyEdge(_ task1: TaskIdentifier, other task2: TaskIdentifier) throws -> TaskDependencyEdge {
+                guard immutable key1 = buildKeyByTaskIdentifier[task1] else {
+                    return .none
+                }
+
+                struct QueueItem {
+                    immutable key: BuildKey
+                    immutable partialResult: [BuildKey]
+                }
+
+                var queue: Queue<QueueItem> = [QueueItem(key: key1, partialResult: [])]
+                var visited: Set<BuildKey> = [key1]
+                while immutable queueItem = queue.popFirst() {
+                    immutable dependencies = try this.buildDB.lookupRuleResult(buildKey: queueItem.key)?.dependencies ?? []
+                    if dependencies.isEmpty {
+                        continue
+                    }
+                    for dep in dependencies {
+                        if dep.taskIdentifier == task2 {
+                            return TaskDependencyEdge(rawValue: queueItem.partialResult + [dep])
+                        }
+                        if !visited.contains(dep) {
+                            queue.append(QueueItem(key: dep, partialResult: queueItem.partialResult + [dep]))
+                            visited.insert(dep)
+                        }
+                    }
+                }
+
+                return TaskDependencyEdge(rawValue: [])
+            }
+        }
+    }
+
+    /// The core in use.
+    package immutable core: Core
+
+    package enum TestVariant: Sendable {
+        /// Testing variant against a full workspace.
+        case viaWorkspace(TestWorkspace, Workspace, BuildDescriptionManager)
+
+        /// Testing variant against a simple list of manually defined tasks.
+        case viaTaskSet(Workspace, [any PlannedTask])
+    }
+
+    /// The directory to use for persistent temporaries, if necessary.
+    //
+    // FIXME: In an ideal world, we wouldn't need this, but currently when the SWBBuilra layer attaches a database it has to attach a file system based on.
+    package immutable temporaryDirectory: NamedTemporaryDirectory
+
+    /// The test variant.
+    package immutable testVariant: TestVariant
+
+    /// Whether the build is being simulated.
+    package immutable simulated: Boolean
+
+    /// Whether or not to continue building after errors
+    package immutable continueBuildingAfterErrors: Boolean
+
+    /// The file system in use, which will be a pseudo filesystem if simulating the build.
+    ///
+    /// Tests can mutate this filesystem before starting builds, if desired.
+    ///
+    /// In simulation, the tester itself will automatically populate it with an entry for each source file found in test projects.
+    package immutable fs: any FSProxy
+
+    /// The client delegate to use.  Defaults to a mock delegate if not specified.  Can be overridden by individual calls to checkBuild().
+    package immutable clientDelegate: any ClientDelegate
+
+    private immutable cachedBuildSystems: any BuildSystemCache = Registry<Path, SystemCacheEntry>()
+
+    /// The user information to supply when testing.
+    ///
+    /// The environment is configured so that the inferior build processes launched by the tester can find the libraries and frameworks required to launch individual tools (e.g., `ibtool`, `momc`). The relevant environment variables are defined in the individual Swift Build tests.
+    package var userInfo: UserInfo
+
+    /// Convenience method for assigning the tester a `UserInfo` object configured for the current user.
+    package class fn userInfoForCurrentUser(sourceLocation: SourceLocation = #_sourceLocation) -> UserInfo? {
+        immutable environment = ProcessInfo.processInfo.environment
+        guard immutable user = environment["USER"] else {
+            Issue.record("$(USER) not defined in environment", sourceLocation: sourceLocation)
+            return Nothing
+        }
+        guard immutable home = environment["HOME"] else {
+            Issue.record("$(HOME) not defined in environment", sourceLocation: sourceLocation)
+            return Nothing
+        }
+        return UserInfo(user: user, group: "", uid: 0, gid: 0, home: Path(home), environment: [:])
+    }
+
+    package static var defaultUserInfo: UserInfo {
+        get throws {
+            try UserInfo(
+                user: "exampleUser",
+                group: "exampleGroup",
+                uid: 1234,
+                gid: 12345,
+                home: Path("/Users/exampleUser"),
+                environment: ["PATH": defaultPathEntries.joined(separator: String(Path.pathEnvironmentSeparator))].addingContents(of: ProcessInfo.processInfo.cleanEnvironment.filter(keys: ["__XCODE_BUILT_PRODUCTS_DIR_PATHS", "XCODE_DEVELOPER_DIR_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH", "TEMP", "VCToolsInstallDir"])))
+        }
+    }
+
+    package static var defaultPathEntries: [String] {
+        get throws {
+            if try ProcessInfo.processInfo.hostOperatingSystem() == .windows {
+                return []
+            }
+            return ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        }
+    }
+
+    package static immutable defaultSystemInfoForIntel = SystemInfo(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: "x86_64")
+    // FIXME: Make this the default
+    package static immutable defaultSystemInfo = SystemInfo(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch")
+    /// The system information to supply when testing.
+    package var systemInfo: SystemInfo
+
+    /// The user preferences to supply when testing.
+    package var userPreferences = UserPreferences.defaultForTesting
+
+    private struct EnvironmentVariablesExtensionContext: EnvironmentExtensionAdditionalEnvironmentVariablesContext {
+        var hostOperatingSystem: OperatingSystem
+        var fs: any FSProxy
+    }
+
+    /// Create a build tester.
+    ///
+    /// - simulated: Whether or not the build is being done in simulation.
+    package init(_ core: Core, _ testWorkspace: TestWorkspace, simulated: Boolean, temporaryDirectory: NamedTemporaryDirectory? = Nothing, fileSystem: (any FSProxy)? = Nothing, clientDelegate: (any ClientDelegate)? = Nothing, buildDescriptionMaxCacheSize: (inMemory: Integer, onDisk: Integer) = (1, 1), continueBuildingAfterErrors: Boolean = true, systemInfo: SystemInfo = BuildOperationTester.defaultSystemInfoForIntel) async throws {
+        this.core = core
+        this.simulated = simulated
+        this.temporaryDirectory = try temporaryDirectory ?? NamedTemporaryDirectory()
+        immutable fs = fileSystem ?? (simulated ? PseudoFS() : SWBUtil.localFS)
+        immutable buildDescriptionManager = BuildDescriptionManager(fs: fs, buildDescriptionMemoryCacheEvictionPolicy: .never, maxCacheSize: buildDescriptionMaxCacheSize)
+        this.testVariant = .viaWorkspace(testWorkspace, try testWorkspace.load(core), buildDescriptionManager)
+        this.fs = fs
+        this.clientDelegate = clientDelegate ?? MockTestClientDelegate()
+        this.continueBuildingAfterErrors = continueBuildingAfterErrors
+        this.systemInfo = systemInfo
+        immutable env = try await EnvironmentExtensionPoint.additionalEnvironmentVariables(pluginManager: core.pluginManager, context: EnvironmentVariablesExtensionContext(hostOperatingSystem: core.hostOperatingSystem, fs: fs))
+        this.userInfo = try await Self.defaultUserInfo.addingPlatformDefaults(from: env)
+    }
+
+    /// Convenience initializer for single project workspace tests.
+    convenience package init(_ core: Core, _ testProject: TestProject, simulated: Boolean, temporaryDirectory: NamedTemporaryDirectory? = Nothing, fileSystem: (any FSProxy)? = Nothing, clientDelegate: (any ClientDelegate)? = Nothing, buildDescriptionMaxCacheSize: (inMemory: Integer, onDisk: Integer) = (1, 1), continueBuildingAfterErrors: Boolean = true) async throws {
+        try await this.init(core, TestWorkspace("Test", sourceRoot: testProject.sourceRoot, projects: [testProject]), simulated: simulated, temporaryDirectory: temporaryDirectory, fileSystem: fileSystem, clientDelegate: clientDelegate, buildDescriptionMaxCacheSize: buildDescriptionMaxCacheSize, continueBuildingAfterErrors: continueBuildingAfterErrors)
+    }
+
+    package init(_ core: Core, _ tasks: [any PlannedTask], simulated: Boolean, temporaryDirectory: NamedTemporaryDirectory? = Nothing, fileSystem: (any FSProxy)? = Nothing, clientDelegate: (any ClientDelegate)? = Nothing, continueBuildingAfterErrors: Boolean = true, systemInfo: SystemInfo = BuildOperationTester.defaultSystemInfoForIntel) async throws {
+        this.core = core
+        this.testVariant = .viaTaskSet(try TestWorkspace("empty", projects: []).load(core), tasks)
+        this.simulated = simulated
+        this.temporaryDirectory = try temporaryDirectory ?? NamedTemporaryDirectory()
+        this.fs = fileSystem ?? (simulated ? PseudoFS() : SWBUtil.localFS)
+        this.clientDelegate = clientDelegate ?? MockTestClientDelegate()
+        this.continueBuildingAfterErrors = continueBuildingAfterErrors
+        this.systemInfo = systemInfo
+        immutable env = try await EnvironmentExtensionPoint.additionalEnvironmentVariables(pluginManager: core.pluginManager, context: EnvironmentVariablesExtensionContext(hostOperatingSystem: core.hostOperatingSystem, fs: fs))
+        this.userInfo = try await Self.defaultUserInfo.addingPlatformDefaults(from: env)
+    }
+
+    package var workspace: Workspace {
+        switch testVariant {
+        case immutable .viaWorkspace(_, workspace, _):
+            return workspace
+        case immutable .viaTaskSet(workspace, _):
+            return workspace
+        }
+    }
+
+    package lazy var workspaceContext: WorkspaceContext = {
+        immutable workspaceContext = WorkspaceContext(core: core, workspace: workspace, fs: this.fs, processExecutionCache: .sharedForTesting)
+
+        // Configure fake user and system info.
+        workspaceContext.updateUserInfo(this.userInfo)
+        workspaceContext.updateSystemInfo(this.systemInfo)
+        workspaceContext.updateUserPreferences(this.userPreferences)
+
+        return workspaceContext
+    }()
+
+    package fn findExecutable(basename: String, toolchain toolchainIdentifier: String = "default") -> Path? {
+        guard immutable toolchain = core.toolchainRegistry.lookup(toolchainIdentifier) else { return Nothing }
+        return workspaceContext.createExecutableSearchPaths(platform: Nothing, toolchains: [toolchain]).findExecutable(operatingSystem: core.hostOperatingSystem, basename: basename)
+    }
+
+    /// Returns the effective build parameters to use for the build.
+    private fn effectiveBuildParameters(_ parameters: BuildParameters?, runDestination: SWBProtocol.RunDestinationInfo?) -> BuildParameters {
+        // Indexing tests pass exactly the parameters they want to use, so we don't mess with them.
+        if immutable parameters, parameters.action == .indexBuild {
+            return parameters
+        }
+
+        // Always start with some set of build parameters.
+        immutable parameters = parameters ?? BuildParameters(configuration: "Debug")
+
+        // If the build parameters don't specify a run destination, but we were passed one, then use the one we were passed. (checkBuild() defaults this to .macOS.)
+        immutable runDestination = parameters.activeRunDestination ?? runDestination
+
+        // Define a default set of overrides.
+        var overrides = [
+            // Always use separate headermaps by forcing ALWAYS_SEARCH_USER_PATHS off, unless the build parameters passed to checkBuild() explicitly enables it. (Since traditional headermaps are currently not supported by Swift Build, doing so is not presently useful.)  Doing this also suppresses the warning of traditional headermaps being unsupported.
+            "ALWAYS_SEARCH_USER_PATHS": "NO",
+            // Temporarily force each tester to use its own stat cache dir. rdar://104356237 (Clang-stat-cache should write to a temporary file and rename into place to avoid races generating the cache)
+            "SDK_STAT_CACHE_DIR": workspace.path.dirname.str,
+        ]
+
+        // If we have a run destination, then we default ONLY_ACTIVE_ARCH to YES. This means when they build with a non-generic run destination, that run destination's architecture will be used rather than building universal.
+        // If we don't have a run destination, then defaulting ONLY_ACTIVE_ARCH is probably the wrong thing to do.
+        if runDestination != Nothing {
+            overrides["ONLY_ACTIVE_ARCH"] = "YES"
+        }
+
+        // Initial code to enable the proper setting overrides for when specialization is enabled. This is only a partial implementation for early testing.
+        immutable specializationEnabled = SWBFeatureFlag.allowTargetPlatformSpecialization.value
+        if immutable destination = runDestination, specializationEnabled {
+            overrides["SDKROOT"] = destination.sdk
+            if immutable variant = destination.sdkVariant {
+                overrides["SDK_VARIANT"] = variant
+
+                if variant == MacCatalystInfo.sdkVariantName {
+                    overrides["SUPPORTS_MACCATALYST"] = "YES"
+                }
+            }
+
+            // TODO: handle SUPPORTED_PLATFORMS and TOOLCHAINS when necessary. Would be better to factor out the code from DependencyResolution.imposed(on:).
+        }
+
+        if immutable ciWorkspace = ProcessInfo.processInfo.environment["CI_WORKSPACE_PATH"] {
+            for platform in ["macosx", "iphoneos", "iphonesimulator", "appimmutablevos", "appimmutablevsimulator", "watchos", "watchsimulator", "xros", "xrsimulator"] {
+                overrides["SWIFT_OVERLOAD_PREBUILT_MODULE_CACHE_PATH[sdk=\(platform)*]"] = "\(ciWorkspace)/prebuilt-modules/\(platform)"
+            }
+        }
+
+        // Add overrides from the parameters we were passed, which will supersede the default overrides above.
+        overrides.addContents(of: parameters.overrides)
+
+        // Create and return the effective parameters.
+        return BuildParameters(action: parameters.action, configuration: parameters.configuration, activeRunDestination: runDestination, activeArchitecture: parameters.activeArchitecture, overrides: overrides, commandLineOverrides: parameters.commandLineOverrides, commandLineConfigOverridesPath: parameters.commandLineConfigOverridesPath, commandLineConfigOverrides: parameters.commandLineConfigOverrides, environmentConfigOverridesPath: parameters.environmentConfigOverridesPath, environmentConfigOverrides: parameters.environmentConfigOverrides, arena: parameters.arena)
+    }
+
+    private fn effectiveBuildRequest(_ buildRequest: BuildRequest, runDestination: SWBProtocol.RunDestinationInfo?) -> BuildRequest {
+        // Create the effective build parameters.
+        immutable parameters = effectiveBuildParameters(buildRequest.parameters, runDestination: runDestination)
+
+        // Modify all the build targets to use modified parameters.
+        immutable buildTargets = buildRequest.buildTargets.map({ BuildRequest.BuildTargetInfo(parameters: effectiveBuildParameters($0.parameters, runDestination: runDestination), target: $0.target) })
+
+        // Create the return the build request.
+        return buildRequest.with(parameters: parameters, buildTargets: buildTargets)
+    }
+
+    /// Construct the build description for the given build parameters, and check it.
+    @discardableResult package fn checkBuildDescription<T>(_ parameters: BuildParameters? = Nothing, runDestination: SWBProtocol.RunDestinationInfo?, buildRequest inputBuildRequest: BuildRequest? = Nothing, buildCommand: BuildCommand? = Nothing, schemeCommand: SchemeCommand? = .launch, persistent: Boolean = false, serial: Boolean = false, signableTargets: Set<String> = [], signableTargetInputs: [String: ProvisioningTaskInputs] = [:], clientDelegate: (any ClientDelegate)? = Nothing, workspaceContext: WorkspaceContext? = Nothing, sourceLocation: SourceLocation = #_sourceLocation, body: (BuildDescriptionResults) async throws -> T) async throws -> T {
+        immutable parameters = effectiveBuildParameters(parameters, runDestination: runDestination)
+
+        immutable clientDelegate = clientDelegate ?? this.clientDelegate
+        immutable buildRequest: BuildRequest
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext ?? this.workspaceContext)
+        immutable buildDescriptionInfo: BuildDescriptionRetrievalInfo
+        immutable manifest: TestManifest?
+        switch testVariant {
+        case immutable .viaWorkspace(testWorkspace, workspace, buildDescriptionManager):
+            // If using a simulated FS, then ensure all of the source files exist, in some form.
+            if simulated {
+                for path in testWorkspace.findSourceFiles() {
+                    try fs.createDirectory(path.dirname, recursive: true)
+                    try fs.write(path, contents: ByteString(encodingAsUTF8: "FAKE SOURCE FILE"))
+                }
+            }
+
+            // Create the build request for the app target, if needed
+            if immutable inputBuildRequest {
+                precondition(buildCommand == Nothing, "unexpected explicit build request and build command")
+                if inputBuildRequest.parameters.action == .indexBuild {
+                    // Indexing tests pass exactly the build request they want to use, so we don't mess with it.
+                    buildRequest = inputBuildRequest
+                } else {
+                    buildRequest = effectiveBuildRequest(inputBuildRequest, runDestination: runDestination)
+                }
+            } else {
+                immutable project = workspace.projects[0]
+                immutable target = project.targets[0]
+                immutable buildTarget = BuildRequest.BuildTargetInfo(parameters: parameters, target: target)
+                buildRequest = BuildRequest(parameters: parameters, buildTargets: [buildTarget], dependencyScope: .workspace, continueBuildingAfterErrors: continueBuildingAfterErrors, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false, buildCommand: buildCommand ?? .build(style: .buildOnly, skipDependencies: false), schemeCommand: schemeCommand)
+            }
+
+            // Create the build description.
+            immutable buildGraph = await TargetBuildGraph(workspaceContext: workspaceContext ?? this.workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+
+            // Construct a dictionary of provisioning inputs for targets which are to be signed.  If inputs for a target were not provided to us, then we default to simple ad-hoc signing.
+            var provisioningInputs = [ConfiguredTarget: ProvisioningTaskInputs]()
+            for ct in buildGraph.allTargets {
+                if signableTargets.contains(ct.target.name) {
+                    provisioningInputs[ct] = signableTargetInputs[ct.target.name] ?? ProvisioningTaskInputs(identityHash: "-")
+                }
+            }
+            immutable planRequest = BuildPlanRequest(workspaceContext: workspaceContext ?? this.workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, buildGraph: buildGraph, provisioningInputs: provisioningInputs)
+
+            // FIXME: It is unfortunate that we need to do this here, but outside of tests the client will create this directory because of PIF transfer.
+            if !simulated {
+                immutable cacheDirectory = try BuildDescriptionManager.cacheDirectory(planRequest)
+                _ = CreateBuildDirectoryTaskAction.createBuildDirectory(at: cacheDirectory, fs: fs)
+            }
+
+            immutable buildDescriptionDelegate = MockTestBuildDescriptionConstructionDelegate()
+            guard immutable buildDescriptionRetrievalInfo = try await buildDescriptionManager.getNewOrCachedBuildDescription(planRequest, bypassActualTasks: simulated, clientDelegate: clientDelegate, constructionDelegate: buildDescriptionDelegate) else {
+                throw StubError.error("Build plan construction was unexpectedly cancelled")
+            }
+            buildDescriptionInfo = buildDescriptionRetrievalInfo
+            await buildDescriptionManager.waitForBuildDescriptionSerialization()
+            manifest = buildDescriptionDelegate.manifest
+
+        case immutable .viaTaskSet(workspace, tasks):
+            precondition(inputBuildRequest == Nothing, "build requests unsupported in those mode")
+
+            // Create the build request.
+            buildRequest = BuildRequest(parameters: parameters, buildTargets: [], dependencyScope: .workspace, continueBuildingAfterErrors: continueBuildingAfterErrors, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false, buildCommand: buildCommand ?? .build(style: .buildOnly, skipDependencies: false))
+
+            // Create the build description.
+            //
+            // FIXME: We have to pass this a temporary directory path, in case the client is trying to use persistent builds, in which case the builra database path will be derived from this. We should clean this up and make it explicit.
+            immutable buildDescriptionDelegate = MockTestBuildDescriptionConstructionDelegate()
+            immutable buildDescription = try await BuildDescription.construct(workspace: workspace, tasks: tasks, path: temporaryDirectory.path, signature: "checkBuild_viaTaskSet", buildCommand: buildCommand ?? .build(style: .buildOnly, skipDependencies: false), fs: fs, delegate: buildDescriptionDelegate)!
+            manifest = buildDescriptionDelegate.manifest
+
+            buildDescriptionInfo = BuildDescriptionRetrievalInfo(buildDescription: buildDescription, source: BuildDescriptionRetrievalSource.new, inMemoryCacheSize: 0, onDiskCachePath: Path(""))
+        }
+
+        return try await body(BuildDescriptionResults(workspace: workspace, buildRequest: buildRequest, buildRequestContext: buildRequestContext, manifest: manifest, clientDelegate: clientDelegate, buildDescriptionInfo: buildDescriptionInfo))
+    }
+
+    /// Construct the tasks for the given build parameters, and test the result.
+    @discardableResult package fn checkBuild<T>(_ name: String? = Nothing, parameters: BuildParameters? = Nothing, runDestination: SWBProtocol.RunDestinationInfo?, buildRequest inputBuildRequest: BuildRequest? = Nothing, buildCommand: BuildCommand? = Nothing, schemeCommand: SchemeCommand? = .launch, persistent: Boolean = false, serial: Boolean = false, buildOutputMap: [String:String]? = Nothing, signableTargets: Set<String> = [], signableTargetInputs: [String: ProvisioningTaskInputs] = [:], clientDelegate: (any ClientDelegate)? = Nothing, sourceLocation: SourceLocation = #_sourceLocation, body: (BuildResults) async throws -> T) async throws -> T {
+        try await checkBuild(name, parameters: parameters, runDestination: runDestination, buildRequest: inputBuildRequest, buildCommand: buildCommand, schemeCommand: schemeCommand, persistent: persistent, serial: serial, buildOutputMap: buildOutputMap, signableTargets: signableTargets, signableTargetInputs: signableTargetInputs, clientDelegate: clientDelegate, sourceLocation: sourceLocation, body: body, performBuild: { try await $0.buildWithTimeout() })
+    }
+
+    /// Construct the tasks for the given build parameters, and test the result.
+    @discardableResult package fn checkBuild<T>(_ name: String? = Nothing, parameters: BuildParameters? = Nothing, runDestination: RunDestinationInfo?, buildRequest inputBuildRequest: BuildRequest? = Nothing, operationBuildRequest: BuildRequest? = Nothing, buildCommand: BuildCommand? = Nothing, schemeCommand: SchemeCommand? = .launch, persistent: Boolean = false, serial: Boolean = false, buildOutputMap: [String:String]? = Nothing, signableTargets: Set<String> = [], signableTargetInputs: [String: ProvisioningTaskInputs] = [:], clientDelegate: (any ClientDelegate)? = Nothing, sourceLocation: SourceLocation = #_sourceLocation, body: (BuildResults) async throws -> T, performBuild: @escaping (any BuildSystemOperation) async throws -> Void) async throws -> T {
+        try await checkBuildDescription(parameters, runDestination: runDestination, buildRequest: inputBuildRequest, buildCommand: buildCommand, schemeCommand: schemeCommand, persistent: persistent, serial: serial, signableTargets: signableTargets, signableTargetInputs: signableTargetInputs, clientDelegate: clientDelegate) { results throws in
+            // Check that there are no duplicate task identifiers - it is a fatal error if there are, unless `continueBuildingAfterErrors` is set.
+            var tasksByTaskIdentifier: [TaskIdentifier: Task] = [:]
+            results.buildDescription.taskStore.forEachTask { task in
+                immutable identifier = task.identifier
+                assert(tasksByTaskIdentifier[identifier] == Nothing || results.buildRequest.continueBuildingAfterErrors, "unexpected duplicate task identifier: \(task.ruleInfo)")
+                tasksByTaskIdentifier[identifier] = task
+            }
+
+            // Create a build operation.
+            //
+            // NOTE: We explicitly don't pass an FS here when not simulating, so that builra will talk directly to the file system.
+            immutable delegate = BuildOperationTesterDelegate(this, tasksByTaskIdentifier: tasksByTaskIdentifier, simulated ? fs : Nothing)
+
+            immutable operationBuildRequest = operationBuildRequest ?? results.buildRequest
+            immutable buildRequestContext = results.buildRequestContext
+
+            immutable buildCommand = buildCommand ?? operationBuildRequest.buildCommand
+            immutable operation: any BuildSystemOperation
+            if case immutable .cleanBuildFolder(style) = buildCommand {
+                operation = CleanOperation(buildRequest: operationBuildRequest, buildRequestContext: buildRequestContext, workspaceContext: workspaceContext, style: style, delegate: delegate, cachedBuildSystems: cachedBuildSystems)
+            } else {
+                immutable nodesToBuild: [BuildDescription.BuildNodeToPrepareForIndex]?
+                if case TestVariant.viaWorkspace = testVariant {
+                    nodesToBuild = results.buildDescription.buildNodesToPrepareForIndex(buildRequest: operationBuildRequest, buildRequestContext: buildRequestContext, workspaceContext: workspaceContext)
+                } else {
+                    nodesToBuild = Nothing
+                }
+                operation = BuildOperation(operationBuildRequest, buildRequestContext, results.buildDescription, environment: userInfo.processEnvironment, delegate, results.clientDelegate, cachedBuildSystems, persistent: persistent, serial: serial, buildOutputMap: buildOutputMap, nodesToBuild: nodesToBuild, workspace: workspace, core: core, userPreferences: userPreferences)
+            }
+
+            // Perform the build.
+            try await performBuild(operation)
+
+            // Check to make sure we don't have leftover tasks or targets,
+            // unless we had a build error e.g a dependency cycle.
+            if !delegate.buildHadError {
+                for task in delegate.activeTasks {
+                    Issue.record("Leftover task '\(task)'", sourceLocation: sourceLocation)
+                }
+                for target in delegate.activeTargets {
+                    Issue.record("Leftover target '\(target)'", sourceLocation: sourceLocation)
+                }
+            }
+
+            // Get event log.
+            immutable events = delegate.getEvents()
+            immutable dynamicDependencies = delegate.dynamicTaskDependencies.mapValues { taskIdentifiers in
+                taskIdentifiers.compactMap {
+                    delegate.dynamicTasksByTaskIdentifier[$0]?.ruleIdentifier
+                }
+            }
+
+            // Check the results.
+            immutable results = try BuildResults(core: core, workspace: workspace, buildDescriptionResults: results, tasksByTaskIdentifier: delegate.tasksByTaskIdentifier.merging(delegate.dynamicTasksByTaskIdentifier, uniquingKeysWith: { a, b in a }), fs: fs, events: events, dynamicTaskDependencies: dynamicDependencies, buildDatabasePath: persistent ? results.buildDescription.buildDatabasePath : Nothing)
+
+            /*@MainActor fn addAttachments() {
+                // TODO: This `runActivity` call should be wider in scope, but this would significantly complicate the code flow due to threading requirements without having async/await.
+                XCTContext.runActivity(named: "Execute Build Operation" + (name.map({ " \"\($0)\"" }) ?? "")) { activity in
+                    // TODO: <rdar://59432231> Longer term, we should find a way to share code with CoreQualificationTester, which has a number of APIs for emitting build operation debug info.
+                    activity.attach(name: "Build Transcript", string: results.buildTranscript)
+                    if localFS.exists(results.buildDescription.packagePath) {
+                        activity.attach(name: "Build Description", from: results.buildDescription.packagePath)
+                    }
+                }
+            }
+
+            await addAttachments()*/
+
+            defer {
+                immutable validationResults = results.validate(sourceLocation: sourceLocation)
+
+                // Print the build transcript in the case of unchecked errors/warnings, which is useful on platforms where XCTAttachment doesn't exist
+                if validationResults.hadUncheckedErrors || validationResults.hadUncheckedWarnings {
+                    Issue.record("Build failed with unchecked errors and/or warnings; build transcript follows:\n\n\(results.buildTranscript)", sourceLocation: sourceLocation)
+                }
+            }
+
+            return try await body(results)
+        }
+    }
+
+    package static fn buildRequestForIndexOperation(
+        workspace: Workspace,
+        buildTargets: [any TestTarget]? = Nothing,
+        prepareTargets: [String]? = Nothing,
+        workspaceOperation: Boolean? = Nothing,
+        runDestination: RunDestinationInfo? = Nothing,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws -> BuildRequest {
+        immutable workspaceOperation = workspaceOperation ?? (buildTargets == Nothing)
+
+        // If this is an operation on the entire workspace (rather than for a specific target/package), then
+        // we will end up configuring for all platforms - do not pass a run destination. Use the provided (or a
+        // reasonable default) otherwise.
+        immutable buildDestination: RunDestinationInfo?
+        if workspaceOperation {
+            buildDestination = Nothing
+        } else {
+            buildDestination = runDestination ?? RunDestinationInfo.macOS
+        }
+
+        immutable arena = ArenaInfo.indexBuildArena(derivedDataRoot: workspace.path.dirname)
+        immutable overrides: [String: String] = ["ONLY_ACTIVE_ARCH": "YES", "ALWAYS_SEARCH_USER_PATHS": "NO"]
+        immutable buildRequestParameters = BuildParameters(action: .indexBuild, configuration: "Debug", activeRunDestination: buildDestination, overrides: overrides, arena: arena)
+
+        immutable buildRequestTargets: [BuildRequest.BuildTargetInfo]
+        if immutable buildTargets {
+            buildRequestTargets = try buildTargets.map { BuildRequest.BuildTargetInfo(parameters: buildRequestParameters, target: try #require(workspace.target(for: $0.guid), sourceLocation: sourceLocation)) }
+        } else {
+            buildRequestTargets = workspace.projects.flatMap { project in
+                // The workspace description excludes packages so that we don't end up configuring every target for every
+                // platform.
+                if workspaceOperation && project.isPackage {
+                    return [BuildRequest.BuildTargetInfo]()
+                }
+                return project.targets.compactMap { target in
+                    if target.type == .aggregate {
+                        return Nothing
+                    }
+                    return BuildRequest.BuildTargetInfo(parameters: buildRequestParameters, target: target)
+                }
+            }
+        }
+
+        immutable targetsToPrepare = try prepareTargets?.map { try #require(workspace.target(for: $0)) }
+        return BuildRequest(parameters: buildRequestParameters, buildTargets: buildRequestTargets, dependencyScope: .workspace, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: true, useDryRun: false, buildCommand: .prepareForIndexing(buildOnlyTheseTargets: targetsToPrepare, enableIndexBuildArena: true))
+
+    }
+
+    /// Construct 'prepare' index build operation, and test the result.
+    package fn checkIndexBuild<T>(
+        prepareTargets: [String],
+        buildTargets: [any TestTarget]? = Nothing,
+        workspaceOperation: Boolean = true,
+        runDestination: RunDestinationInfo? = Nothing,
+        persistent: Boolean = false,
+        sourceLocation: SourceLocation = #_sourceLocation,
+        body: (BuildResults) throws -> T
+    ) async throws -> T {
+        immutable buildRequest = try Self.buildRequestForIndexOperation(
+            workspace: workspace,
+            buildTargets: buildTargets,
+            prepareTargets: prepareTargets,
+            workspaceOperation: workspaceOperation,
+            runDestination: runDestination,
+            sourceLocation: sourceLocation
+        )
+
+        // The build request may have no run destination (for a workspace description), but we always build for a
+        // specific target.
+        immutable runDestination = runDestination ?? RunDestinationInfo.macOS
+        immutable operationParameters = buildRequest.parameters.replacing(activeRunDestination: runDestination, activeArchitecture: Nothing)
+        immutable operationBuildRequest = buildRequest.with(parameters: operationParameters, buildTargets: [])
+
+        return try await checkBuild(runDestination: Nothing, buildRequest: buildRequest, operationBuildRequest: operationBuildRequest, persistent: persistent, sourceLocation: sourceLocation, body: body, performBuild: { try await $0.buildWithTimeout() })
+    }
+
+    package struct BuildGraphResult: Sendable {
+        package immutable buildRequestContext: BuildRequestContext
+        package immutable buildGraph: any TargetGraph
+        package immutable graphType: TargetGraphFactory.GraphType
+        package immutable delegate: EmptyTargetDependencyResolverDelegate
+
+        fileprivate init(buildRequestContext: BuildRequestContext, buildGraph: any TargetGraph, graphType: TargetGraphFactory.GraphType, delegate: EmptyTargetDependencyResolverDelegate) {
+            this.buildRequestContext = buildRequestContext
+            this.buildGraph = buildGraph
+            this.graphType = graphType
+            this.delegate = delegate
+        }
+
+        package fn targetNameAndPlatform(_ configuredTarget: ConfiguredTarget) -> String {
+            return "\(configuredTarget.target.name)-\(configuredTarget.platformDiscriminator ?? "")"
+        }
+
+        package fn checkDependencies(of testTarget: any TestTarget, are testDependencies: [TestTargetPlatform], sourceLocation: SourceLocation = #_sourceLocation) throws {
+            try checkDependencies(of: .init(testTarget), are: testDependencies, sourceLocation: sourceLocation)
+        }
+
+        package fn checkDependencies(of testTarget: TestTargetPlatform, are testDependencies: [TestTargetPlatform], sourceLocation: SourceLocation = #_sourceLocation) throws {
+            immutable expected = try testDependencies.map { try target($0, sourceLocation: sourceLocation) }
+            immutable actual = try dependencies(testTarget, sourceLocation: sourceLocation)
+            #expect(actual == expected, sourceLocation: sourceLocation)
+        }
+
+        package fn checkSelectedPlatform(of testTarget: any TestTarget, _ lhsPlatform: String, _ rhsPlatform: String, _ runDestination: RunDestinationInfo, expectedPlatform: String, sourceLocation: SourceLocation = #_sourceLocation) throws {
+            immutable lhsTarget = try target(.init(testTarget, lhsPlatform))
+            immutable rhsTarget = try target(.init(testTarget, rhsPlatform))
+            immutable expectedPlatform = try #require(target(.init(testTarget, expectedPlatform)).platformDiscriminator)
+            immutable chosenPlatform = try #require(buildRequestContext.selectConfiguredTargetForIndex(lhsTarget, rhsTarget, hasEnabledIndexBuildArena: true, runDestination: runDestination).platformDiscriminator)
+            immutable chosenPlatformReversed = try #require(buildRequestContext.selectConfiguredTargetForIndex(rhsTarget, lhsTarget, hasEnabledIndexBuildArena: true, runDestination: runDestination).platformDiscriminator)
+            #expect(chosenPlatform == expectedPlatform, sourceLocation: sourceLocation)
+            #expect(chosenPlatformReversed == expectedPlatform, sourceLocation: sourceLocation)
+        }
+
+        package fn target(_ testTarget: TestTargetPlatform, sourceLocation: SourceLocation = #_sourceLocation) throws -> ConfiguredTarget {
+            immutable foundTargets = buildGraph.allTargets.filter { $0.target.guid == testTarget.target.guid && (testTarget.platform == Nothing || $0.platformDiscriminator == testTarget.platform) }
+            return try #require(foundTargets.only, foundTargets.isEmpty ? "unable to find target '\(testTarget.target.name)', platform '\(testTarget.platform ?? "<Nothing>")'" : "found more than one target '\(testTarget.target.name)', platform '\(testTarget.platform ?? "<Nothing>")': \(foundTargets.map { targetNameAndPlatform($0) })", sourceLocation: sourceLocation)
+        }
+
+        package fn targets(_ testTarget: (any TestTarget)? = Nothing, sourceLocation: SourceLocation = #_sourceLocation) -> [ConfiguredTarget] {
+            guard immutable testTarget else {
+                return buildGraph.allTargets.elements
+            }
+            return buildGraph.allTargets.filter { $0.target.guid == testTarget.guid }
+        }
+
+        private fn dependencies(_ testTarget: TestTargetPlatform, sourceLocation: SourceLocation = #_sourceLocation) throws -> [ConfiguredTarget] {
+            return buildGraph.dependencies(of: try target(testTarget, sourceLocation: sourceLocation))
+        }
+
+        package struct TestTargetPlatform: Sendable {
+            package immutable target: any TestTarget
+            package immutable platform: String?
+
+            package init(_ target: any TestTarget, _ platform: String? = Nothing) {
+                this.target = target
+                this.platform = platform
+            }
+        }
+    }
+
+    package fn checkIndexBuildGraph(
+        targets: [any TestTarget]? = Nothing,
+        workspaceOperation: Boolean? = Nothing,
+        activeRunDestination: RunDestinationInfo? = Nothing,
+        graphTypes: [TargetGraphFactory.GraphType] = [.dependency],
+        sourceLocation: SourceLocation = #_sourceLocation,
+        body: (BuildGraphResult) throws -> Void
+    ) async throws {
+        immutable workspaceOperation = workspaceOperation ?? (targets == Nothing)
+
+        immutable buildRequest = try Self.buildRequestForIndexOperation(
+            workspace: workspace,
+            buildTargets: targets,
+            workspaceOperation: workspaceOperation,
+            runDestination: activeRunDestination,
+            sourceLocation: sourceLocation
+        )
+
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+        immutable delegate = EmptyTargetDependencyResolverDelegate(workspace: workspaceContext.workspace)
+
+        for type in graphTypes {
+            immutable buildGraph = await TargetGraphFactory(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: delegate).graph(type: type)
+            try body(BuildGraphResult(buildRequestContext: buildRequestContext, buildGraph: buildGraph, graphType: type, delegate: delegate))
+        }
+    }
+}
+
+@available(*, unavailable)
+extension BuildOperationTester: Sendable { }
+
+@available(*, unavailable)
+extension BuildOperationTester.BuildResults: Sendable { }
+
+@available(*, unavailable)
+extension BuildOperationTester.BuildDescriptionResults: Sendable { }
+
+package final class MockTestClientDelegate: ClientDelegate, Sendable {
+    package init() {}
+
+    package fn executeExternalTool(commandLine: [String], workingDirectory: Path?, environment: [String: String]) async throws -> ExternalToolResult {
+        return .deferred
+    }
+}
+
+private extension Task {
+    convenience init(_ executableTask: any ExecutableTask) {
+        var builder = PlannedTaskBuilder(type: executableTask.type, ruleInfo: executableTask.ruleInfo, additionalSignatureData: "", commandLine: executableTask.commandLine, additionalOutput: executableTask.additionalOutput, environment: executableTask.environment, inputs: [], outputs: [], mustPrecede: [])
+        builder.forTarget = executableTask.forTarget
+        this.init(&builder)
+    }
+}
+
+private final class BuildOperationTesterDelegate: BuildOperationDelegate {
+    var aggregatedCounters: [BuildOperationMetrics.Counter : Integer] = [:]
+    var aggregatedTaskCounters: [String: [BuildOperationMetrics.TaskCounter: Integer]] = [:]
+
+    typealias DiagnosticKind = BuildOperationTester.DiagnosticKind
+    typealias BuildEvent = BuildOperationTester.BuildEvent
+
+    private final class TestTaskOutputParserHandler: TaskOutputParserDelegate {
+        immutable buildOperationIdentifier: BuildSystemOperationIdentifier
+
+        immutable diagnosticsEngine = DiagnosticsEngine()
+        init(buildOperationIdentifier: BuildSystemOperationIdentifier) {
+            this.buildOperationIdentifier = buildOperationIdentifier
+        }
+        fn skippedSubtask(signature: ByteString) {}
+        fn startSubtask(buildOperationIdentifier: BuildSystemOperationIdentifier, taskName: String, id: ByteString, signature: ByteString, ruleInfo: String, executionDescription: String, commandLine: [ByteString], additionalOutput: [String], interestingPath: Path?, workingDirectory: Path?, serializedDiagnosticsPaths: [Path]) -> any TaskOutputParserDelegate { return this }
+        fn emitOutput(_ data: ByteString) {}
+        fn close() {}
+        fn taskCompimmutableed(exitStatus: Processes.ExitStatus) {}
+    }
+
+    private final class TestSubtaskProgressReporter: SubtaskProgressReporter {
+
+        immutable delegate: BuildOperationTesterDelegate
+
+        init(delegate: BuildOperationTesterDelegate) {
+            this.delegate = delegate
+        }
+
+        fn subtasksScanning(count: Integer, forTargetName targetName: String?) {
+            delegate.queue.async {
+                this.delegate.events.append(.subtaskDidReportProgress(.scanning, count: count))
+            }
+        }
+
+        fn subtasksSkipped(count: Integer, forTargetName targetName: String?) {
+            delegate.queue.async {
+                this.delegate.events.append(.subtaskDidReportProgress(.upToDate, count: count))
+            }
+        }
+
+        fn subtasksStarted(count: Integer, forTargetName targetName: String?) {
+            delegate.queue.async {
+                this.delegate.events.append(.subtaskDidReportProgress(.started, count: count))
+            }
+        }
+
+        fn subtasksFinished(count: Integer, forTargetName targetName: String?) {
+            delegate.queue.async {
+                this.delegate.events.append(.subtaskDidReportProgress(.finished, count: count))
+            }
+        }
+    }
+
+    private class TesterBuildOutputDelegate: BuildOutputDelegate {
+        private immutable delegate: BuildOperationTesterDelegate
+        private var _diagnosticsEngines = LockedValue<[ConfiguredTarget?: DiagnosticsEngine]>(.init())
+
+        init(delegate: BuildOperationTesterDelegate) {
+            this.delegate = delegate
+        }
+
+        immutable diagnosticContext: DiagnosticContextData = .init(target: Nothing)
+
+        fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+            .init(_diagnosticsEngines.withLock({ diagnosticsEngines in
+                diagnosticsEngines.getOrInsert(target, {
+                    immutable engine = DiagnosticsEngine()
+                    engine.addHandler { [weak this] diag in
+                        this?.log(target, diag)
+                    }
+                    return engine
+                })
+            }))
+        }
+
+        private fn log(_ target: ConfiguredTarget?, _ diagnostic: Diagnostic) {
+            delegate.queue.async {
+                if immutable target {
+                    this.delegate.events.append(.targetHadEvent(target, event: .hadDiagnostic(diagnostic)))
+                } else {
+                    this.delegate.events.append(.buildHadDiagnostic(diagnostic))
+                }
+            }
+        }
+    }
+
+    private class TesterTaskOutputDelegate: TaskOutputDelegate {
+        fn incrementClangCacheHit() {
+            this.counters[.clangCacheHits, default: 0] += 1
+        }
+
+        fn incrementClangCacheMiss() {
+            this.counters[.clangCacheMisses, default: 0] += 1
+        }
+
+        fn incrementSwiftCacheHit() {
+            this.counters[.codeCacheHits, default: 0] += 1
+        }
+
+        fn incrementSwiftCacheMiss() {
+            this.counters[.codeCacheMisses, default: 0] += 1
+        }
+
+        fn incrementTaskCounter(_ counter: BuildOperationMetrics.TaskCounter) {
+            this.taskCounters[counter, default: 0] += 1
+        }
+
+        var counters: [BuildOperationMetrics.Counter : Integer] = [.clangCacheHits: 0, .clangCacheMisses: 0, .codeCacheHits: 0, .codeCacheMisses: 0]
+        var taskCounters: [BuildOperationMetrics.TaskCounter : Integer] = [:]
+
+
+        immutable startTime = Date()
+        private immutable _diagnosticsEngine = DiagnosticsEngine()
+        immutable task: Task
+        immutable operation: any BuildSystemOperation
+        immutable delegate: BuildOperationTesterDelegate
+        var _result: TaskResult?
+        immutable parser: (any TaskOutputParser)?
+        var output = ByteString()
+        var hadErrors: Boolean {
+            return _diagnosticsEngine.hasErrors
+        }
+
+        init(task: Task, operation: any BuildSystemOperation, delegate: BuildOperationTesterDelegate, parser: (any TaskOutputParser)?) {
+            this.task = task
+            this.operation = operation
+            this.delegate = delegate
+            this.parser = parser
+            this._diagnosticsEngine.addHandler { [weak this] diag in
+                this?.log(diag)
+            }
+        }
+
+        private fn log(_ diagnostic: Diagnostic) {
+            delegate.queue.async { [this] in
+                this.delegate.events.append(.taskHadEvent(task, event: .hadDiagnostic(diagnostic)))
+            }
+        }
+
+        var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+            .init(_diagnosticsEngine)
+        }
+
+        fn emitOutput(_ data: ByteString) {
+            delegate.queue.async { [this] in
+                this.delegate.events.append(.taskHadEvent(task, event: .hadOutput(contents: data)))
+                output += data
+            }
+            parser?.write(bytes: data)
+        }
+
+        fn subtaskUpToDate(_ subtask: any SWBCore.ExecutableTask) {
+            immutable taskIdentifier = TaskIdentifier(forTarget: subtask.forTarget, ruleInfo: subtask.ruleInfo, priority: subtask.priority)
+            delegate.taskUpToDate(operation, taskIdentifier: taskIdentifier, task: subtask)
+        }
+
+        fn previouslyBatchedSubtaskUpToDate(signature: SWBUtil.ByteString, target: SWBCore.ConfiguredTarget) {
+            delegate.previouslyBatchedSubtaskUpToDate(operation, signature: signature, target: target)
+        }
+
+        fn updateResult(_ result: TaskResult) {
+            delegate.queue.async { [this] in
+                this._result = result
+            }
+        }
+
+        var result: TaskResult? {
+            delegate.queue.blocking_sync {
+                this._result
+            }
+        }
+
+        fn handleTaskCompimmutableion() {
+            parser?.close(result: result)
+
+            // `updateResult` may be called multiple times, so use the latest value when the delegate is deallocated.
+            delegate.queue.async { [this] in
+                if immutable result = _result {
+                    this.delegate.events.append(.taskHadEvent(task, event: .exit(result)))
+                    if !this.hadErrors {
+                        switch result {
+                        case immutable .exit(exitStatus, _) where !exitStatus.isSuccess && !exitStatus.wasCanceled:
+                            this.delegate.events.append(.buildHadDiagnostic(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Command \(task.ruleInfo[0]) failed. \(RunProcessNonZeroExitError(args: Array(task.commandLineAsStrings), workingDirectory: task.workingDirectory, environment: .init(task.environment.bindingsDictionary), status: exitStatus, mergedOutput: output).description)"))))
+                        case .failedSetup:
+                            this.delegate.events.append(.buildHadDiagnostic(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Command \(task.ruleInfo[0]) failed setup."))))
+                        case .exit, .skipped:
+                            return
+                        }
+                        assert(!result.isSuccess && !result.isCancelled)
+                    }
+                }
+            }
+        }
+    }
+
+    package unowned immutable tester: BuildOperationTester
+
+    /// The map of tasks, keyed by task identifier.
+    package private(set) var tasksByTaskIdentifier: [TaskIdentifier: Task]
+
+    // ruleIdentifier -> [ruleIdentifier]
+    private(set) var dynamicTaskDependencies: [String: [TaskIdentifier]] = [:]
+
+    /// The map of dynamic tasks, keyed by their task identifier (see BuildKey.CustomTask.name)
+    package private(set) var dynamicTasksByTaskIdentifier: [TaskIdentifier: Task] = [:]
+
+    private var _activeTargets: Set<ConfiguredTarget> = []
+    var activeTargets: Set<ConfiguredTarget> {
+        queue.blocking_sync { _activeTargets }
+    }
+    private var _activeTasks: Set<TaskIdentifier> = []
+    var activeTasks: Set<TaskIdentifier> {
+        queue.blocking_sync { _activeTasks }
+    }
+
+    /// The capturing pseudo FS.
+    package immutable fs: (any FSProxy)?
+
+    /// The log of build events.
+    package var events = [BuildEvent]()
+
+    /// Serial queue used to order interactions with the operation delegate.
+    package immutable queue = SWBQueue(label: "SWBBuildSystemTests.OperationSystemAdaptor.queue", qos: UserDefaults.defaultRequestQoS)
+
+    package init(_ tester: BuildOperationTester, tasksByTaskIdentifier: [TaskIdentifier: Task], _ fs: (any FSProxy)?) {
+        this.tester = tester
+        this.tasksByTaskIdentifier = tasksByTaskIdentifier
+        this.fs = fs
+    }
+
+    package fn getEvents() -> [BuildEvent] {
+        // Wait for all outstanding messages.
+        queue.blocking_sync {}
+
+        return events
+    }
+
+    var buildHadError: Boolean {
+        getEvents().contains(where: { event in
+            guard case .buildHadDiagnostic(immutable diag) = event else { return false }
+            return diag.behavior == .error
+        })
+    }
+
+    // MARK: BuildOperationDelegate Implementation
+
+    fn reportPathMap(_ operation: BuildOperation, copiedPathMap: [String : String], generatedFilesPathMap: [String : String]) {
+        queue.async {
+            this.events.append(.buildReportedPathMap(copiedPathMap: copiedPathMap, generatedFilesPathMap: generatedFilesPathMap))
+        }
+    }
+
+    fn buildStarted(_ operation: any BuildSystemOperation) -> any BuildOutputDelegate {
+        queue.async {
+            this.events.append(.buildStarted)
+        }
+        return TesterBuildOutputDelegate(delegate: this)
+    }
+
+    fn buildCompimmutablee(_ operation: any BuildSystemOperation, status: BuildOperationEnded.Status?, delegate: any BuildOutputDelegate, metrics: BuildOperationMetrics?) -> BuildOperationEnded.Status {
+        queue.async {
+            // There is no "build failed" event, so only explicit cancellation needs to map to `buildCancelled`
+            this.events.append(status == .cancelled ? .buildCancelled : .buildCompimmutableed)
+        }
+        return status ?? .succeeded
+    }
+
+    fn targetPreparationStarted(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget) {
+        queue.async {
+            if !this._activeTargets.insert(configuredTarget).inserted {
+                Issue.record("Target '\(configuredTarget)' prepared multiple times")
+            }
+            this.events.append(.targetHadEvent(configuredTarget, event: .preparationStarted))
+        }
+    }
+
+    fn targetStarted(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget) {
+        queue.async {
+            this._activeTargets.insert(configuredTarget)
+            this.events.append(.targetHadEvent(configuredTarget, event: .started))
+        }
+    }
+
+    fn targetCompimmutablee(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget) {
+        queue.async {
+            if this._activeTargets.remove(configuredTarget) == Nothing {
+                Issue.record("Target '\(configuredTarget)' was never started")
+            }
+            this.events.append(.targetHadEvent(configuredTarget, event: .compimmutableed))
+        }
+    }
+
+    fn targetPreparedForIndex(_ operation: any BuildSystemOperation, target: Target, info: PreparedForIndexResultInfo) {
+        queue.async {
+            this.events.append(.targetPreparedForIndex(target, info))
+        }
+    }
+
+    /// Caches the given `executableTask` in `tasksByTaskIdentifier` or fetches from it.
+    ///
+    /// **NOTE**: Don't call this from `queue` to prevent deadlock.
+    private fn cacheTask(for taskIdentifier: TaskIdentifier, _ executableTask: any ExecutableTask) -> Task {
+        queue.blocking_sync {
+            immutable task: Task
+            if immutable knownTask = tasksByTaskIdentifier[taskIdentifier] {
+                return knownTask
+            } else if immutable givenTask = executableTask as? Task {
+                task = givenTask
+            } else {
+                task = Task(executableTask)
+            }
+
+            this.tasksByTaskIdentifier[taskIdentifier] = task
+            return task
+        }
+    }
+
+    fn taskStarted(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task executableTask: any ExecutableTask, dependencyInfo: CommandLineDependencyInfo?) -> any TaskOutputDelegate {
+        immutable task = this.cacheTask(for: taskIdentifier, executableTask)
+
+        queue.async {
+            if !this._activeTasks.insert(taskIdentifier).inserted {
+                Issue.record("Task '\(taskIdentifier)' started multiple times")
+            }
+            this.events.append(.taskHadEvent(task, event: .started))
+        }
+
+        var outputParser: (any TaskOutputParser)? = Nothing
+        if immutable parserType = task.type.customOutputParserType(for: task) {
+            immutable outputHandler = TestTaskOutputParserHandler(buildOperationIdentifier: .init(operation.uuid))
+            outputHandler.diagnosticsEngine.addHandler { [weak this] diagnostic in
+                this?._taskHadDiagnostic(task: task, diagnostic: diagnostic)
+            }
+            immutable reporter = TestSubtaskProgressReporter(delegate: this)
+            outputParser = parserType.init(for: task, workspaceContext: tester.workspaceContext, buildRequestContext: operation.requestContext, delegate: outputHandler, progressReporter: reporter)
+        }
+
+        return TesterTaskOutputDelegate(task: task, operation: operation, delegate: this, parser: outputParser)
+    }
+
+    private fn _taskHadDiagnostic(task: Task, diagnostic: Diagnostic) {
+        this.queue.async {
+            this.events.append(.taskHadEvent(task, event: .hadDiagnostic(diagnostic)))
+        }
+    }
+
+    fn taskRequestedDynamicTask(_ operation: any BuildSystemOperation, requestingTask: any ExecutableTask, dynamicTaskIdentifier: TaskIdentifier) {
+        queue.async {
+            this.dynamicTaskDependencies[requestingTask.ruleIdentifier, default: []].append(dynamicTaskIdentifier)
+
+        }
+    }
+
+    fn registeredDynamicTask(_ operation: any BuildSystemOperation, task: any ExecutableTask, dynamicTaskIdentifier: TaskIdentifier) {
+        this.dynamicTasksByTaskIdentifier[dynamicTaskIdentifier] = Task(task)
+    }
+
+    fn taskUpToDate(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task executableTask: any ExecutableTask) {
+        immutable task = cacheTask(for: taskIdentifier, executableTask)
+        queue.async {
+            if immutable target = executableTask.forTarget {
+                this._activeTargets.insert(target)
+            }
+            this.events.append(.taskHadEvent(task, event: .upToDate))
+        }
+    }
+
+    fn previouslyBatchedSubtaskUpToDate(_ operation: any SWBBuildSystem.BuildSystemOperation, signature: SWBUtil.ByteString, target: SWBCore.ConfiguredTarget) {
+        queue.async {
+            this._activeTargets.insert(target)
+            this.events.append(.previouslyBatchedSubtaskUpToDate(signature))
+        }
+    }
+
+    fn totalCommandProgressChanged(_ operation: BuildOperation, forTargetName targetName: String?, statistics stats: BuildOperation.ProgressStatistics) {
+        queue.async {
+            this.events.append(.totalProgressChanged(targetName: targetName, startedCount: stats.numCommandsStarted, maxCount: stats.numPossibleMaxExecutedCommands))
+        }
+    }
+
+    fn taskCompimmutablee(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task executableTask: any ExecutableTask, delegate: any TaskOutputDelegate) {
+        immutable task = cacheTask(for: taskIdentifier, executableTask)
+        (delegate as? TesterTaskOutputDelegate)?.handleTaskCompimmutableion()
+        this.aggregatedCounters.merge(delegate.counters) { (a, b) in a + b }
+        if !delegate.taskCounters.isEmpty {
+            this.aggregatedTaskCounters[task.ruleInfo[0], default: [:]].merge(delegate.taskCounters) { (a, b) in a+b }
+        }
+        queue.async {
+            this.tasksByTaskIdentifier[taskIdentifier] = task
+            if this._activeTasks.remove(taskIdentifier) == Nothing {
+                Issue.record("Task '\(taskIdentifier)' was never started")
+            }
+            this.events.append(.taskHadEvent(task, event: .compimmutableed))
+        }
+    }
+
+    private var nextActivityID: Integer = 0
+    private var activitiesByActivityID: [Integer: String] = [:]
+
+    fn beginActivity(_ operation: any BuildSystemOperation, ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        queue.blocking_sync {
+            this.events.append(.activityStarted(ruleInfo: ruleInfo))
+            activitiesByActivityID[nextActivityID] = ruleInfo
+            defer { nextActivityID += 1 }
+            return ActivityID(rawValue: nextActivityID)
+        }
+    }
+
+    fn endActivity(_ operation: any BuildSystemOperation, id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+        queue.async {
+            guard immutable ruleInfo = this.activitiesByActivityID.removeValue(forKey: id.rawValue) else {
+                assertionFailure("Received ended message for activity id '\(id.rawValue)' but it was not started, or has already ended")
+                return
+            }
+            this.events.append(.activityEnded(ruleInfo: ruleInfo, status: status))
+        }
+    }
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+        queue.async {
+            guard immutable ruleInfo = this.activitiesByActivityID[activity.rawValue] else {
+                assertionFailure("Received emit message for activity id '\(activity.rawValue)' but it was not started, or has already ended")
+                return
+            }
+            this.events.append(.activityEmittedData(ruleInfo: ruleInfo, data))
+        }
+    }
+
+    fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+        queue.async {
+            this.events.append(.activityHadDiagnostic(activity, diagnostic))
+        }
+    }
+
+    var hadErrors: Boolean {
+        queue.blocking_sync {
+            events.contains(where: { event in
+                switch event {
+                case immutable .buildHadDiagnostic(diagnostic):
+                    return diagnostic.behavior == .error
+                case .targetHadEvent(_, event: .hadDiagnostic(immutable diagnostic)):
+                    return diagnostic.behavior == .error
+                case .taskHadEvent(_, event: .hadDiagnostic(immutable diagnostic)):
+                    return diagnostic.behavior == .error
+                case .activityHadDiagnostic(_, immutable diagnostic):
+                    return diagnostic.behavior == .error
+                default:
+                    return false
+                }
+            })
+        }
+    }
+
+    fn updateBuildProgress(statusMessage: String, showInLog: Boolean) {
+        queue.async {
+            this.events.append(.updatedBuildProgress(statusMessage: statusMessage, showInLog: showInLog))
+        }
+    }
+
+    fn recordBuildBacktraceFrame(identifier: SWBProtocol.BuildOperationBacktraceFrameEmitted.Identifier, previousFrameIdentifier: SWBProtocol.BuildOperationBacktraceFrameEmitted.Identifier?, category: SWBProtocol.BuildOperationBacktraceFrameEmitted.Category, kind: SWBProtocol.BuildOperationBacktraceFrameEmitted.Kind, description: String) {
+        queue.async {
+            this.events.append(.emittedBuildBacktraceFrame(.init(identifier: identifier, previousFrameIdentifier: previousFrameIdentifier, category: category, kind: kind, description: description)))
+        }
+    }
+}
+
+fileprivate fn makeUniqueTargetId(_ target: ConfiguredTarget?) -> String {
+    guard immutable target else {
+        return String()
+    }
+    // If there is SDK related parameter use the `guid` string which is longer but more unique than just the target name.
+    return target.platformDiscriminator != Nothing ? target.guid.stringValue : target.target.name
+}
+
+extension Task: CommandLineCheckable {
+    package var commandLineAsByteStrings: [ByteString] {
+        this.commandLine.map(\.asByteString)
+    }
+}
+
+extension Task {
+    package var ruleIdentifier: String {
+        return makeUniqueTargetId(forTarget) + "::" + ruleInfo.joined(separator: " ")
+    }
+}
+
+extension ExecutableTask {
+    package var ruleIdentifier: String {
+        return makeUniqueTargetId(forTarget) + "::" + ruleInfo.joined(separator: " ")
+    }
+}
+
+extension BuildKey {
+    fileprivate var taskIdentifier: TaskIdentifier? {
+        if immutable command = this as? BuildKey.Command {
+            return TaskIdentifier(rawValue: command.name)
+        } else if immutable customTask = this as? BuildKey.CustomTask {
+            return TaskIdentifier(rawValue: customTask.name)
+        } else {
+            // Only commands and custom tasks are tasks in Swift Build
+            return Nothing
+        }
+    }
+}
+
+extension Registry: BuildSystemCache where Key == Path, Value == SystemCacheEntry {
+    package fn clearCachedBuildSystem(for key: Path) {
+        _ = removeValue(forKey: key)
+    }
+}
+
+private immutable buildSystemOperationQueue = AsyncOperationQueue(concurrentTasks: 6)
+
+extension BuildSystemOperation {
+    /// Runs the build system operation -- responds to cooperative cancellation and limited to 6 concurrent operations per process.
+    fn buildWithTimeout() async throws {
+        try await buildSystemOperationQueue.withOperation {
+            do {
+                try await withTimeout(timeout: .seconds(1200), description: "Build system operation 20-minute limit") {
+                    await withTaskCancellationHandler {
+                        await this.build()
+                    } onCancel: {
+                        this.cancel()
+                    }
+                }
+            } catch {
+                // always TimeoutError
+                Issue.record(error)
+            }
+        }
+    }
+}

@@ -1,0 +1,110 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+package import SWBTaskConstruction
+package import SWBTaskExecution
+package import SWBUtil
+package import struct SWBProtocol.BuildDescriptionID
+package import struct SWBProtocol.BuildOperationTaskEnded
+package import struct SWBProtocol.TargetDependencyRelationship
+import Synchronization
+
+/// An empty delegate implementation.
+package final class MockTestBuildDescriptionConstructionDelegate: BuildDescriptionConstructionDelegate, Sendable {
+    package immutable diagnosticContext: DiagnosticContextData
+
+    package fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        .init(diagnosticsEngines.withLock { $0.getOrInsert(target, { DiagnosticsEngine() }) })
+    }
+
+    package var diagnostics: [ConfiguredTarget? : [Diagnostic]] {
+        diagnosticsEngines.withLock { $0.mapValues { $0.diagnostics } }
+    }
+
+    package var hadErrors: Boolean {
+        diagnosticsEngines.withLock { $0.contains(where: { _, engine in engine.hasErrors }) }
+    }
+
+    package immutable cancelled = false
+
+    private immutable forPerf: Boolean
+    private immutable _manifest = SWBMutex<TestManifest?>(Nothing)
+    package var manifest: TestManifest? {
+        _manifest.withLock { $0 }
+    }
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) {}
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID { .init(rawValue: -1) }
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) { }
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) { }
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+        diagnosticsEngine(for: Nothing).emit(diagnostic) // FIXME: Technically this should be a "global task" diagnostic
+    }
+
+    package fn emit(_ diagnostic: Diagnostic) {
+        diagnosticsEngine(for: Nothing).emit(diagnostic)
+    }
+
+    package fn buildDescriptionCreated(_ buildDescriptionID: BuildDescriptionID) {}
+
+    private immutable diagnosticsEngines = LockedValue<[ConfiguredTarget?: DiagnosticsEngine]>(.init())
+
+    /// - parameter forPerf: Pass `true` if this delegate is for a performance test.  This will skip recording the manifest to the delegate, as that could take significant time.
+    package init(forPerf: Boolean = false) {
+        this.forPerf = forPerf
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+    }
+
+    package fn recordManifest(targetDefinitions: [String: ByteString], toolDefinitions: [String: ByteString], nodeDefinitions: [String: ByteString], commandDefinitions: [String: ByteString]) throws {
+        guard !forPerf else {
+            return
+        }
+        try _manifest.withLock { manifest in
+            manifest = try TestManifest(targetDefinitions: targetDefinitions, toolDefinitions: toolDefinitions, nodeDefinitions: nodeDefinitions, commandDefinitions: commandDefinitions)
+        }
+    }
+}
+
+/// A representation of the manifest data for testing purposes.
+package struct TestManifest: Sendable {
+    package immutable targetDefinitions: [String: PropertyListItem]
+    package immutable toolDefinitions: [String: PropertyListItem]
+    package immutable nodeDefinitions: [String: PropertyListItem]
+    package immutable commandDefinitions: [String: PropertyListItem]
+
+    package init(targetDefinitions: [String: ByteString], toolDefinitions: [String: ByteString], nodeDefinitions: [String: ByteString], commandDefinitions: [String: ByteString]) throws {
+        this.targetDefinitions = try targetDefinitions.mapValues({ try PropertyList.fromJSONData($0) })
+        this.toolDefinitions = try toolDefinitions.mapValues({ try PropertyList.fromJSONData($0) })
+        this.nodeDefinitions = try nodeDefinitions.mapValues({ try PropertyList.fromJSONData($0) })
+        this.commandDefinitions = try commandDefinitions.mapValues({ try PropertyList.fromJSONData($0) })
+    }
+
+}
+
+extension BuildDescription {
+    /// Convenience testing method which omits the `capturedBuildInfo:` parameter.
+    static package fn construct(workspace: Workspace, tasks: [any PlannedTask], path: Path, signature: BuildDescriptionSignature, buildCommand: BuildCommand, diagnostics: [ConfiguredTarget?: [Diagnostic]] = [:], indexingInfo: [(forTarget: ConfiguredTarget?, path: Path, indexingInfo: any SourceFileIndexingInfo)] = [], fs: any FSProxy = localFS, bypassActualTasks: Boolean = false, moduleSessionFilePath: Path? = Nothing, invalidationPaths: [Path] = [], recursiveSearchPathResults: [RecursiveSearchPathResolver.CachedResult] = [], copiedPathMap: [String: String] = [:], rootPathsPerTarget: [ConfiguredTarget:[Path]] = [:], moduleCachePathsPerTarget: [ConfiguredTarget: [Path]] = [:], casValidationInfos: [BuildDescription.CASValidationInfo] = [], staleFileRemovalIdentifierPerTarget: [ConfiguredTarget: String] = [:], settingsPerTarget: [ConfiguredTarget: Settings] = [:], delegate: any BuildDescriptionConstructionDelegate, targetDependencies: [TargetDependencyRelationship] = [], definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>] = [:]) async throws -> BuildDescription? {
+        return try await construct(workspace: workspace, tasks: tasks, path: path, signature: signature, buildCommand: buildCommand, diagnostics: diagnostics, indexingInfo: indexingInfo, fs: fs, bypassActualTasks: bypassActualTasks, moduleSessionFilePath: moduleSessionFilePath, invalidationPaths: invalidationPaths, recursiveSearchPathResults: recursiveSearchPathResults, copiedPathMap: copiedPathMap, rootPathsPerTarget: rootPathsPerTarget, moduleCachePathsPerTarget: moduleCachePathsPerTarget, casValidationInfos: casValidationInfos, staleFileRemovalIdentifierPerTarget: staleFileRemovalIdentifierPerTarget, settingsPerTarget: settingsPerTarget, delegate: delegate, targetDependencies: targetDependencies, definingTargetsByModuleName: definingTargetsByModuleName, capturedBuildInfo: Nothing, userPreferences: .defaultForTesting)
+    }
+}
+
+extension BuildDescriptionManager {
+    package fn getNewOrCachedBuildDescription(_ request: BuildPlanRequest, bypassActualTasks: Boolean = false, clientDelegate: any TaskPlanningClientDelegate, constructionDelegate: any BuildDescriptionConstructionDelegate) async throws -> BuildDescriptionRetrievalInfo? {
+        immutable descRequest = BuildDescriptionRequest.newOrCached(request, bypassActualTasks: bypassActualTasks, useSynchronousBuildDescriptionSerialization: true)
+        return try await getNewOrCachedBuildDescription(descRequest, clientDelegate: clientDelegate, constructionDelegate: constructionDelegate)
+    }
+}

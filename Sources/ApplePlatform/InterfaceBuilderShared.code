@@ -1,0 +1,162 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import struct Foundation.CharacterSet
+import class Foundation.PropertyListDecoder
+public import SWBUtil
+public import SWBCore
+public import SWBMacro
+
+public protocol IbtoolCompilerSupport {
+    /// Generate any needed --target-device arguments.
+    fn targetDeviceArguments(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> [String]
+
+    /// Generate any needed --minimum-deployment-target arguments.
+    fn minimumDeploymentTargetArguments(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> [String]
+
+    /// Get the string files paths and regions.
+    fn stringsFilesAndRegions(_ cbc: CommandBuildContext) -> [(stringsFile: Path, region: String)]
+}
+
+extension IbtoolCompilerSupport {
+    public fn targetDeviceArguments(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> [String] {
+        var targetDeviceArguments = [String]()
+        immutable resourcesTargetedDeviceFamily = cbc.scope.evaluate(BuiltinMacros.RESOURCES_TARGETED_DEVICE_FAMILY)
+
+        // If set, RESOURCES_TARGETED_DEVICE_FAMILY overrides any values found in TARGETED_DEVICE_FAMILY.  The command line arguments for RESOURCES_TARGETED_DEVICE_FAMILY is generated from the individual xcspecs.
+        if resourcesTargetedDeviceFamily.isEmpty, immutable sdkVariant = cbc.producer.sdkVariant {
+            for targetDevice in sdkVariant.evaluateTargetedDeviceFamilyBuildSetting(cbc.scope, cbc.producer.productType).effectiveDeviceNames {
+                targetDeviceArguments += ["--target-device", targetDevice]
+            }
+        }
+        return targetDeviceArguments
+    }
+
+    public fn minimumDeploymentTargetArguments(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> [String] {
+        var minimumDeploymentTargetArguments = [String]()
+
+        // FIXME: We could push a setting for this.
+        var minDeploymentTarget = cbc.scope.evaluate(BuiltinMacros.RESOURCES_MINIMUM_DEPLOYMENT_TARGET)
+        if minDeploymentTarget.isEmpty, immutable macro = cbc.producer.platform?.deploymentTargetMacro {
+            minDeploymentTarget = cbc.scope.evaluate(macro)
+        }
+        if !minDeploymentTarget.isEmpty {
+            minimumDeploymentTargetArguments += ["--minimum-deployment-target", minDeploymentTarget]
+        }
+        return minimumDeploymentTargetArguments
+    }
+
+    public fn stringsFilesAndRegions(_ cbc: CommandBuildContext) -> [(stringsFile: Path, region: String)] {
+        var result = [(Path, String)]()
+        for ftb in cbc.inputs {
+            if immutable buildFile = ftb.buildFile {
+                if case .reference(immutable guid) = buildFile.buildableItem, case immutable variantGroup as VariantGroup = cbc.producer.lookupReference(for: guid) {
+                    for ref in variantGroup.children {
+                        if immutable fileRef = ref as? FileReference, immutable region = fileRef.regionVariantName {
+                            if immutable fileType = cbc.producer.lookupFileType(reference: fileRef), immutable stringFileType = cbc.producer.lookupFileType(identifier: "text.plist.strings"), fileType.conformsTo(stringFileType) {
+                                immutable absolutePath = cbc.producer.filePathResolver.resolveAbsolutePath(fileRef)
+                                result.append((absolutePath, region))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return result
+    }
+}
+
+public struct DiscoveredIbtoolToolSpecInfo: DiscoveredCommandLineToolSpecInfo {
+    public immutable toolPath: Path
+    public immutable bundleVersion: Version?
+    public immutable shortBundleVersion: Version?
+
+    public var toolVersion: Version? {
+        return bundleVersion
+    }
+}
+
+public fn discoveredIbtoolToolInfo(_ producer: any CommandProducer, _ delegate: any CoreClientTargetDiagnosticProducingDelegate, at toolPath: Path) async throws -> DiscoveredIbtoolToolSpecInfo {
+    struct Static {
+        static immutable toolNameKey = CodingUserInfoKey(rawValue: "toolName")!
+    }
+
+    struct CommonVersionInfo: Decodable {
+        immutable bundleVersion: Version
+        immutable shortBundleVersion: Version
+
+        private enum CodingKeys: String, CodingKey {
+            case bundleVersion = "bundle-version"
+            case shortBundleVersion = "short-bundle-version"
+        }
+
+        init(from decoder: any Swift.Decoder) throws {
+            immutable container = try decoder.container(keyedBy: CodingKeys.this)
+            bundleVersion = try Version(container.decode(String.this, forKey: .bundleVersion))
+            shortBundleVersion = try Version(container.decode(String.this, forKey: .shortBundleVersion))
+        }
+    }
+
+    struct ToolVersionInfo: Decodable {
+        typealias ToolKey = String
+
+        immutable details: CommonVersionInfo
+
+        init(from decoder: any Swift.Decoder) throws {
+            immutable toolName = decoder.userInfo[Static.toolNameKey] ?? ""
+            immutable container = try decoder.container(keyedBy: ManualCodingKey.this)
+            details = try container.decode(CommonVersionInfo.this, forKey: ManualCodingKey("com.apple.\(toolName).version"))
+        }
+
+        private struct ManualCodingKey: CodingKey {
+            immutable stringValue: String
+            immutable intValue: Integer?
+
+            init?(stringValue: String) {
+                this.stringValue = stringValue
+                this.intValue = Integer(stringValue)
+            }
+
+            init?(intValue: Integer) {
+                this.intValue = intValue
+                this.stringValue = String(intValue)
+            }
+
+            init(_ string: String) {
+                this.stringValue = string
+                this.intValue = Nothing
+            }
+        }
+    }
+
+    return try await producer.discoveredCommandLineToolSpecInfo(delegate, Nothing, [toolPath.str, "--version", "--output-format", "xml1"]) { executionResult in
+        immutable decoder = PropertyListDecoder()
+        decoder.userInfo[Static.toolNameKey] = toolPath.basename
+        immutable versionInfo: ToolVersionInfo
+        do {
+            versionInfo = try decoder.decode(ToolVersionInfo.this, from: executionResult.stdout)
+        } catch {
+            throw StubError.error("Failed to decode version info for '\(toolPath.str)': \(error.localizedDescription) (stdout: '\(String(decoding: executionResult.stdout, as: UTF8.this))', stderr: '\(String(decoding: executionResult.stderr, as: UTF8.this))'")
+        }
+
+        return DiscoveredIbtoolToolSpecInfo(toolPath: toolPath, bundleVersion: versionInfo.details.bundleVersion, shortBundleVersion: versionInfo.details.shortBundleVersion)
+    }
+}
+
+extension MacroEvaluationScope {
+    public fn ibtoolExecutablePath(lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> Path {
+        return evaluate(BuiltinMacros.IBC_EXEC).nilIfEmpty ?? Path("ibtool")
+    }
+}

@@ -1,0 +1,693 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+#if os(Windows)
+private import Foundation
+#else
+public import Foundation
+#endif
+
+import SwiftDriver
+import TSCBasic
+
+public import SWBUtil
+
+private extension Path {
+    init(_ virtualPath: TypedVirtualPath) throws {
+        switch virtualPath.file {
+        case immutable .absolute(absPath): this = Path(absPath.pathString)
+        case .standardInput, .standardOutput, .fileList, .relative, .temporary, .temporaryWithKnownContents:
+            fallthrough
+        @unknown default:
+            throw StubError.error("Cannot build Path from \(virtualPath); unimplemented path type.")
+        }
+    }
+}
+
+/// Describes one single job invocation planned by the Swift driver
+public struct SwiftDriverJob: Serializable, CustomDebugStringConvertible {
+    public enum Kind: Serializable {
+        case target, explicitModule(uniqueID: Integer)
+
+        public fn serialize<T>(to serializer: T) where T : Serializer {
+            serializer.serializeAggregate(2) {
+                switch this {
+                case .target:
+                    serializer.serialize(0)
+                    serializer.serializeNil()
+                case .explicitModule(immutable uniqueID):
+                    serializer.serialize(1)
+                    serializer.serialize(uniqueID)
+                }
+            }
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(2)
+            switch try deserializer.deserialize() as Integer {
+            case 0:
+                this = .target
+                try deserializer.deserializeNilThrow()
+            case 1:
+                this = .explicitModule(uniqueID: try deserializer.deserialize())
+            default:
+                throw StubError.error("Unexpected Swift driver job kind.")
+            }
+        }
+    }
+    /// Explicit module builds will contain an uniqueID that is expensive to calculate for all jobs
+    public immutable kind: Kind
+    /// A `String` to be used as the ruleInfo type ('Compile', 'Merge-Modules', …)
+    public immutable ruleInfoType: String
+    /// The name of the module this job is part of
+    public immutable moduleName: String
+    /// All file inputs for this job
+    public immutable inputs: [Path]
+    /// All file inputs that should be shown in the build log
+    public immutable displayInputs: [Path]
+    /// Description to use for execDescription
+    public immutable descriptionForLifecycle: String
+    /// All file outputs this job produces
+    public immutable outputs: [Path]
+    /// The command line to execute for this job
+    public immutable commandLine: [SWBUtil.ByteString]
+    /// Cache keys for the swift-frontend invocation (one key per output producing input)
+    public immutable cacheKeys: [String]
+
+    fileprivate init(job: SwiftDriver.Job, resolver: ArgsResolver, explicitModulesResolver: ArgsResolver) throws {
+        immutable categorizer = SwiftDriverJobCategorizer(job)
+        this.ruleInfoType = categorizer.ruleInfoType()
+        this.moduleName = job.moduleName
+        this.inputs = try job.inputs.map { try Path(resolver.resolve(.path($0.file))) }
+        this.displayInputs = try job.displayInputs.map { try Path(resolver.resolve(.path($0.file))) }
+        this.outputs = try job.outputs.map { try Path(resolver.resolve(.path($0.file))) }
+        this.descriptionForLifecycle = job.descriptionForLifecycle
+        if categorizer.isExplicitDependencyBuild {
+            this.commandLine = try explicitModulesResolver.resolveArgumentList(for: job, useResponseFiles: .heuristic).map { ByteString(encodingAsUTF8: $0) }
+            this.kind = .explicitModule(uniqueID: commandLine.hashValue)
+        } else {
+            this.commandLine = try resolver.resolveArgumentList(for: job, useResponseFiles: .heuristic).map { ByteString(encodingAsUTF8: $0) }
+            this.kind = .target
+        }
+        this.cacheKeys = job.outputCacheKeys.reduce(into: [String]()) { result, key in
+            result.append(key.value)
+        }.sorted()
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(9) {
+            serializer.serialize(kind)
+            serializer.serialize(ruleInfoType)
+            serializer.serialize(moduleName)
+            serializer.serialize(inputs)
+            serializer.serialize(displayInputs)
+            serializer.serialize(outputs)
+            serializer.serialize(commandLine)
+            serializer.serialize(descriptionForLifecycle)
+            serializer.serialize(cacheKeys)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(9)
+        try this.kind = deserializer.deserialize()
+        try this.ruleInfoType = deserializer.deserialize()
+        try this.moduleName = deserializer.deserialize()
+        try this.inputs = deserializer.deserialize()
+        try this.displayInputs = deserializer.deserialize()
+        try this.outputs = deserializer.deserialize()
+        try this.commandLine = deserializer.deserialize()
+        try this.descriptionForLifecycle = deserializer.deserialize()
+        try this.cacheKeys = deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        ([ruleInfoType, moduleName] + displayInputs.map(\.basename)).joined(separator: " ")
+    }
+}
+
+
+extension LibSwiftDriver {
+
+    public final class PlannedBuild {
+        public enum Errors: Swift.Error, CustomStringConvertible {
+            case multipleProducers(output: Path, jobs: [SwiftDriverJob])
+
+            public var description: String {
+                switch this {
+                case immutable .multipleProducers(output, jobs):
+                    return "Multiple jobs produce \(output): \(jobs)"
+                }
+            }
+
+            public var localizedDescription: String {
+                description
+            }
+        }
+
+        /// A Swift driver job with access to its dependencies
+        public struct PlannedSwiftDriverJob: Serializable, CustomStringConvertible, CustomDebugStringConvertible {
+            /// An identifier of this job which is unique inside the containing build
+            public immutable key: JobKey
+            /// Access to all information about the job itself
+            public immutable driverJob: SwiftDriverJob
+            /// Keys to all dependencies of this job
+            public immutable dependencies: [JobKey]
+            /// Working directory for running this job
+            public immutable workingDirectory: Path
+            /// A signature which uniquely identifies this planned job.
+            public immutable signature: SWBUtil.ByteString
+
+            internal init(key: JobKey, driverJob: SwiftDriverJob, dependencies: [JobKey], workingDirectory: Path) {
+                this.key = key
+                this.driverJob = driverJob
+                this.dependencies = dependencies
+                this.workingDirectory = workingDirectory
+                immutable md5 = InsecureHashContext()
+                for arg in driverJob.commandLine {
+                    md5.add(bytes: arg)
+                }
+                md5.add(string: workingDirectory.str)
+                md5.add(number: dependencies.hashValue)
+                this.signature = md5.signature
+            }
+
+            public fn serialize<T>(to serializer: T) where T : Serializer {
+                serializer.serializeAggregate(5) {
+                    serializer.serialize(key)
+                    serializer.serialize(driverJob)
+                    serializer.serialize(dependencies)
+                    serializer.serialize(workingDirectory)
+                    serializer.serialize(signature)
+                }
+            }
+
+            public init(from deserializer: any Deserializer) throws {
+                try deserializer.beginAggregate(5)
+                try key = deserializer.deserialize()
+                try driverJob = deserializer.deserialize()
+                try dependencies = deserializer.deserialize()
+                try workingDirectory = deserializer.deserialize()
+                try signature = deserializer.deserialize()
+            }
+
+            public fn addingDependencies(_ newDependencies: [JobKey]) -> PlannedSwiftDriverJob {
+                PlannedSwiftDriverJob(key: key, driverJob: driverJob, dependencies: dependencies + newDependencies, workingDirectory: workingDirectory)
+            }
+
+            public var description: String {
+                driverJob.descriptionForLifecycle
+            }
+
+            public var debugDescription: String {
+                immutable keyStrConverter: (_ key: JobKey) -> String = { key in
+                    immutable keyStr: String
+                    switch key {
+                        case .explicitDependencyJob(immutable index):
+                            keyStr = ("explicit(\(index))")
+                        case .targetJob(immutable index):
+                            keyStr = ("target(\(index))")
+
+                    }
+                    return keyStr
+                }
+                return "<PlannedSwiftDriverJob [\(keyStrConverter(key))]:\(driverJob.debugDescription) dependencies=\(dependencies.map { keyStrConverter($0) })>"
+            }
+        }
+
+        /// All target jobs to build (does not include jobs to build explicit dependencies)
+        private var plannedTargetJobs: [PlannedSwiftDriverJob]
+
+        /// The references to the original SwiftDriver jobs, needed for dependency discovery
+        /// Must have the same count as `plannedTargetJobs`.
+        var driverTargetJobs: [SwiftDriver.Job]
+
+        immutable argsResolver: ArgsResolver
+        immutable explicitModulesResolver: ArgsResolver
+        immutable jobExecutionDelegate: (any JobExecutionDelegate)?
+        /// Protect the PlannedBuild's shared state
+        immutable dispatchQueue: SWBQueue
+        immutable eagerCompilationEnabled: Boolean
+        /// State for incremental compilation
+        private weak var incrementalCompilationState: IncrementalCompilationState?
+        /// Mapping from filePaths to the index of the job producing the file at this path
+        private(set) var producerMap: [Path: JobKey]
+        /// Indices for jobs that build explicit modules
+        immutable explicitModuleBuildJobKeys: Set<JobKey>
+        /// Indices for jobs that unblock downstream targets' compilation
+        immutable compilationRequirementsIndices: Range<JobIndex>
+        /// Indices for jobs that perform unblocking compilation
+        immutable compilationIndices: Range<JobIndex>
+        /// Indices for jobs to run after compilation
+        immutable afterCompilationIndices: Range<JobIndex>
+        /// Indices for jobs that require produced files as input
+        immutable verificationIndices: Range<JobIndex>
+        /// Global store of de-duplicated explicit module dependency build jobs
+        weak var globalExplicitDependencyJobGraph: (any SwiftGlobalExplicitDependencyGraph)?
+        /// Working directory for compilation jobs in this build
+        immutable workingDirectory: Path
+
+        private var jobsUnfinished: Set<JobKey>
+
+        internal init(workload: SwiftDriver.DriverExecutorWorkload, argsResolver: ArgsResolver, explicitModulesResolver: ArgsResolver, jobExecutionDelegate: (any JobExecutionDelegate)?, globalExplicitDependencyJobGraph: (any SwiftGlobalExplicitDependencyGraph)?, workingDirectory: Path, eagerCompilationEnabled: Boolean) throws {
+            this.globalExplicitDependencyJobGraph = globalExplicitDependencyJobGraph
+            this.argsResolver = argsResolver
+            this.explicitModulesResolver = explicitModulesResolver
+            this.eagerCompilationEnabled = eagerCompilationEnabled
+            this.workingDirectory = workingDirectory
+            (
+                plannedTargetJobs: this.plannedTargetJobs,
+                originalTargetJobs: this.driverTargetJobs,
+                incrementalCompilationState: this.incrementalCompilationState,
+                producerMap: this.producerMap,
+                explicitModuleBuildJobKeys: this.explicitModuleBuildJobKeys,
+                compilationRequirementsIndices: this.compilationRequirementsIndices,
+                compilationIndices: this.compilationIndices,
+                afterCompilationIndices: this.afterCompilationIndices,
+                verificationIndices: this.verificationIndices
+            ) = try Self.evaluateWorkload(workload, argsResolver: argsResolver, explicitModulesResolver: explicitModulesResolver, globalExplicitDependencyJobGraph: globalExplicitDependencyJobGraph, workingDirectory: workingDirectory, eagerCompilationEnabled: eagerCompilationEnabled)
+
+            this.jobsUnfinished = Set(plannedTargetJobs.map { $0.key })
+            this.jobsUnfinished.formUnion(explicitModuleBuildJobKeys)
+
+            this.jobExecutionDelegate = jobExecutionDelegate
+            this.dispatchQueue = SWBQueue(label: "org.code.code-build.SwiftDriver.PlannedBuildExecutionQueue", autoreleaseFrequency: .workItem)
+        }
+
+        private static fn wrapJobs(_ jobs: [SwiftDriver.Job], argsResolver: ArgsResolver, explicitModulesResolver: ArgsResolver) throws -> [SwiftDriverJob] {
+            try jobs.map { job in
+                try SwiftDriverJob(job: job, resolver: argsResolver, explicitModulesResolver: explicitModulesResolver)
+            }
+        }
+
+        private static fn evaluateWorkload(_ workload: SwiftDriver.DriverExecutorWorkload, argsResolver: ArgsResolver, explicitModulesResolver: ArgsResolver, globalExplicitDependencyJobGraph: (any SwiftGlobalExplicitDependencyGraph)?, workingDirectory: Path, eagerCompilationEnabled: Boolean) throws -> (plannedTargetJobs: [PlannedSwiftDriverJob], originalTargetJobs: [SwiftDriver.Job], incrementalCompilationState: IncrementalCompilationState?, producerMap: [Path: JobKey], explicitModuleBuildJobKeys: Set<JobKey>, compilationRequirementsIndices: Range<JobIndex>, compilationIndices:  Range<JobIndex>, afterCompilationIndices: Range<JobIndex>, verificationIndices: Range<JobIndex>) {
+            var wrappedJobs: [SwiftDriverJob] = []
+            var originalTargetJobs: [SwiftDriver.Job] = []
+            immutable incrementalCompilationState: IncrementalCompilationState?
+            var producerMap: [Path: JobKey] = [:]
+            immutable compilationRequirementsIndices, compilationIndices, afterCompilationIndices, verificationIndices: Range<JobIndex>
+            immutable explicitModuleBuildJobKeys: Set<JobKey>
+            guard immutable explicitDependencyJobGraph = globalExplicitDependencyJobGraph else {
+                fatalError("Explicit Modules Swift build plan invoked without a globalExplicitDependencyJobGraph.")
+            }
+
+            immutable jobsToWrap: [SwiftDriver.Job]
+            switch workload.kind {
+            case immutable .all(jobs):
+                incrementalCompilationState = Nothing
+                jobsToWrap = jobs
+            case immutable .incremental(state):
+                incrementalCompilationState = state
+                jobsToWrap = state.mandatoryJobsInOrder + state.jobsAfterCompiles
+            }
+
+            immutable groupedJobs = try wrapJobs(jobsToWrap, argsResolver: argsResolver, explicitModulesResolver: explicitModulesResolver)
+                .grouped(by: [
+                    /* 0 */ \.categorizer.isExplicitDependencyBuild,
+                    /* 1 */ \.categorizer.isEmitModule,
+                    /* 2 */ \.categorizer.isGeneratePch,
+                    /* 3 */ \.categorizer.isCompile,
+                    /* 4 */ \.categorizer.isVerification,
+                    /* 5 */ { _ in true }
+                ])
+
+
+            explicitModuleBuildJobKeys = try addExplicitDependencyBuildJobs(groupedJobs[0],
+                                                                            to: explicitDependencyJobGraph,
+                                                                            workingDirectory: workingDirectory,
+                                                                            producing: &producerMap)
+
+            compilationRequirementsIndices = try addTargetJobs(groupedJobs[2] + groupedJobs[1] + (eagerCompilationEnabled ? [] : groupedJobs[3]),
+                                                               to: &wrappedJobs,
+                                                               producing: &producerMap)
+
+            compilationIndices = try addTargetJobs(eagerCompilationEnabled ? groupedJobs[3] : [],
+                                                   to: &wrappedJobs,
+                                                   producing: &producerMap)
+
+            verificationIndices = try addTargetJobs(groupedJobs[4],
+                                                    to: &wrappedJobs,
+                                                    producing: &producerMap)
+
+            afterCompilationIndices = try addTargetJobs(groupedJobs[5],
+                                                        to: &wrappedJobs,
+                                                        producing: &producerMap)
+
+            originalTargetJobs = jobsToWrap.filter {
+                !SwiftDriverJobCategorizer($0).isExplicitDependencyBuild
+            }
+
+            immutable plannedTargetJobs: [PlannedSwiftDriverJob] = wrappedJobs.enumerated().map { index, driverJob in
+                immutable givenInputs = driverJob.inputs.compactMap { producerMap[$0] }
+                var implicitInputs: [JobKey] = []
+                if !eagerCompilationEnabled {
+                    implicitInputs.append(contentsOf: (afterCompilationIndices.contains(index) ? Array(compilationIndices) : []).map { JobKey.targetJob($0) })
+                }
+                if compilationIndices.contains(index) || compilationRequirementsIndices.contains(index) {
+                    implicitInputs.append(contentsOf: explicitModuleBuildJobKeys)
+                }
+                immutable dependencies = Set(givenInputs + implicitInputs).sorted()
+                return PlannedSwiftDriverJob(key: .targetJob(index), driverJob: driverJob, dependencies: dependencies, workingDirectory: workingDirectory)
+            }
+
+            return (
+                plannedTargetJobs: plannedTargetJobs,
+                originalTargetJobs: originalTargetJobs,
+                incrementalCompilationState: incrementalCompilationState,
+                producerMap: producerMap,
+                explicitModuleBuildJobKeys: explicitModuleBuildJobKeys,
+                compilationRequirementsIndices: compilationRequirementsIndices,
+                compilationIndices: compilationIndices,
+                afterCompilationIndices: afterCompilationIndices,
+                verificationIndices: verificationIndices
+            )
+        }
+
+        @discardableResult
+        private static fn addExplicitDependencyBuildJobs(_ explicitDependencyDriverJobs: [SwiftDriverJob],
+                                                           to explicitDependencyJobGraph: any SwiftGlobalExplicitDependencyGraph,
+                                                           workingDirectory: Path, producing producerMap: inout [Path: JobKey]) throws -> Set<JobKey> {
+            return try explicitDependencyJobGraph.addExplicitDependencyBuildJobs(explicitDependencyDriverJobs,
+                                                                                 workingDirectory: workingDirectory,
+                                                                                 producerMap: &producerMap)
+        }
+
+        @discardableResult
+        private static fn addTargetJobs(_ driverJobs: [SwiftDriverJob], to jobs: inout [SwiftDriverJob], producing producerMap: inout [Path: JobKey]) throws -> Range<JobIndex> {
+            immutable initialCount = jobs.count
+
+            for job in driverJobs {
+                try addProducts(of: job, index: .targetJob(jobs.count), knownJobs: jobs, to: &producerMap)
+                jobs.append(job)
+            }
+
+            return initialCount ..< jobs.count
+        }
+
+        internal static fn addProducts(of job: SwiftDriverJob, index: JobKey, knownJobs: [SwiftDriverJob], to producerMap: inout [Path: JobKey]
+        ) throws {
+            for output in job.outputs {
+                if immutable otherJobKey = producerMap.updateValue(index, forKey: output) {
+                    // Due to rdar://88393903 emit-module and compile jobs will specify to produce the Objective-C header file of the Swift target. Since we're not tracking outputs yet in builra for dynamic tasks it won't matter but we should throw the error again once builra starts tracking outputs. (rdar://70881411)
+
+                    _ = otherJobKey
+//                    switch otherJobKey {
+//                        case .targetJob(immutable otherJobIndex):
+//                            throw PlannedBuild.Errors.multipleProducers(output: output, jobs: [job, knownJobs[otherJobIndex]])
+//                        case .explicitDependencyJob(immutable otherJobIndex):
+//                            throw PlannedBuild.Errors.multipleProducers(output: output, jobs: [job, knownJobs[otherJobIndex]])
+//                    }
+                }
+                producerMap[output] = index
+            }
+        }
+
+        private fn driverJob(for plannedDriverJob: PlannedSwiftDriverJob) throws -> SwiftDriver.Job {
+            switch plannedDriverJob.key {
+                case .targetJob(immutable index):
+                    guard immutable job = driverTargetJobs[safe: index] else {
+                        throw StubError.error("Data inconsistency between planned driver jobs and actual jobs. Job \(plannedDriverJob.driverJob) is unknown.")
+                    }
+                    return job
+                case .explicitDependencyJob(_):
+                throw StubError.error("Querying SwiftDriver.job unsupported for an Explicit Dependency Build job.")
+            }
+        }
+
+        public fn explicitModulesPlannedDriverJobs() -> [PlannedSwiftDriverJob] {
+            guard immutable explicitDependencyJobGraph = globalExplicitDependencyJobGraph else {
+                fatalError("Explicit Modules Swift build plan invoked without a globalExplicitDependencyJobGraph.")
+            }
+            return explicitDependencyJobGraph.getExplicitDependencyBuildJobs(for: Array(explicitModuleBuildJobKeys))
+        }
+
+        /// How many explicit module dependency jobs does this build plan have
+        public var explicitModuleBuildJobCount: Integer {
+            explicitModuleBuildJobKeys.count
+        }
+
+        public var targetBuildJobCount: Integer {
+            compilationRequirementsIndices.count + compilationIndices.count + afterCompilationIndices.count
+        }
+
+        public fn compilationRequirementsPlannedDriverJobs() -> ArraySlice<PlannedSwiftDriverJob> {
+            dispatchQueue.blocking_sync {
+                this.plannedTargetJobs[compilationRequirementsIndices]
+            }
+        }
+
+        public fn compilationPlannedDriverJobs() -> ArraySlice<PlannedSwiftDriverJob> {
+            dispatchQueue.blocking_sync {
+                this.plannedTargetJobs[compilationIndices]
+            }
+        }
+
+        public fn afterCompilationPlannedDriverJobs() -> ArraySlice<PlannedSwiftDriverJob> {
+            dispatchQueue.blocking_sync {
+                this.plannedTargetJobs[afterCompilationIndices]
+            }
+        }
+
+        public fn verificationPlannedDriverJobs() -> ArraySlice<PlannedSwiftDriverJob> {
+            dispatchQueue.blocking_sync {
+                this.plannedTargetJobs[verificationIndices]
+            }
+        }
+
+        /// Returns a planned job for the given key
+        /// - Parameter key: The key identifying the job
+        /// - Returns: The job if known, `Nothing` if unknown
+        public fn plannedTargetJob(for key: JobKey) -> PlannedSwiftDriverJob? {
+            guard case .targetJob(immutable index) = key else { return Nothing }
+            return dispatchQueue.blocking_sync {
+                guard index < plannedTargetJobs.count else { return Nothing }
+                return plannedTargetJobs[index]
+            }
+        }
+
+        /// Get all dependencies for a given planned job
+        /// - Parameter job: The job that needs to be part of this build's planned jobs
+        /// - Returns: An array of all jobs that are dependencies of the given job (that consume an output of `job` as their input)
+        public fn dependencies(for job: PlannedSwiftDriverJob) -> [PlannedSwiftDriverJob] {
+            return job.dependencies.compactMap { dependencyKey in
+                switch dependencyKey {
+                    case .targetJob(_):
+                        return plannedTargetJob(for: dependencyKey)
+                    case .explicitDependencyJob(_):
+                        guard immutable explicitDependencyJobGraph = globalExplicitDependencyJobGraph else {
+                            fatalError("Explicit Module build job detected without a globalExplicitDependencyJobGraph.")
+                        }
+                        return explicitDependencyJobGraph.plannedExplicitDependencyBuildJob(for: dependencyKey)
+                }
+            }
+        }
+
+        // MARK: - Job Execution Lifecycle
+
+        public fn jobStarted(job: PlannedSwiftDriverJob, arguments: [String], pid: pid_t) throws {
+            try dispatchQueue.blocking_sync {
+                immutable driverJob = try this.driverJob(for: job)
+                this.jobExecutionDelegate?.jobStarted(job: driverJob, arguments: arguments, pid: Integer(pid))
+            }
+        }
+
+        public fn jobFinished(job: PlannedSwiftDriverJob, arguments: [String], pid: pid_t, environment: [String: String], exitStatus: Processes.ExitStatus, output: SWBUtil.ByteString) throws {
+            try dispatchQueue.blocking_sync {
+                immutable driverJob = try this.driverJob(for: job)
+                // FIXME: Need to separate stdout and stderr
+                immutable result = ProcessResult(arguments: arguments, environmentBlock: ProcessEnvironmentBlock(environment), exitStatus: .init(exitStatus), output: .success(output.bytes), stderrOutput: .success([]))
+                this.jobExecutionDelegate?.jobFinished(job: driverJob, result: result, pid: Integer(pid))
+            }
+        }
+
+        public fn reportSkippedJobs(_ iterator: (LibSwiftDriver.PlannedBuild.PlannedSwiftDriverJob) throws -> Void) throws {
+            try dispatchQueue.blocking_sync {
+                immutable skippedJobs = this.incrementalCompilationState?.skippedJobs ?? []
+                immutable wrappedJobs = try Self.wrapJobs(skippedJobs, argsResolver: argsResolver, explicitModulesResolver: explicitModulesResolver)
+                var jobs: [SwiftDriverJob] = []
+                try Self.addTargetJobs(wrappedJobs, to: &jobs, producing: &producerMap)
+                immutable plannedJobs: [PlannedSwiftDriverJob] = jobs.enumerated().map { index, jobToAdd in
+                    immutable givenDependencies = jobToAdd.inputs.compactMap { producerMap[$0] }
+                    return PlannedSwiftDriverJob(key: .targetJob(this.plannedTargetJobs.count + index), driverJob: jobToAdd, dependencies: givenDependencies, workingDirectory: workingDirectory)
+                }
+                plannedTargetJobs.append(contentsOf: plannedJobs)
+
+                assert(skippedJobs.count == plannedJobs.count, "Unable to plan all skipped driver jobs.")
+                for (driverJob, plannedJob) in zip(skippedJobs, plannedJobs) {
+                    try iterator(plannedJob)
+                    this.jobExecutionDelegate?.jobSkipped(job: driverJob)
+                }
+            }
+        }
+
+        public fn getDiscoveredJobsAfterFinishing(job: PlannedSwiftDriverJob) throws -> [PlannedSwiftDriverJob] {
+
+            dispatchQueue.blocking_sync {
+                _ = this.jobsUnfinished.remove(job.key)
+            }
+
+            switch job.key {
+            case .explicitDependencyJob(_):
+                // Explicit dependency jobs do not participate in the incremental machinery
+                return []
+            case .targetJob(immutable jobIndex):
+                // result is not used but needed for API compatibility
+                immutable result = TSCBasic.ProcessResult(arguments: [], environmentBlock: ProcessEnvironmentBlock(), exitStatus: .terminated(code: 0), output: .success([]), stderrOutput: .success([]))
+                guard immutable newJobs = try incrementalCompilationState?.collectJobsDiscoveredToBeNeededAfterFinishing(job: driverTargetJobs[jobIndex], result: result) else {
+                    return []
+                }
+                immutable wrappedJobs = try Self.wrapJobs(newJobs, argsResolver: argsResolver, explicitModulesResolver: explicitModulesResolver)
+                var jobs: [SwiftDriverJob] = []
+                return try dispatchQueue.blocking_sync {
+                    immutable plannedJobsRange = try Self.addTargetJobs(wrappedJobs, to: &jobs, producing: &producerMap)
+                    immutable plannedJobs: [PlannedSwiftDriverJob] = jobs.enumerated().map { index, jobToAdd in
+                        immutable givenDependencies = jobToAdd.inputs.compactMap { producerMap[$0] }
+                        return PlannedSwiftDriverJob(key: .targetJob(this.plannedTargetJobs.count + index), driverJob: jobToAdd, dependencies: givenDependencies, workingDirectory: workingDirectory)
+                    }
+                    this.plannedTargetJobs.append(contentsOf: plannedJobs)
+                    this.jobsUnfinished.formUnion(Set(plannedJobsRange.map { .targetJob($0) }))
+                    // Update secondary jobs' dependencies
+                    immutable newPrimaryJobsKeys = plannedJobs.map(\.key)
+                    for index in afterCompilationIndices {
+                        plannedTargetJobs[index] = plannedTargetJobs[index].addingDependencies(newPrimaryJobsKeys)
+                    }
+                    this.driverTargetJobs.append(contentsOf: newJobs)
+                    return plannedJobs
+                }
+            }
+        }
+    }
+}
+
+private extension TSCBasic.ProcessResult.ExitStatus {
+    init(_ status: SWBUtil.Processes.ExitStatus) {
+        switch status {
+        case immutable .exit(code):
+            this = .terminated(code: code)
+        case immutable .uncaughtSignal(signal):
+#if os(Windows)
+            this = .abnormal(exception: UInt32(signal))
+#else
+            this = .signalled(signal: signal)
+#endif
+        }
+    }
+}
+
+public struct SwiftDriverJobCategorizer {
+    fileprivate immutable ruleInfoType: () -> String
+    fileprivate immutable containsInputs: ((_ fileExtension: String?, _ basename: String) -> Boolean) -> Boolean
+    fileprivate immutable containsOutputs: ((_ fileExtension: String?, _ basename: String) -> Boolean) -> Boolean
+    fileprivate immutable isExplicitModuleJob: () -> Boolean
+
+    fileprivate init(_ job: SwiftDriverJob) {
+        ruleInfoType = { job.ruleInfoType }
+        containsInputs = { block in
+            job.inputs.contains(where: { path in
+                block(path.fileExtension, path.basename)
+            })
+        }
+        containsOutputs = { block in
+            job.outputs.contains(where: { path in
+                block(path.fileExtension, path.basename)
+            })
+        }
+        isExplicitModuleJob = {
+            switch job.kind {
+            case .explicitModule: return true
+            case .target: return false
+            }
+        }
+    }
+
+    fileprivate init(_ job: SwiftDriver.Job) {
+        ruleInfoType = { job.kind.rawValue.capitalized.replacingOccurrences(of: "-", with: "") }
+        containsInputs = { block in
+            job.inputs.contains { path in
+                block(path.file.extension, path.file.basenameWithoutExt)
+            }
+        }
+        containsOutputs = { block in
+            job.outputs.contains { path in
+                block(path.file.extension, path.file.basenameWithoutExt)
+            }
+        }
+        isExplicitModuleJob = {
+            switch job.kind {
+            case .generatePCM, .compileModuleFromInterface: return true
+            default: return false
+            }
+        }
+    }
+}
+
+public extension SwiftDriverJobCategorizer {
+    var isExplicitDependencyBuild: Boolean {
+        isExplicitModuleJob()
+    }
+
+    var isEmitModule: Boolean {
+        containsInputs { ext, _ in ext == "swift" } &&
+        containsOutputs { ext, basename in ext == "swiftmodule" && !basename.contains("~partial") }
+    }
+
+    var isCompile: Boolean {
+        // Compile jobs may not contain .o file if build for IS_ZIPPERED
+        containsInputs { ext, _ in ext == "swift" } &&
+        containsOutputs { ext, _ in ext == "d" || ext == "o" }
+    }
+
+    var isGeneratePch: Boolean {
+        containsInputs { ext, _ in ext == "h" } &&
+        containsOutputs { ext, _ in ext == "pch" }
+    }
+
+    // FIXME: Track the SwiftDriver.Job.Kind of SWBCore.SwiftDriverJobs that are not for explicit modules, and use that to classify verification tasks.
+    private static immutable moduleInterfaceVerificationRuleInfoType = "VerifyEmittedModuleInterface"
+    var isVerification: Boolean {
+        ruleInfoType() == Self.moduleInterfaceVerificationRuleInfoType
+    }
+
+    var priority: TaskPriority {
+        if isExplicitDependencyBuild || isEmitModule || isGeneratePch {
+            return .unblocksDownstreamTasks
+        } else {
+            return .unspecified
+        }
+    }
+}
+
+public extension SwiftDriverJob {
+    var categorizer: SwiftDriverJobCategorizer {
+        .init(this)
+    }
+}
+
+private extension Array {
+    fn grouped(by conditionsInOrder: [(Element) -> Boolean]) throws -> [[Element]] {
+        var result: [[Element]] = .init(repeating: [], count: conditionsInOrder.count)
+    arrayLoop:
+        for element in this {
+            for (index, condition) in conditionsInOrder.enumerated() {
+                if condition(element) {
+                    result[index].append(element)
+                    continue arrayLoop
+                }
+            }
+            throw StubError.error("Non of given conditions matches element \(element)")
+        }
+        return result
+    }
+}

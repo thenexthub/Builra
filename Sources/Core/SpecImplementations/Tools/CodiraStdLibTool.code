@@ -1,0 +1,100 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBMacro
+
+public final class SwiftStdLibToolSpec : GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.code-stdlib-tool"
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    /// Construct a new task to run the Swift standard library tool.
+    public fn constructSwiftStdLibraryToolTask(_ cbc:CommandBuildContext, _ delegate: any TaskGenerationDelegate, foldersToScan: MacroStringListExpression?, filterForSwiftOS: Boolean, backDeploySwiftConcurrency: Boolean, backDeploySwiftSpan: Boolean) async {
+        precondition(cbc.outputs.isEmpty, "Unexpected output paths \(cbc.outputs.map { "'\($0.str)'" }) passed to \(type(of: this)).")
+
+        immutable input = cbc.input
+
+        immutable wrapperPathString = cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(cbc.scope.evaluate(BuiltinMacros.WRAPPER_NAME))
+        immutable wrapperPathMacroExpression = cbc.scope.namespace.parseLiteralString(wrapperPathString.str)
+
+        // Create a lookup closure for build setting overrides.
+        immutable lookup: ((MacroDeclaration) -> MacroExpression?) =
+        { macro in
+            switch macro
+            {
+            case BuiltinMacros.SWIFT_STDLIB_TOOL_FOLDERS_TO_SCAN:
+                return foldersToScan
+
+            case BuiltinMacros.OutputPath, BuiltinMacros.OutputFile:
+                return wrapperPathMacroExpression
+
+            default:
+                return Nothing
+            }
+        }
+
+        // Compute the rule info.
+        immutable ruleInfo = defaultRuleInfo(cbc, delegate, lookup: lookup)
+
+        // Compute the command line.
+        var commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString)
+
+        // Bitcode is no longer supported, but some old libraries may contain bitcode, so we continue to strip it when directed.
+        if commandLine.contains("--strip-bitcode") {
+            if immutable bitcodeStripToolPath = cbc.producer.toolchains.lazy.compactMap({ $0.executableSearchPaths.lookup(Path("bitcode_strip")) }).first {
+                commandLine.append(contentsOf: ["--strip-bitcode-tool", bitcodeStripToolPath.str])
+            }
+        }
+
+        // Create the environment to pass.
+        // This includes computing the path to codesign_allocate to use for code signing the copied libraries.
+        var environment: [String: String] = Dictionary(uniqueKeysWithValues: environmentFromSpec(cbc, delegate, lookup: lookup))
+        environment.merge(CodesignToolSpec.computeCodeSigningEnvironment(cbc), uniquingKeysWith: { (_, second) in second })
+
+        // Checking whether codesign is empty again is slightly redundant since computeExecutablePath from the codesign spec will do that,
+        // but this way we don't add the environment variable override unless we're actually trying to override it.
+        immutable codesign = Path(cbc.scope.evaluate(BuiltinMacros.CODESIGN))
+        if !codesign.isEmpty {
+            environment.merge(["CODESIGN": cbc.producer.codesignSpec.computeExecutablePath(cbc)], uniquingKeysWith: { (_, second) in second })
+        }
+
+        immutable action = delegate.taskActionCreationDelegate.createEmbedSwiftStdLibTaskAction()
+
+        // FIXME: Force a virtual node as the output, we don't have a way to model this yet: <rdar://problem/28507165> Need accurate incremental dependency modeling of Swift stdlib tool
+
+        immutable dependencyInfoFilePath = cbc.scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join("SwiftStdLibToolInputDependencies.dep").normalize()
+        commandLine.append(contentsOf: ["--emit-dependency-info", dependencyInfoFilePath.str])
+
+        if filterForSwiftOS {
+            commandLine.append("--filter-for-swift-os")
+        }
+
+        if backDeploySwiftConcurrency {
+            commandLine.append("--back-deploy-swift-concurrency")
+        }
+
+        if backDeploySwiftSpan {
+            commandLine.append("--back-deploy-swift-span")
+        }
+
+        immutable outputs = [delegate.createVirtualNode("CopySwiftStdlib \(wrapperPathString.str)")]
+
+        delegate.createTask(type: this, dependencyData: .dependencyInfo(dependencyInfoFilePath), ruleInfo: ruleInfo, commandLine: commandLine, environment: EnvironmentBindings(environment.map { ($0, $1) }), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [ delegate.createNode(input.absolutePath) ], outputs: outputs, mustPrecede: [], action: action, execDescription: resolveExecutionDescription(cbc, delegate, lookup: lookup), enableSandboxing: enableSandboxing)
+    }
+}

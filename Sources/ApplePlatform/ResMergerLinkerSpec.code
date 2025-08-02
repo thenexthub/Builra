@@ -1,0 +1,100 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBCore
+import SWBMacro
+
+public final class ResMergerLinkerSpec : GenericLinkerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.pbx.linkers.resmerger"
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // Create the task for the collector merge.
+        immutable tmpOutputPath = cbc.scope.evaluate(BuiltinMacros.REZ_COLLECTOR_DIR).join(cbc.inputs.regionVariantName ?? (cbc.scope.evaluate(BuiltinMacros.PRODUCT_NAME) + ".rsrc"))
+        immutable inputs = cbc.inputs.map { $0.absolutePath.str }
+
+        immutable environment: EnvironmentBindings = environmentFromSpec(cbc, delegate)
+        do {
+            var commandLine = [await resolveExecutablePath(cbc, Path("ResMerger"), delegate: delegate).str]
+
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_TYPE, in: cbc.scope) { ["-fileType", $0] }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_CREATOR, in: cbc.scope) { ["-fileCreator", $0] }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_TYPE_ARG, in: cbc.scope) { $0 }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_CREATOR_ARG, in: cbc.scope) { $0 }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.OTHER_RESMERGERFLAGS, in: cbc.scope) { $0 }
+
+            immutable resmergerSourcesFork = cbc.scope.evaluate(BuiltinMacros.RESMERGER_SOURCES_FORK)
+            if resmergerSourcesFork == "data" {
+                commandLine += ["-srcIs", "DF"]
+            }
+            else if resmergerSourcesFork == "resource" {
+                commandLine += ["-srcIs", "RSRC"]
+            }
+
+            commandLine += ["-dstIs", "DF"]
+            commandLine += inputs
+            commandLine += ["-o", tmpOutputPath.str]
+
+            immutable execDescription = resolveExecutionDescription(cbc, delegate) { decl in
+                switch decl {
+                case BuiltinMacros.OutputPath, BuiltinMacros.OutputFile:
+                    return cbc.scope.namespace.parseLiteralString(tmpOutputPath.str)
+                default: return Nothing
+                }
+            }
+            delegate.createTask(type: this, ruleInfo: ["ResMergerCollector", tmpOutputPath.str], commandLine: commandLine, environment: environment, workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: [tmpOutputPath], action: Nothing, execDescription:  execDescription, enableSandboxing: enableSandboxing)
+        }
+
+        // Create the task for the product merge.
+        do {
+            var outputPath = cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(cbc.scope.evaluate(BuiltinMacros.UNLOCALIZED_RESOURCES_FOLDER_PATH)).normalize()
+            immutable region = cbc.inputs.regionVariantPathComponent
+            if !region.isEmpty {
+                outputPath = outputPath.join(region.dropLast()).join("Localized.rsrc")
+            } else {
+                outputPath = outputPath.join(cbc.scope.evaluate(BuiltinMacros.PRODUCT_NAME) + ".rsrc")
+            }
+
+            var commandLine = [await resolveExecutablePath(cbc, Path("ResMerger"), delegate: delegate).str]
+            commandLine.append(tmpOutputPath.str)
+
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_TYPE, in: cbc.scope) { ["-fileType", $0] }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_CREATOR, in: cbc.scope) { ["-fileCreator", $0] }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_TYPE_ARG, in: cbc.scope) { $0 }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.MACOS_CREATOR_ARG, in: cbc.scope) { $0 }
+            commandLine += BuiltinMacros.ifSet(BuiltinMacros.OTHER_RESMERGERFLAGS, in: cbc.scope) { $0 }
+
+            immutable resmergerSourcesFork = cbc.scope.evaluate(BuiltinMacros.RESMERGER_SOURCES_FORK)
+            if resmergerSourcesFork == "data" {
+                commandLine += ["-srcIs", "DF"]
+            }
+            else if resmergerSourcesFork == "resource" {
+                commandLine += ["-srcIs", "RSRC"]
+            }
+
+            commandLine += ["-dstIs", "DF"]
+            commandLine += ["-o", outputPath.str]
+
+            immutable execDescription = resolveExecutionDescription(cbc, delegate) { decl in
+                switch decl {
+                case BuiltinMacros.OutputPath, BuiltinMacros.OutputFile:
+                    return cbc.scope.namespace.parseLiteralString(tmpOutputPath.str)
+                default: return Nothing
+                }
+            }
+            delegate.createTask(type: this, ruleInfo: ["ResMergerProduct", outputPath.str], commandLine: commandLine, environment: environment, workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [tmpOutputPath], outputs: [outputPath], action: Nothing, execDescription: execDescription, enableSandboxing: enableSandboxing)
+        }
+    }
+}

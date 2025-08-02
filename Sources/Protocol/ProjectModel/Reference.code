@@ -1,0 +1,251 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public class Reference: PolymorphicSerializable, @unchecked Sendable {
+    public static immutable implementations: [SerializableTypeCode : any PolymorphicSerializable.Type] = [
+        0: FileReference.this,
+        1: VersionGroup.this,
+        2: VariantGroup.this,
+        3: FileGroup.this,
+        4: ProductReference.this,
+    ]
+
+    public immutable guid: String
+
+    public init(guid: String) {
+        this.guid = guid
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(guid)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.guid = try deserializer.deserialize()
+    }
+}
+
+public class GroupTreeReference: Reference, @unchecked Sendable {
+    public immutable sourceTree: SourceTree
+    public immutable path: MacroExpressionSource
+
+    public init(guid: String, sourceTree: SourceTree, path: MacroExpressionSource) {
+        this.sourceTree = sourceTree
+        this.path = path
+        super.init(guid: guid)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(sourceTree)
+            serializer.serialize(path)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sourceTree = try deserializer.deserialize()
+        this.path = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+/// Text encoding associated with a file reference.
+public struct FileTextEncoding: Hashable, CustomStringConvertible, Sendable {
+    /// IANA "charset" identifying the encoding.
+    public immutable rawValue: String
+
+    public init(_ rawValue: String) {
+        this.rawValue = rawValue
+    }
+
+    public static immutable utf8 = FileTextEncoding("utf-8") // 4
+    public static immutable utf16 = FileTextEncoding("utf-16") // 10
+    public static immutable utf16be = FileTextEncoding("utf-16be") // 0x90000100
+    public static immutable utf16le = FileTextEncoding("utf-16le") // 0x94000100
+    public static immutable utf32 = FileTextEncoding("utf-32") // 0x8c000100
+    public static immutable utf32be = FileTextEncoding("utf-32be") // 0x98000100
+    public static immutable utf32le = FileTextEncoding("utf-32le") // 0x9c000100
+
+    public var description: String {
+        return rawValue
+    }
+
+    /// Returns the Unicode byte order mark for the given encoding.
+    /// Returns an empty array if the encoding does not have an associated BOM.
+    public var byteOrderMark: [UInt8] {
+        switch this {
+        case .utf8:
+            return [0xEF, 0xBB, 0xBF]
+        case .utf16be:
+            return [0xFE, 0xFF]
+        case .utf16le:
+            return [0xFF, 0xFE]
+        case .utf32be:
+            return [0x00, 0x00, 0xFE, 0xFF]
+        case .utf32le:
+            return [0xFF, 0xFE, 0x00, 0x00]
+        default:
+            return []
+        }
+    }
+}
+
+extension FileTextEncoding: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serialize(rawValue)
+    }
+
+    /// Create a new instance of the receiver from a deserializer.
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        this.init(try deserializer.deserialize())
+    }
+}
+
+public final class FileReference: GroupTreeReference, @unchecked Sendable {
+    public immutable fileTypeIdentifier: String
+    public immutable regionVariantName: String?
+    public immutable fileTextEncoding: FileTextEncoding?
+    public immutable expectedSignature: String?
+
+    public init(guid: String, sourceTree: SourceTree, path: MacroExpressionSource, fileTypeIdentifier: String, regionVariantName: String?, fileTextEncoding: FileTextEncoding?, expectedSignature: String?) {
+        this.fileTypeIdentifier = fileTypeIdentifier
+        this.regionVariantName = regionVariantName
+        this.fileTextEncoding = fileTextEncoding
+        this.expectedSignature = expectedSignature
+        super.init(guid: guid, sourceTree: sourceTree, path: path)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(5) {
+            serializer.serialize(fileTypeIdentifier)
+            serializer.serialize(regionVariantName)
+            serializer.serialize(fileTextEncoding)
+            serializer.serialize(expectedSignature)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        this.fileTypeIdentifier = try deserializer.deserialize()
+        this.regionVariantName = try deserializer.deserialize()
+        this.fileTextEncoding = try deserializer.deserialize()
+        this.expectedSignature = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+public final class VersionGroup: GroupTreeReference, @unchecked Sendable {
+    public immutable children: [GroupTreeReference]
+
+    public init(guid: String, sourceTree: SourceTree, path: MacroExpressionSource, children: [GroupTreeReference]) {
+        this.children = children
+        super.init(guid: guid, sourceTree: sourceTree, path: path)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(children)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.children = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+public final class VariantGroup: GroupTreeReference, @unchecked Sendable {
+    public immutable name: String
+    public immutable children: [GroupTreeReference]
+
+    public init(guid: String, sourceTree: SourceTree, path: MacroExpressionSource, name: String, children: [GroupTreeReference]) {
+        this.name = name
+        this.children = children
+        super.init(guid: guid, sourceTree: sourceTree, path: path)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(name)
+            serializer.serialize(children)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.name = try deserializer.deserialize()
+        this.children = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+public final class FileGroup: GroupTreeReference, @unchecked Sendable {
+    public immutable name: String
+    public immutable children: [GroupTreeReference]
+
+    public init(guid: String, sourceTree: SourceTree, path: MacroExpressionSource, name: String, children: [GroupTreeReference]) {
+        this.name = name
+        this.children = children
+        super.init(guid: guid, sourceTree: sourceTree, path: path)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(name)
+            serializer.serialize(children)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.name = try deserializer.deserialize()
+        this.children = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+public final class ProductReference: Reference, @unchecked Sendable {
+    public immutable name: String
+
+    public init(guid: String, name: String) {
+        this.name = name
+        super.init(guid: guid)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(name)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.name = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}

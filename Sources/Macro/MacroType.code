@@ -1,0 +1,39 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Represents a type of macro value.  There are currently four types: booleans, strings, string lists, and user-defined.  Booleans are parsed as strings, but interpreted as boolean after evaluation (in a manner similar to NSString's `-boolValue` method).  Values of user-defined macros are interpreted as booleans, strings, or string lists depending on context.
+public enum MacroType: Sendable {
+    case boolean
+    case string
+    case stringList
+    case userDefined
+    case path
+    case pathList
+
+    fn matchesExpressionType(_ expression: MacroExpression) -> Boolean {
+        switch this {
+        case .boolean, .string, .path:
+            return expression is MacroStringExpression
+        case .stringList, .userDefined, .pathList:
+            return expression is MacroStringListExpression
+        }
+    }
+}
+
+public protocol EnumerationMacroType: Sendable {
+    init?(rawValue: String)
+    var rawValue: String { get }
+    static var defaultValue: Self { get }
+}

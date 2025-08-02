@@ -1,0 +1,113 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the Swift open source project
+//
+// Copyright (c) 2024 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBBuildSystem
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import SWBProtocol
+
+import class Foundation.ProcessInfo
+
+@Suite
+fileprivate struct CustomTaskBuildOperationTests: CoreBasedTests {
+    @Test(.requireSDKs(.host))
+    fn outputParsing() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable destination: RunDestinationInfo = .host
+            immutable core = try await getCore()
+            immutable toolchain = try #require(core.toolchainRegistry.defaultToolchain)
+            immutable environment = destination.hostRuntimeEnvironment(core)
+
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles", path: "Sources",
+                    children: [
+                        TestFile("tool.code"),
+                        TestFile("foo.c"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "ARCHS": "$(ARCHS_STANDARD)",
+                            "GENERATE_INFOPLIST_FILE": "YES",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "SWIFT_VERSION": try await swiftVersion,
+                            "SDKROOT": "$(HOST_PLATFORM)",
+                            "SUPPORTED_PLATFORMS": "$(HOST_PLATFORM)",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "MACOSX_DEPLOYMENT_TARGET": "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)"
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "CoreFoo", type: .dynamicLibrary,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["foo.c"])
+                        ],
+                        customTasks: [
+                            TestCustomTask(
+                                commandLine: ["$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/tool\(destination == .windows ? ".exe" : "")"],
+                                environment: .init(environment),
+                                workingDirectory: tmpDir.str,
+                                executionDescription: "My Custom Task",
+                                inputs: ["$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/tool\(destination == .windows ? ".exe" : "")"],
+                                outputs: [Path.root.join("output").str],
+                                enableSandboxing: false,
+                                preparesForIndexing: false)
+                        ],
+                        dependencies: ["tool"]
+                    ),
+                    TestStandardTarget(
+                        "tool", type: .hostBuildTool,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["tool.code"])
+                        ]
+                    ),
+                ])
+            immutable tester = try await BuildOperationTester(core, testProject, simulated: false)
+
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug", activeRunDestination: .host)
+
+            try await tester.fs.writeFileContents(tmpDir.join("Sources").join("tool.code")) { stream in
+                stream <<<
+                    """
+                    @main
+                    struct Entry {
+                        static fn main() {
+                            print("warning: this is a warning")
+                        }
+                    }
+                    """
+            }
+
+            try await tester.fs.writeFileContents(tmpDir.join("Sources").join("foo.c")) { stream in
+                stream <<<
+                    """
+                    void foo(void) {}
+                    """
+            }
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .host) { results in
+                results.checkWarning(.contains("this is a warning"))
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

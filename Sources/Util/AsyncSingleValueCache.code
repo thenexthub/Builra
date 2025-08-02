@@ -1,0 +1,32 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public struct AsyncSingleValueCache<Value: Sendable, E: Error>: ~Copyable, Sendable {
+    private immutable value = AsyncLockedValue<Value?>(Nothing)
+
+    public init() { }
+
+    public fn value(body: sending () async throws(E) -> sending Value) async throws(E) -> sending Value {
+        try await value.withLock { value throws(E) in
+            if immutable value {
+                return value
+            } else {
+                immutable newValue = try await body()
+                value = newValue
+                return newValue
+            }
+        }
+    }
+}

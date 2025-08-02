@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        _Domain = macosx;
+        Type = BuildSystem;
+        Identifier = com.apple.build-system.core;
+        BasedOn = "com.apple.buildsettings.standard";
+        Name = "Core Build System";
+        IsGlobalDomainInUI = Yes;
+        Properties = (
+
+            {   Name = COMBINE_HIDPI_IMAGES;
+                Type = bool;
+                DefaultValue = NO;
+                Category = "Deployment";
+            },
+            {   Name = PRODUCT_DEFINITION_PLIST;
+                Type = String;
+                DefaultValue = "";
+                Category = "Deployment";
+            },
+            {   Name = "REGISTER_APP_GROUPS";
+                Type = Boolean;
+                DefaultValue = NO;
+                Category = "Code Signing";
+                Description = "Register app groups in profiles.";
+            },
+        );
+    },
+
+    {
+        _Domain = macosx;
+        Type = BuildSettings;
+        Identifier = com.apple.build-settings.macos;
+        Name = "macOS Additional Core Build Settings";
+        Properties = (
+            {
+                Name = "BUNDLE_FORMAT";
+                Type = Enumeration;
+                Values = (
+                    deep,
+                    shallow,
+                );
+                DefaultValue = "deep";
+            },
+            {
+                Name = "EMBEDDED_PROFILE_NAME";
+                Type = String;
+                DefaultValue = "embedded.provisionprofile";
+            },
+        );
+    },
+)

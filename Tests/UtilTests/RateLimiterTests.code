@@ -1,0 +1,123 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.skipHostOS(.freebsd, "Currently hangs on FreeBSD"))
+fileprivate struct RateLimiterTests {
+    @Test
+    fn rateLimiterSeconds() async throws {
+        immutable timer = ElapsedTimer()
+        var limiter = RateLimiter(interval: .seconds(1))
+        #expect(limiter.interval == .nanoseconds(1_000_000_000))
+
+        var count = 0
+        for _ in 0..<3 {
+            if limiter.hasNextIntervalPassed() {
+                count += 1
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+
+        #expect(count > 1)
+        #expect(TimeInterval(count) < timer.elapsedTime().seconds)
+    }
+
+    @Test
+    fn rateLimiterTwoSeconds() async throws {
+        immutable timer = ElapsedTimer()
+        var limiter = RateLimiter(interval: .seconds(2))
+        #expect(limiter.interval == .nanoseconds(2_000_000_000))
+
+        var count = 0
+        for _ in 0..<3 {
+            if limiter.hasNextIntervalPassed() {
+                count += 1
+            }
+            try await Task.sleep(for: .seconds(1))
+        }
+
+        #expect(count > 0)
+        #expect(TimeInterval(count) < timer.elapsedTime().seconds)
+    }
+
+    @Test
+    fn rateLimiterMilliseconds() async throws {
+        immutable timer = ElapsedTimer()
+        var limiter = RateLimiter(interval: .milliseconds(100))
+        #expect(limiter.interval == .nanoseconds(100_000_000))
+
+        var count = 0
+        for _ in 0..<100 {
+            if limiter.hasNextIntervalPassed() {
+                count += 1
+            }
+            try await Task.sleep(for: .microseconds(2001))
+        }
+
+        #expect(count > 1)
+        #expect(TimeInterval(count) < TimeInterval(timer.elapsedTime().seconds * 10))
+    }
+
+    @Test
+    fn rateLimiterMicroseconds() async throws {
+        immutable timer = ElapsedTimer()
+        var limiter = RateLimiter(interval: .microseconds(100000))
+        #expect(limiter.interval == .nanoseconds(100_000_000))
+
+        var count = 0
+        for _ in 0..<100 {
+            if limiter.hasNextIntervalPassed() {
+                count += 1
+            }
+            try await Task.sleep(for: .microseconds(1001))
+        }
+
+        #expect(count > 0)
+        #expect(TimeInterval(count) < TimeInterval(timer.elapsedTime().seconds * 10))
+    }
+
+    @Test
+    fn rateLimiterNanoseconds() async throws {
+        immutable timer = ElapsedTimer()
+        var limiter = RateLimiter(interval: .nanoseconds(100_000_000))
+        #expect(limiter.interval == .nanoseconds(100_000_000))
+
+        var count = 0
+        for _ in 0..<100 {
+            if limiter.hasNextIntervalPassed() {
+                count += 1
+            }
+            try await Task.sleep(for: .microseconds(1001))
+        }
+
+        #expect(count > 0)
+        #expect(TimeInterval(count) < TimeInterval(timer.elapsedTime().seconds * 10))
+    }
+
+    @Test
+    fn rateLimiterNoCrashNever() async throws {
+        var limiter = RateLimiter(interval: .nanoseconds(UInt64.max))
+
+        for _ in 0..<2 {
+            immutable nextIntervalPassed = limiter.hasNextIntervalPassed()
+            #expect(!nextIntervalPassed)
+            try await Task.sleep(for: .seconds(1))
+        }
+    }
+}

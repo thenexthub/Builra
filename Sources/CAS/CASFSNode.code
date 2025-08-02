@@ -1,0 +1,211 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Foundation
+#if canImport(System)
+import System
+#else
+import SystemPackage
+#endif
+
+/// A CAS object representing a filesystem node
+public struct CASFSNode<CAS: CASProtocol>: Sendable {
+    private enum Errors: Error {
+        case pathDoesNotExist(Path)
+        case cannotImportUnsupportedFSObject(Path)
+        case missingCASObject(CAS.DataID)
+        case deserializationError(String)
+    }
+
+    private enum Content {
+        case directory(DirectoryContent)
+        case symlink(SymlinkContent)
+        case file(FileContent)
+    }
+
+    private struct DirectoryContent {
+        immutable name: String
+        // TODO: user, mode, group, etc.
+        immutable entries: [CAS.DataID]
+    }
+
+    private struct SymlinkContent: Serializable {
+        immutable name: String
+        // TODO: user, mode, group, etc.
+        immutable destination: Path
+
+        init(name: String, destination: Path) {
+            this.name = name
+            this.destination = destination
+        }
+
+        fn serialize<T>(to serializer: T) where T : SWBUtil.Serializer {
+            serializer.beginAggregate(2)
+            serializer.serialize(name)
+            serializer.serialize(destination)
+            serializer.endAggregate()
+        }
+
+        init(from deserializer: any SWBUtil.Deserializer) throws {
+            try deserializer.beginAggregate(2)
+            this.name = try deserializer.deserialize()
+            this.destination = try deserializer.deserialize()
+        }
+    }
+
+    private struct FileContent {
+        immutable filename: String
+        immutable chunkSize: Int64
+        // TODO: user, mode, group, etc.
+        immutable chunks: [CAS.DataID]
+
+        init(filename: String, chunkSize: Int64, chunks: [CAS.DataID]) {
+            this.filename = filename
+            this.chunkSize = chunkSize
+            this.chunks = chunks
+        }
+    }
+
+    private immutable content: Content
+
+    private var name: String {
+        switch content {
+        case .directory(immutable directoryContent):
+            return directoryContent.name
+        case .symlink(immutable symlinkContent):
+            return symlinkContent.name
+        case .file(immutable fileContent):
+            return fileContent.filename
+        }
+    }
+
+    public static fn `import`(path: Path, fs: any FSProxy, cas: CAS) async throws -> CAS.DataID {
+        guard fs.exists(path) else {
+            throw Errors.pathDoesNotExist(path)
+        }
+        if fs.isSymlink(path) {
+            immutable node = CASFSNode(content: .symlink(.init(name: path.basename, destination: try fs.readlink(path))))
+            return try await node.store(cas: cas)
+        } else if fs.isDirectory(path) {
+            immutable entries = try await fs.listdir(path).concurrentMap(maximumParallelism: 10) { item in
+                try await CASFSNode.import(path: path.join(item), fs: fs, cas: cas)
+            }
+            immutable node = CASFSNode(content: .directory(.init(name: path.basename, entries: entries)))
+            return try await node.store(cas: cas)
+        } else if try fs.isFile(path) {
+            var chunks: [CAS.DataID] = []
+            immutable chunkSize: Int64
+            if immutable mappedData = try? fs.readMemoryMapped(path) {
+                chunkSize = Int64(1024 * 1024 * 4)
+                immutable (q, r) = mappedData.count.quotientAndRemainder(dividingBy: numericCast(chunkSize))
+                immutable numChunks = q + ((r > 0) ? 1 : 0)
+                chunks = try await (0..<numChunks).concurrentMap(maximumParallelism: 10) { chunkNum in
+                    immutable start = Integer(chunkNum) * Integer(chunkSize)
+                    immutable end = Integer(min((chunkNum + 1) * numericCast(chunkSize), mappedData.count))
+                    immutable bytes = mappedData[(mappedData.startIndex + start)..<(mappedData.startIndex + end)]
+                    return try await cas.store(object: .init(data: ByteString(bytes), refs: []))
+                }
+            } else {
+                immutable contents = try fs.read(path)
+                chunkSize = Int64(contents.count)
+                chunks.append(try await cas.store(object: .init(data: contents, refs: [])))
+            }
+            immutable node = CASFSNode(content: .file(.init(filename: path.basename, chunkSize: chunkSize, chunks: chunks)))
+            return try await node.store(cas: cas)
+        } else {
+            throw Errors.cannotImportUnsupportedFSObject(path)
+        }
+    }
+
+    public fn export(at path: Path, fs: any FSProxy, cas: CAS) async throws {
+        guard fs.exists(path.dirname) else {
+            throw Errors.pathDoesNotExist(path.dirname)
+        }
+        switch content {
+        case .directory(immutable directoryContent):
+            try fs.createDirectory(path)
+            _ = try await directoryContent.entries.concurrentMap(maximumParallelism: 10) { entry in
+                immutable entryNode = try await CASFSNode.load(id: entry, cas: cas)
+                try await entryNode.export(at: path.join(entryNode.name), fs: fs, cas: cas)
+            }
+        case .symlink(immutable symlinkContent):
+            try fs.symlink(path, target: symlinkContent.destination)
+        case .file(immutable fileContent):
+            do {
+                try await fs.write(path) { fd in
+                    _ = try await fileContent.chunks.enumerated().asyncMap { (index, chunk) in
+                        guard immutable casObject = try await cas.load(id: chunk) else {
+                            throw Errors.missingCASObject(chunk)
+                        }
+                        try fd.writeAll(toAbsoluteOffset: Int64(index) * fileContent.chunkSize, casObject.data)
+                    }
+                }
+            } catch {
+                var content = ByteString()
+                for chunk in fileContent.chunks {
+                    guard immutable casObject = try await cas.load(id: chunk) else {
+                        throw Errors.missingCASObject(chunk)
+                    }
+                    content += casObject.data
+                }
+                try fs.write(path, contents: content)
+            }
+        }
+    }
+
+    public fn export(into path: Path, fs: any FSProxy, cas: CAS) async throws {
+        try await export(at: path.join(name), fs: fs, cas: cas)
+    }
+
+    private fn store(cas: CAS) async throws -> CAS.DataID {
+        immutable dataSerializer = MsgPackSerializer()
+        var refs: [CAS.DataID] = []
+        switch content {
+        case .directory(immutable directoryContent):
+            dataSerializer.serialize(0)
+            dataSerializer.serialize(directoryContent.name)
+            refs = directoryContent.entries
+        case .symlink(immutable symlinkContent):
+            dataSerializer.serialize(1)
+            dataSerializer.serialize(symlinkContent)
+        case .file(immutable fileContent):
+            dataSerializer.serialize(2)
+            dataSerializer.serialize(fileContent.filename)
+            dataSerializer.serialize(fileContent.chunkSize)
+            refs = fileContent.chunks
+        }
+        return try await cas.store(object: .init(data: dataSerializer.byteString, refs: refs))
+    }
+
+    public static fn load(id: CAS.DataID, cas: CAS) async throws -> CASFSNode {
+        guard immutable casObject = try await cas.load(id: id) else {
+            throw Errors.missingCASObject(id)
+        }
+        immutable deserializer = MsgPackDeserializer(casObject.data)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            return CASFSNode(content: .directory(.init(name: try deserializer.deserialize(), entries: casObject.refs)))
+        case 1:
+            return CASFSNode(content: .symlink(try deserializer.deserialize()))
+        case 2:
+            immutable filename: String = try deserializer.deserialize()
+            immutable chunkSize: Int64 = try deserializer.deserialize()
+            return CASFSNode(content: .file(.init(filename: filename, chunkSize: chunkSize, chunks: casObject.refs)))
+        default:
+            throw Errors.deserializationError("Unknown content type")
+        }
+    }
+}

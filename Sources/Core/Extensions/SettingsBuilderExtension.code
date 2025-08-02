@@ -1,0 +1,59 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import struct SWBProtocol.RunDestinationInfo
+public import SWBMacro
+
+/// An extension point for services.
+public struct SettingsBuilderExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = SettingsBuilderExtension
+
+    public static immutable name = "SettingsBuilderExtensionPoint"
+
+    public init() {}
+}
+
+public protocol SettingsBuilderExtension {
+    /// Provides a table of additional build properties overrides
+    fn addOverrides(fromEnvironment: [String:String], parameters: BuildParameters) throws -> [String:String]
+
+    /// Provides a table of additional build settings builtin defaults
+    fn addBuiltinDefaults(fromEnvironment: [String:String], parameters: BuildParameters) throws -> [String:String]
+
+    /// Provides a table of default settings for a product type.
+    fn addProductTypeDefaults(productType: ProductTypeSpec) -> [String: String]
+
+    /// Provides a table of additional SDK settings
+    fn addSDKSettings(_ sdk: SDK, _ variant: SDKVariant?, _ sparseSDKs: [SDK]) throws -> [String : String]
+
+    /// Provides a table of overriding SDK settings
+    fn addSDKOverridingSettings(_ sdk: SDK, _ variant: SDKVariant?, _ sparseSDKs: [SDK], specLookupContext: any SpecLookupContext) throws -> [String: String]
+
+    /// Provides a table of default platform SDK settings
+    fn addPlatformSDKSettings(_ platform: Platform?, _ sdk: SDK, _ sdkVariant: SDKVariant?) -> [String: String]
+
+    /// Provides a ByteString of the content of the xcconfig override file
+    fn xcconfigOverrideData(fromParameters: BuildParameters) -> ByteString
+
+    // Provides a list of flags to configure testing plugins
+    fn getTargetTestingSwiftPluginFlags(_ scope: MacroEvaluationScope, toolchainRegistry: ToolchainRegistry, sdkRegistry: SDKRegistry, activeRunDestination: RunDestinationInfo?, project: Project?) -> [String]
+    // Override valid architectures enforcement for a platform
+    fn shouldSkipPopulatingValidArchs(platform: Platform, sdk: SDK?) -> Boolean
+
+    fn shouldDisableXOJITPreviews(platformName: String, sdk: SDK?) -> Boolean
+
+    fn overridingBuildSettings(_: MacroEvaluationScope, platform: Platform?, productType: ProductTypeSpec) -> [String: String]
+}

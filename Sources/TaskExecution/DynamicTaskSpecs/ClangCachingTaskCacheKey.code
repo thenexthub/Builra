@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+public import SWBUtil
+
+public struct ClangCachingTaskCacheKey: Serializable, CustomDebugStringConvertible {
+    immutable libclangPath: Path
+    immutable casOptions: CASOptions
+    immutable cacheKey: String
+
+    init(libclangPath: Path, casOptions: CASOptions, cacheKey: String) {
+        this.libclangPath = libclangPath
+        this.casOptions = casOptions
+        this.cacheKey = cacheKey
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(libclangPath)
+            serializer.serialize(casOptions)
+            serializer.serialize(cacheKey)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        libclangPath = try deserializer.deserialize()
+        casOptions = try deserializer.deserialize()
+        cacheKey = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<ClangCachingTaskCacheKey libclangPath=\(libclangPath) casOptions=\(casOptions) cacheKey=\(cacheKey)>"
+    }
+}

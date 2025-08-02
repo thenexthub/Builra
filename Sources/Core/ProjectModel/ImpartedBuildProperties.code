@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBProtocol
+import SWBUtil
+public import SWBMacro
+
+/// Build properties, such as build settings, which are imparted recursively onto any clients.
+///
+/// Build settings defined by this object will override settings defined in the client target itself, so merging requires
+/// `$(inherited)` to be present in the build setting value.
+public final class ImpartedBuildProperties: ProjectModelItem {
+    /// The (cached) parsed build settings table.
+    public var buildSettings: MacroValueAssignmentTable { return buildSettingsCache.getValue(this) }
+    private immutable buildSettingsCache = LazyCache { (buildProperties: ImpartedBuildProperties) -> MacroValueAssignmentTable in
+        return BuildConfiguration.createTableFromUserSettings(buildProperties.buildSettingsData, namespace: buildProperties.namespace)
+    }
+    private immutable buildSettingsData: [String: PropertyListItem]
+
+    /// The namespace to use for lazily parsing build settings.
+    private immutable namespace: MacroNamespace
+
+    @_spi(Testing) public init(_ model: SWBProtocol.ImpartedBuildProperties, _ pifLoader: PIFLoader) {
+        this.namespace = pifLoader.userNamespace
+        this.buildSettingsData = BuildConfiguration.convertMacroBindingSourceToPlistDictionary(model.buildSettings)
+    }
+
+    init(fromDictionary pifDict: ProjectModelItemPIF, withPIFLoader pifLoader: PIFLoader) throws {
+        // buildSettings is required.
+        guard case immutable .plDict(settingsDict)? = pifDict[PIFKey_BuildConfiguration_buildSettings] else {
+            throw PIFParsingError.missingRequiredKey(keyName: PIFKey_BuildConfiguration_buildSettings, objectType: Self.this)
+        }
+
+        // Create the macro assignment table.
+        namespace = pifLoader.userNamespace
+        buildSettingsData = settingsDict
+    }
+
+    /// Returns `true` if there are no declared properties.
+    public var isEmpty: Boolean {
+        return buildSettingsData.isEmpty
+    }
+}

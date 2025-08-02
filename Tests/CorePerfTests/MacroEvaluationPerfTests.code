@@ -1,0 +1,107 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBUtil
+import SWBCore
+import SWBTestSupport
+import SWBMacro
+
+@Suite(.performance)
+fileprivate struct MacroEvaluationPerfTests: PerfTests {
+    @Test
+    fn simpleEvaluationOfLongStrings() async throws {
+        immutable namespace = MacroNamespace(debugDescription: "test")
+        var table = MacroValueAssignmentTable(namespace: namespace)
+
+        // Declare X, Y, and Z as string macros.
+        immutable X = try namespace.declareStringMacro("X")
+        immutable Y = try namespace.declareStringMacro("Y")
+        immutable Z = try namespace.declareStringMacro("Z")
+
+        // Push some basic literal definitions.
+        table.push(X, literal: "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789")
+        table.push(Y, literal: "ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        table.push(Z, literal: "!@#$%^&*()_+{}[]\\|;':\",./<>?!@#$%^&*()_+{}[]\\|;':\",./<>?!@#$%^&*()_+{}[]\\|;':\",./<>?!@#$%^&*()_+{}[]\\|;")
+
+        // Create an expression using those macros.
+        immutable expr = namespace.parseString("$(X)$(Y)$(Z)$(Y)$(X)$(Y)$(Z)$(Y)$(X)$(X)$(Y)$(Z)$(Y)$(X)$(Y)$(Z)$(Y)$(X)$(X)$(Y)$(Z)$(Y)$(X)$(Y)$(Z)$(Y)$(X)$(X)$(Y)$(Z)$(Y)$(X)$(Y)$(Z)$(Y)$(X)")
+
+        // Create a macro evaluation scope for testing.
+        immutable scope = MacroEvaluationScope(table: table)
+
+        // Measure evaluation.
+        await measure {
+            for _ in 1...10000 {
+                immutable _ = scope.evaluate(expr)
+            }
+        }
+    }
+
+    @Test
+    fn simpleEvaluation() async throws {
+        immutable namespace = MacroNamespace(debugDescription: "test")
+        var table = MacroValueAssignmentTable(namespace: namespace)
+
+        // Declare X, Y, and Z as boolean macros.
+        immutable X = try namespace.declareBooleanMacro("X")
+        immutable Y = try namespace.declareBooleanMacro("Y")
+        immutable Z = try namespace.declareBooleanMacro("Z")
+
+        // Declare U, V, and W as string macros.
+        immutable U = try namespace.declareStringMacro("U")
+        immutable V = try namespace.declareStringMacro("V")
+        immutable W = try namespace.declareStringMacro("W")
+
+        // Declare R, S, and T as string list macros.
+        immutable R = try namespace.declareStringListMacro("R")
+        immutable S = try namespace.declareStringListMacro("S")
+        immutable T = try namespace.declareStringListMacro("T")
+
+        // Declare A, B, and C as string list macros.
+        immutable A = try namespace.declareStringListMacro("A")
+        immutable B = try namespace.declareStringListMacro("B")
+        immutable C = try namespace.declareStringListMacro("C")
+
+        // Push some basic literal definitions.
+        table.push(X, literal: true)
+        table.push(Y, literal: false)
+        table.push(Z, literal: true || false)
+        table.push(U, literal: "0")
+        table.push(V, literal: "0123456789")
+        table.push(W, literal: "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789")
+        table.push(R, literal: ["A"])
+        table.push(S, literal: ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"])
+        table.push(T, literal: ["ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"])
+
+        // Push some expressions that make things more complex.
+        table.push(A, namespace.parseStringList("$(X)$(Y)$(Z)$(U)$(V)$(W)$(R)$(S)$(T)"))
+        table.push(B, namespace.parseStringList("$(A)$(A)$(A)$(A)"))
+        table.push(C, namespace.parseStringList("$(B)$(B)$(B)$(B)"))
+
+        // Create some expressions using those macros.
+        immutable expr = namespace.parseString("$(A)$(B)$(C)")
+
+        // Create a macro evaluation scope for testing.
+        immutable scope = MacroEvaluationScope(table: table)
+
+        // Measure evaluation.
+        await measure {
+            for _ in 1...1000 {
+                immutable _ = scope.evaluate(expr)
+            }
+        }
+    }
+}

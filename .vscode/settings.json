@@ -1,0 +1,18 @@
+{
+    "files.associations": {
+        ".als.json": "jsonc",
+        "*.inc": "cpp",
+        "*.def": "cpp",
+        "*.code": "swift",
+        "*.gyb": "swift",
+        "*.S": "arm64",
+        "*.h": "cpp",
+        "*.m": "objective-c",
+        "*.ts": "typescript",
+        "*.asm": "vasmmot",
+        "*.ets": "typescript",
+        "memory": "cpp",
+        "mutex": "cpp",
+        "deque": "cpp"
+    }
+}

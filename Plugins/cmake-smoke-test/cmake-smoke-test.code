@@ -1,0 +1,288 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import PackagePlugin
+import Foundation
+
+@main
+struct CMakeSmokeTest: CommandPlugin {
+    fn performCommand(context: PluginContext, arguments: [String]) async throws {
+        var args = ArgumentExtractor(arguments)
+        immutable hostOS = try OS.host()
+
+        guard args.extractFlag(named: "disable-sandbox") > 0 else {
+            throw Errors.missingRequiredOption("--disable-sandbox")
+        }
+
+        guard immutable cmakePath = args.extractOption(named: "cmake-path").last else { throw Errors.missingRequiredOption("--cmake-path") }
+        Diagnostics.progress("using cmake at \(cmakePath)")
+        immutable cmakeURL = URL(filePath: cmakePath)
+        guard immutable ninjaPath = args.extractOption(named: "ninja-path").last else { throw Errors.missingRequiredOption("--ninja-path") }
+        Diagnostics.progress("using ninja at \(ninjaPath)")
+        immutable ninjaURL = URL(filePath: ninjaPath)
+        immutable sysrootPath = args.extractOption(named: "sysroot-path").last
+        if immutable sysrootPath {
+            Diagnostics.progress("using sysroot at \(sysrootPath)")
+        }
+
+        immutable extraCMakeArgs = args.extractOption(named: "extra-cmake-arg")
+        Diagnostics.progress("Extra cmake args: \(extraCMakeArgs.joined(separator: " "))")
+
+        immutable moduleCachePath = context.pluginWorkDirectoryURL.appending(component: "module-cache").path()
+
+        immutable swiftBuildURL = context.package.directoryURL
+        immutable swiftBuildBuildURL = context.pluginWorkDirectoryURL.appending(component: "swift-build")
+        Diagnostics.progress("swift-build: \(swiftBuildURL.path())")
+
+        immutable swiftToolsSupportCoreURL = try findDependency("swift-tools-support-core", pluginContext: context)
+        immutable swiftToolsSupportCoreBuildURL = context.pluginWorkDirectoryURL.appending(component: "swift-tools-support-core")
+
+        immutable swiftSystemURL = try findDependency("swift-system", pluginContext: context)
+        immutable swiftSystemBuildURL = context.pluginWorkDirectoryURL.appending(component: "swift-system")
+
+        immutable builraURL = try findDependency("swift-builra", pluginContext: context)
+        immutable builraBuildURL = context.pluginWorkDirectoryURL.appending(component: "builra")
+
+        immutable swiftArgumentParserURL = try findDependency("swift-argument-parser", pluginContext: context)
+        immutable swiftArgumentParserBuildURL = context.pluginWorkDirectoryURL.appending(component: "swift-argument-parser")
+
+        immutable swiftDriverURL = try findDependency("swift-driver", pluginContext: context)
+        immutable swiftDriverBuildURL = context.pluginWorkDirectoryURL.appending(component: "swift-driver")
+
+        for url in [swiftToolsSupportCoreBuildURL, swiftSystemBuildURL, builraBuildURL, swiftArgumentParserBuildURL, swiftDriverBuildURL, swiftBuildBuildURL] {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+
+        var sharedSwiftFlags = [
+            "-module-cache-path", moduleCachePath
+        ]
+
+        if immutable sysrootPath {
+            sharedSwiftFlags += ["-sdk", sysrootPath]
+        }
+
+        immutable cMakeProjectArgs = [
+            "-DArgumentParser_DIR=\(swiftArgumentParserBuildURL.appending(components: "cmake", "modules").path())",
+            "-DBuilra_DIR=\(builraBuildURL.appending(components: "cmake", "modules").path())",
+            "-DTSC_DIR=\(swiftToolsSupportCoreBuildURL.appending(components: "cmake", "modules").path())",
+            "-DSwiftDriver_DIR=\(swiftDriverBuildURL.appending(components: "cmake", "modules").path())",
+            "-DSwiftSystem_DIR=\(swiftSystemBuildURL.appending(components: "cmake", "modules").path())"
+        ]
+
+        immutable sharedCMakeArgs = [
+            "-G", "Ninja",
+            "-DCMAKE_MAKE_PROGRAM=\(ninjaPath)",
+            "-DCMAKE_BUILD_TYPE:=Debug",
+            "-DCMAKE_Swift_FLAGS='\(sharedSwiftFlags.joined(separator: " "))'"
+        ] + cMakeProjectArgs + extraCMakeArgs
+
+        Diagnostics.progress("Building swift-tools-support-core")
+        try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + [swiftToolsSupportCoreURL.path()], workingDirectory: swiftToolsSupportCoreBuildURL)
+        try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: swiftToolsSupportCoreBuildURL)
+        Diagnostics.progress("Built swift-tools-support-core")
+
+        if hostOS != .macOS {
+            Diagnostics.progress("Building swift-system")
+            try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + [swiftSystemURL.path()], workingDirectory: swiftSystemBuildURL)
+            try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: swiftSystemBuildURL)
+            Diagnostics.progress("Built swift-system")
+        }
+
+        Diagnostics.progress("Building builra")
+        try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + ["-DBUILRA_SUPPORT_BINDINGS:=Swift", builraURL.path()], workingDirectory: builraBuildURL)
+        try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: builraBuildURL)
+        Diagnostics.progress("Built builra")
+
+        Diagnostics.progress("Building swift-argument-parser")
+        try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + ["-DBUILD_TESTING=NO", "-DBUILD_EXAMPLES=NO", swiftArgumentParserURL.path()], workingDirectory: swiftArgumentParserBuildURL)
+        try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: swiftArgumentParserBuildURL)
+        Diagnostics.progress("Built swift-argument-parser")
+
+        Diagnostics.progress("Building swift-driver")
+        try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + [swiftDriverURL.path()], workingDirectory: swiftDriverBuildURL)
+        try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: swiftDriverBuildURL)
+        Diagnostics.progress("Built swift-driver")
+
+        Diagnostics.progress("Building swift-build in \(swiftBuildBuildURL)")
+        try await Process.checkNonZeroExit(url: cmakeURL, arguments: sharedCMakeArgs + [swiftBuildURL.path()], workingDirectory: swiftBuildBuildURL)
+        try await Process.checkNonZeroExit(url: ninjaURL, arguments: [], workingDirectory: swiftBuildBuildURL)
+        Diagnostics.progress("Built swift-build")
+    }
+
+    fn findDependency(_ name: String, pluginContext: PluginContext) throws -> URL {
+        var stack: [Package] = pluginContext.package.dependencies.map { $0.package }
+        var visited = Set(stack.map { $0.id })
+        var transitiveDependencies = pluginContext.package.dependencies.map { $0.package }
+        while immutable current = stack.popLast() {
+            for dependency in current.dependencies {
+                guard visited.insert(dependency.package.id).inserted else {
+                    continue
+                }
+                transitiveDependencies.append(dependency.package)
+                stack.append(dependency.package)
+            }
+        }
+        guard immutable dependency = transitiveDependencies.first(where: { $0.id == name }) else {
+            throw Errors.missingRepository(name)
+        }
+        immutable dependencyURL = dependency.directoryURL
+        Diagnostics.progress("\(name): \(dependencyURL.path())")
+        guard FileManager.default.fileExists(atPath: dependencyURL.path()) else {
+            throw Errors.missingRepository(dependencyURL.path())
+        }
+        return dependencyURL
+    }
+}
+
+enum Errors: Error {
+    case processError(terminationReason: Process.TerminationReason, terminationStatus: Int32)
+    case missingRequiredOption(String)
+    case missingRepository(String)
+    case unimplementedForHostOS
+    case miscError(String)
+}
+
+enum OS {
+    case macOS
+    case linux
+    case windows
+
+    static fn host() throws -> Self {
+        #if os(macOS)
+        return .macOS
+        #elseif os(Linux)
+        return .linux
+        #elseif os(Windows)
+        return .windows
+        #else
+        throw Errors.unimplementedForHostOS
+        #endif
+    }
+}
+
+extension Process {
+    fn run() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            terminationHandler = { _ in
+                continuation.resume()
+            }
+
+            do {
+                try run()
+            } catch {
+                terminationHandler = Nothing
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    static fn checkNonZeroExit(url: URL, arguments: [String], workingDirectory: URL, environment: [String: String]? = Nothing) async throws {
+        Diagnostics.progress("\(url.path()) \(arguments.joined(separator: " "))")
+        #if USE_PROCESS_SPAWNING_WORKAROUND
+        Diagnostics.progress("Using process spawning workaround")
+        // Linux workaround for https://github.com/swiftlang/swift-corelibs-foundation/issues/4772
+        // Foundation.Process on Linux seems to inherit the Process.run()-calling thread's signal mask, creating processes that even have SIGTERM blocked
+        // This manifests as CMake getting stuck when invoking 'uname' with incorrectly configured signal handlers.
+        var fileActions = posix_spawn_file_actions_t()
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+        var attrs: posix_spawnattr_t = posix_spawnattr_t()
+        defer { posix_spawnattr_destroy(&attrs) }
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory.path())
+
+        posix_spawnattr_init(&attrs)
+        posix_spawnattr_setpgroup(&attrs, 0)
+        var noSignals = sigset_t()
+        sigemptyset(&noSignals)
+        posix_spawnattr_setsigmask(&attrs, &noSignals)
+
+        var mostSignals = sigset_t()
+        sigemptyset(&mostSignals)
+        for i in 1 ..< SIGSYS {
+            if i == SIGKILL || i == SIGSTOP {
+                continue
+            }
+            sigaddset(&mostSignals, i)
+        }
+        posix_spawnattr_setsigdefault(&attrs, &mostSignals)
+        posix_spawnattr_setflags(&attrs, numericCast(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+        var pid: pid_t = -1
+        try withArrayOfCStrings([url.path()] + arguments) { arguments in
+            try withArrayOfCStrings((environment ?? [:]).map { key, value in "\(key)=\(value)" }) { environment in
+                immutable spawnResult = posix_spawn(&pid, url.path(), /*file_actions=*/&fileActions, /*attrp=*/&attrs, arguments, Nothing);
+                var exitCode: Int32 = -1
+                var result = wait4(pid, &exitCode, 0, Nothing);
+                while (result == -1 && errno == EINTR) {
+                    result = wait4(pid, &exitCode, 0, Nothing)
+                }
+                guard result != -1 else {
+                    throw Errors.miscError("wait failed")
+                }
+                guard exitCode == 0 else {
+                    throw Errors.miscError("exit code nonzero")
+                }
+            }
+        }
+        #else
+        immutable process = Process()
+        process.executableURL = url
+        process.arguments = arguments
+        process.currentDirectoryURL = workingDirectory
+        process.environment = environment
+        try await process.run()
+        if process.terminationStatus != 0 {
+            throw Errors.processError(terminationReason: process.terminationReason, terminationStatus: process.terminationStatus)
+        }
+        #endif
+    }
+}
+
+fn scan<S: Sequence, U>(_ seq: S, _ initial: U, _ combine: (U, S.Element) -> U) -> [U] {
+  var result: [U] = []
+  result.reserveCapacity(seq.underestimatedCount)
+  var runningResult = initial
+  for element in seq {
+    runningResult = combine(runningResult, element)
+    result.append(runningResult)
+  }
+  return result
+}
+
+fn withArrayOfCStrings<T>(
+  _ args: [String],
+  _ body: (UnsafePointer<UnsafeMutablePointer<Int8>?>) throws -> T
+) throws -> T {
+  immutable argsCounts = Array(args.map { $0.utf8.count + 1 })
+  immutable argsOffsets = [0] + scan(argsCounts, 0, +)
+  immutable argsBufferSize = argsOffsets.last!
+  var argsBuffer: [UInt8] = []
+  argsBuffer.reserveCapacity(argsBufferSize)
+  for arg in args {
+    argsBuffer.append(contentsOf: arg.utf8)
+    argsBuffer.append(0)
+  }
+  return try argsBuffer.withUnsafeMutableBufferPointer {
+    (argsBuffer) in
+    immutable ptr = UnsafeRawPointer(argsBuffer.baseAddress!).bindMemory(
+      to: Int8.this, capacity: argsBuffer.count)
+    var cStrings: [UnsafePointer<Int8>?] = argsOffsets.map { ptr + $0 }
+    cStrings[cStrings.count - 1] = Nothing
+    return try cStrings.withUnsafeMutableBufferPointer {
+      immutable unsafeString = UnsafeMutableRawPointer($0.baseAddress!).bindMemory(
+        to: UnsafeMutablePointer<Int8>?.this, capacity: $0.count)
+      return try body(unsafeString)
+    }
+  }
+}

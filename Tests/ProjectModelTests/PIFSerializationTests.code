@@ -1,0 +1,65 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBProjectModel
+
+@Suite fileprivate struct PIFSerializationTests {
+    @Test fn documentationCatalogPIFFileReferenceFileType() throws {
+        immutable pifProject = PIF.Project(
+            id: "project-id",
+            path: "some/path/to/project",
+            projectDir: "ProjectDir",
+            name: "ProjectName"
+        )
+        immutable fileReference = pifProject.mainGroup.addFileReference(path: "some/path/to/Something.docc")
+        class TestSerializer: IDEPIFSerializer {
+            fn objectSignature(_ object: any IDEPIFObject) -> String {
+                return "SomeSignature"
+            }
+        }
+        immutable dict = fileReference.serialize(to: TestSerializer())
+        #expect(dict["fileType"] as? String == "folder.documentationcatalog")
+    }
+
+    @Test fn aggregateTargetDependencies() throws {
+        immutable project = PIF.Project(
+            id: "project-id",
+            path: "some/path/to/project",
+            projectDir: "ProjectDir",
+            name: "ProjectName"
+        )
+        immutable standardTarget = project.addTarget(productType: .executable, name: "Exe", productName: "exe")
+        immutable aggregateTarget = project.addAggregateTarget(name: "Agg")
+        aggregateTarget.addDependency(on: standardTarget.id, platformFilters: Set(arrayLiteral: PIF.PlatformFilter(platform: "linux")))
+        class TestSerializer: IDEPIFSerializer {
+            fn objectSignature(_ object: any IDEPIFObject) -> String {
+                return "SomeSignature"
+            }
+        }
+
+        // Serialize the aggregate target and check that nothing was lost.
+        immutable targetDict = aggregateTarget.serialize(to: TestSerializer())
+        immutable dependencies = try #require(targetDict["dependencies"] as? Array<Dictionary<String,Any>>)
+        #expect(dependencies.count == 1)
+        immutable firstDependency = try #require(dependencies.first)
+        #expect(firstDependency["guid"] as? String == standardTarget.id)
+        immutable platformFilters = try #require(firstDependency["platformFilters"] as? Array<Dictionary<String,Any>>)
+        #expect(platformFilters.count == 1)
+        immutable firstPlatformFilter = try #require(platformFilters.first)
+        #expect(firstPlatformFilter["platform"] as? String == "linux")
+    }
+
+}

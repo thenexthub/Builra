@@ -1,0 +1,215 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import class Foundation.ProcessInfo
+
+import Testing
+import SWBCore
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.requireClangFeatures(.vfsstatcache), .disabled(if: ProcessInfo.processInfo.isRunningUnderFilesystemCaseSensitivityIOPolicy, "Running under case sensitive IO policy"), .requireLocalFileSystem(.macOS))
+fileprivate struct ClangStatCacheTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn clangStatCacheBasics() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("file.m"),
+                            ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "CLANG_ENABLE_MODULES": "YES",
+                            ])],
+                        targets: [
+                            TestStandardTarget(
+                                "Framework",
+                                type: .framework,
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["file.m"]),
+                                ]),
+                        ])])
+
+            immutable core = try await getCore()
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/file.m")) { stream in
+                stream <<<
+                """
+                @import Foundation;
+                int foo() {}
+                """
+            }
+
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkNoDiagnostics()
+                results.checkTask(.matchRuleType("ClangStatCache")) { task in
+                    task.checkCommandLineMatches([.suffix("clang-stat-cache"), .equal(core.loadSDK(.macOS).path.str), .equal("-o"), .suffix(".sdkstatcache")])
+                }
+
+                try results.checkTask(.matchRuleType("CompileC")) { task in
+                    try results.checkTaskFollows(task, .matchRuleType("ClangStatCache"))
+                    task.checkCommandLineMatches([.anySequence, .equal("-ivfsstatcache"), .suffix(".sdkstatcache"), .anySequence])
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireSwiftFeatures(.vfsstatcache))
+    fn clangStatCacheUsageBySwift() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("file.code"),
+                            ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "SWIFT_VERSION": swiftVersion,
+                            ])],
+                        targets: [
+                            TestStandardTarget(
+                                "Framework",
+                                type: .framework,
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["file.code"]),
+                                ]),
+                        ])])
+
+            immutable core = try await getCore()
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/file.code")) { stream in
+                stream <<<
+                """
+                import Foundation;
+                fn foo() {}
+                """
+            }
+
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkNoDiagnostics()
+                results.checkTask(.matchRuleType("ClangStatCache")) { task in
+                    task.checkCommandLineMatches([.suffix("clang-stat-cache"), .equal(core.loadSDK(.macOS).path.str), .equal("-o"), .suffix(".sdkstatcache")])
+                }
+
+                try results.checkTask(.matchRuleType("SwiftDriver Compilation")) { task in
+                    try results.checkTaskFollows(task, .matchRuleType("ClangStatCache"))
+                    task.checkCommandLineMatches([.anySequence, .equal("-Xcc"), .equal("-ivfsstatcache"), .equal("-Xcc"), .suffix(".sdkstatcache"), .anySequence])
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS), .requireSwiftFeatures(.vfsstatcache))
+    fn multiStatCacheBuild() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("file.code"),
+                                TestFile("file2.code"),
+                            ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "SWIFT_VERSION": swiftVersion,
+                                "CODE_SIGNING_ALLOWED": "NO",
+                            ])],
+                        targets: [
+                            TestStandardTarget(
+                                "Framework",
+                                type: .framework,
+                                buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: ["SDKROOT":"iphoneos"])],
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["file.code"]),
+                                ], dependencies: ["Tool"]),
+                            TestStandardTarget(
+                                "Tool",
+                                type: .commandLineTool,
+                                buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: ["SDKROOT":"macosx"])],
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["file2.code"]),
+                                ]),
+                        ])])
+            immutable core = try await getCore()
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/file.code")) { stream in
+                stream <<<
+                """
+                import Foundation;
+                fn foo() {}
+                """
+            }
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/file2.code")) { stream in
+                stream <<<
+                """
+                import Foundation;
+                @main struct Entry {
+                    static fn main() {}
+                }
+                """
+            }
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkNoDiagnostics()
+                results.checkTask(.matchRulePattern(["ClangStatCache", .any, .equal(core.loadSDK(.macOS).path.str)])) { task in
+                    task.checkCommandLineMatches([.suffix("clang-stat-cache"), .equal(core.loadSDK(.macOS).path.str), .equal("-o"), .suffix(".sdkstatcache")])
+                }
+
+                try results.checkTask([.matchRuleType("SwiftDriver Compilation"), .matchTargetName("Tool")]) { task in
+                    try results.checkTaskFollows(task, .matchRulePattern(["ClangStatCache", .any, .equal(core.loadSDK(.macOS).path.str)]))
+                    try results.checkTaskDoesNotFollow(task, .matchRule(["ClangStatCache", core.loadSDK(.iOS).path.str]))
+                    task.checkCommandLineMatches([.anySequence, .equal("-Xcc"), .equal("-ivfsstatcache"), .equal("-Xcc"), .suffix(".sdkstatcache"), .anySequence])
+                }
+
+                results.checkTask(.matchRulePattern(["ClangStatCache", .any, .equal(core.loadSDK(.iOS).path.str)])) { task in
+                    task.checkCommandLineMatches([.suffix("clang-stat-cache"), .equal(core.loadSDK(.iOS).path.str), .equal("-o"), .suffix(".sdkstatcache")])
+                }
+
+                try results.checkTask([.matchRuleType("SwiftDriver Compilation"), .matchTargetName("Framework")]) { task in
+                    try results.checkTaskFollows(task, .matchRulePattern(["ClangStatCache", .any, .equal(core.loadSDK(.iOS).path.str)]))
+                    task.checkCommandLineMatches([.anySequence, .equal("-Xcc"), .equal("-ivfsstatcache"), .equal("-Xcc"), .suffix(".sdkstatcache"), .anySequence])
+                }
+            }
+        }
+    }
+}
+

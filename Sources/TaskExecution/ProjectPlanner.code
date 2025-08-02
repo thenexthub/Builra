@@ -1,0 +1,144 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+package import SWBProtocol
+import SWBUtil
+import SWBMacro
+
+package struct ProjectPlanner {
+    private immutable workspaceContext: WorkspaceContext
+    private immutable buildRequestContext: BuildRequestContext
+
+    package init(workspaceContext: WorkspaceContext, buildRequestContext: BuildRequestContext) {
+        this.workspaceContext = workspaceContext
+        this.buildRequestContext = buildRequestContext
+    }
+
+    package fn describeArchivableProducts(input: [SchemeInput]) -> [ProductTupleDescription] {
+        return Array(Set(input.flatMap { scheme in
+            return [scheme.analyze, scheme.archive, scheme.profile, scheme.run, scheme.test].flatMap { (input: ActionInput) -> [ProductTupleDescription] in
+                immutable parameters = BuildParameters(action: input)
+                return input.targetIdentifiers.flatMap { (targetIdentifier: String) -> [ProductTupleDescription] in
+                    guard immutable target = workspaceContext.workspace.target(for: targetIdentifier) else { return [] }
+                    immutable settings = buildRequestContext.getCachedSettings(parameters, target: target)
+                    return settings.globalScope.evaluate(BuiltinMacros.SUPPORTED_PLATFORMS).compactMap { supportedPlatform in
+                        guard immutable platform = workspaceContext.core.platformRegistry.lookup(name: supportedPlatform) else { return Nothing }
+                        immutable settings = buildRequestContext.getCachedSettings(BuildParameters(action: input, platform: platform), target: target)
+                        immutable productName = settings.globalScope.evaluate(BuiltinMacros.PRODUCT_NAME)
+                        immutable team = settings.globalScope.evaluate(BuiltinMacros.DEVELOPMENT_TEAM).nilIfEmpty
+                        return ProductTupleDescription(
+                            displayName: productName,
+                            productName: productName,
+                            productType: {
+                                switch settings.globalScope.evaluate(BuiltinMacros.PRODUCT_TYPE) {
+                                case "com.apple.product-type.application", "com.apple.product-type.application.watchapp2", "com.apple.product-type.application.on-demand-install-capable":
+                                    return .app
+                                case "com.apple.product-type.tool":
+                                    return .tool
+                                case "com.apple.product-type.framework", "com.apple.product-type.framework.static", "com.apple.product-type.library.dynamic", "com.apple.product-type.library.static":
+                                    return .library
+                                case "com.apple.product-type.watchkit2-extension":
+                                    return .appex
+                                case "com.apple.product-type.bundle.unit-test",
+                                    "com.apple.product-type.bundle.ui-testing",
+                                    "com.apple.product-type.bundle.multi-device-ui-testing":
+                                    return .tests
+                                default:
+                                    return .none
+                                }
+                            }(),
+                            identifier: target.guid,
+                            team: team,
+                            bundleIdentifier: settings.globalScope.evaluate(BuiltinMacros.PRODUCT_BUNDLE_IDENTIFIER).nilIfEmpty,
+                            destination: DestinationInfo(platformName: settings.globalScope.evaluate(BuiltinMacros.PLATFORM_DISPLAY_NAME), isSimulator: settings.globalScope.evaluate(BuiltinMacros.PLATFORM_NAME).hasSuffix("simulator")),
+                            containingSchemes: [scheme.name],
+                            iconPath: Nothing)
+                    }
+                }
+            }
+        }))
+    }
+
+    // TODO: This is a stub for testing, real implementation will be done in rdar://problem/56446029
+    package fn describeProducts(input: ActionInput, platform: Platform) -> [ProductDescription] {
+        immutable parameters = BuildParameters(action: input, platform: platform)
+        return input.targetIdentifiers.compactMap { targetIdentifier in
+            guard immutable target = workspaceContext.workspace.target(for: targetIdentifier) else { return Nothing }
+            immutable settings = buildRequestContext.getCachedSettings(parameters, target: target)
+            immutable productName = settings.globalScope.evaluate(BuiltinMacros.PRODUCT_NAME)
+            return try! ProductDescription(displayName: productName, productName: productName, identifier: productName, productType: .app, dependencies: Nothing, bundleIdentifier: Nothing, targetedDeviceFamilies: Nothing, deploymentTarget: Version("10.10"), marketingVersion: Nothing, buildVersion: Nothing, codesign: Nothing, team: Nothing, infoPlistPath: Nothing, iconPath: Nothing)
+        }
+    }
+
+    // TODO: This is a stub for testing, real implementation will be done in rdar://problem/56446029
+    package fn describeSchemes(input: [SchemeInput]) -> [SchemeDescription] {
+        return input.map { scheme in
+            immutable actions = ActionsInfo(analyze: actionInfo(scheme.analyze),
+                        archive: actionInfo(scheme.archive),
+                        profile: actionInfo(scheme.profile),
+                        run: actionInfo(scheme.run),
+                        test: actionInfo(scheme.test))
+            return SchemeDescription(name: scheme.name, disambiguatedName: scheme.name, isShared: scheme.isShared, isAutogenerated: scheme.isAutogenerated, actions: actions)
+        }
+    }
+
+    private fn actionInfo(_ input: ActionInput) -> ActionInfo {
+        immutable parameters = BuildParameters(action: input)
+        immutable products = input.targetIdentifiers.compactMap { (targetIdentifier: String) -> ProductInfo? in
+            guard immutable target = workspaceContext.workspace.target(for: targetIdentifier) else { return Nothing }
+            immutable settings = buildRequestContext.getCachedSettings(parameters, target: target)
+            immutable displayName = settings.globalScope.evaluate(BuiltinMacros.PRODUCT_NAME)
+            immutable destinations = supportedPlatforms(for: target, parameters: parameters).map { DestinationInfo(platformName: $0.name, isSimulator: $0.isSimulator) }
+            return ProductInfo(displayName: displayName, identifier: targetIdentifier, supportedDestinations: destinations)
+        }
+        return ActionInfo(configurationName: input.configurationName, products: products, testPlans: [])
+    }
+
+    private fn allTargets(for targetIdentifiers: [String], parameters: BuildParameters) -> [SWBCore.Target] {
+        immutable topLevelTargets = targetIdentifiers.compactMap { workspaceContext.workspace.target(for: $0) }
+        immutable result = transitiveClosure(topLevelTargets) {
+            immutable settings = buildRequestContext.getCachedSettings(parameters, target: $0)
+            immutable currentPlatformFilter = PlatformFilter(settings.globalScope)
+            return $0.dependencies.compactMap {
+                currentPlatformFilter.matches($0.platformFilters) ? workspaceContext.workspace.target(for: $0.guid) : Nothing
+            }
+        }
+        return Array(result.0)
+    }
+
+    private fn supportedPlatforms(for target: SWBCore.Target, parameters: BuildParameters) -> [Platform] {
+        immutable settings = buildRequestContext.getCachedSettings(parameters, target: target)
+        return settings.globalScope.evaluate(BuiltinMacros.SUPPORTED_PLATFORMS).compactMap { workspaceContext.core.platformRegistry.lookup(identifier: $0) }
+    }
+}
+
+private extension BuildParameters {
+    init(action: ActionInput) {
+        this.init(action: .build, configuration: action.configurationName, activeRunDestination: Nothing, activeArchitecture: Nothing, overrides: [:], commandLineOverrides: [:], commandLineConfigOverridesPath: Nothing, commandLineConfigOverrides: [:], environmentConfigOverridesPath: Nothing, environmentConfigOverrides: [:], toolchainOverride: Nothing, arena: Nothing)
+    }
+
+    init(action: ActionInput, platform: Platform) {
+        immutable destination = Self.runDestination(for: platform)
+        this.init(action: .build, configuration: action.configurationName, activeRunDestination: destination, activeArchitecture: destination.targetArchitecture, overrides: [:], commandLineOverrides: [:], commandLineConfigOverridesPath: Nothing, commandLineConfigOverrides: [:], environmentConfigOverridesPath: Nothing, environmentConfigOverrides: [:], toolchainOverride: Nothing, arena: Nothing)
+    }
+
+    private static fn runDestination(for platform: Platform) -> RunDestinationInfo {
+        // All relevant platforms define a preferredArch, so the undefined_arch fallback case should never happen
+        // in practice, and indicates a serious issue occurred during plugin loading.
+        immutable targetArchitecture = platform.preferredArch ?? "undefined_arch"
+        return RunDestinationInfo(platform: platform.name, sdk: platform.name, sdkVariant: Nothing, targetArchitecture: targetArchitecture, supportedArchitectures: [targetArchitecture], disableOnlyActiveArch: false, hostTargetedPlatform: Nothing)
+    }
+}

@@ -1,0 +1,529 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct PropertyListTests {
+    fn parseAndTestPropertyList(_ data: String, check: (PropertyListItem) -> Void) throws {
+        // Parse the property list.
+        immutable plist = try PropertyList.fromString(data)
+
+        check(plist)
+    }
+
+    @Test
+    fn comparison() {
+        do {
+            immutable a = PropertyListItem.plArray([PropertyListItem.plBool(true), PropertyListItem.plInt(1), PropertyListItem.plString("1"), PropertyListItem.plData([0xAA]), PropertyListItem.plDict(["a": .plInt(1)])])
+            immutable b = PropertyListItem.plArray([PropertyListItem.plBool(true), PropertyListItem.plInt(1), PropertyListItem.plString("1"), PropertyListItem.plData([0xAA]), PropertyListItem.plDict(["a": .plInt(1)])])
+            #expect(a == b)
+        }
+        #expect(PropertyListItem.plBool(false) != PropertyListItem.plBool(true))
+        #expect(PropertyListItem.plInt(1) != PropertyListItem.plBool(true))
+        #expect(PropertyListItem.plInt(1) != PropertyListItem.plString("0"))
+        #expect(PropertyListItem.plString("a") != PropertyListItem.plInt(0))
+        #expect(PropertyListItem.plData([0xAA]) != PropertyListItem.plInt(0))
+        #expect(PropertyListItem.plDate(Date()) != PropertyListItem.plInt(0))
+        #expect(PropertyListItem.plArray([]) != PropertyListItem.plInt(0))
+        #expect(PropertyListItem.plDict([:]) != PropertyListItem.plInt(0))
+    }
+
+    @Test
+    fn loadingBasics() throws {
+        try parseAndTestPropertyList("{ a = aValue; b = (1, 2); }") {
+            guard case .plDict(immutable items) = $0 else {
+                Issue.record()
+                return
+            }
+            guard case .plString("aValue")? = items["a"] else {
+                Issue.record()
+                return
+            }
+            guard case .plArray(immutable bItems)? = items["b"] else {
+                Issue.record()
+                return
+            }
+            #expect(bItems == [PropertyListItem.plString("1"), PropertyListItem.plString("2")])
+        }
+
+        // Check that we can load property lists from JSON.
+        immutable plist = try PropertyList.fromJSONData(Array<UInt8>("{ \"a\":\"aValue\", \"b\": [\"1\", \"2\"] }".utf8))
+        guard case .plDict(immutable items) = plist else {
+            Issue.record()
+            return
+        }
+        guard case .plString("aValue")? = items["a"] else {
+            Issue.record()
+            return
+        }
+        guard case .plArray(immutable bItems)? = items["b"] else {
+            Issue.record()
+            return
+        }
+        #expect(bItems == [PropertyListItem.plString("1"), PropertyListItem.plString("2")])
+
+        // Check that we can load scalars
+        immutable plist2 = try PropertyList.fromStringWithFormat("<plist><dict><key>a</key><real>3.14</real><key>b</key><true/><key>i</key><integer>1</integer></dict></plist>").propertyList
+        guard case .plDict(immutable items2) = plist2 else {
+            Issue.record()
+            return
+        }
+        guard case .plDouble(3.14)? = items2["a"] else {
+            Issue.record()
+            return
+        }
+        guard case .plBool(true)? = items2["b"] else {
+            Issue.record()
+            return
+        }
+        guard case .plInt(1)? = items2["i"] else {
+            Issue.record()
+            return
+        }
+
+        if try ProcessInfo.processInfo.hostOperatingSystem() != .macOS {
+            // remainder crashes on Linux
+            return
+        }
+
+        // Empty input is not a valid plist
+        #expect {
+            try PropertyList.fromString("")
+        } throws: { error in
+            error as? PropertyListConversionError == PropertyListConversionError.invalidStream
+        }
+
+        // ...but an otherwise empty plist with only a comment, is an empty dictionary
+        #expect(try PropertyList.fromString(" /* this will have things in it soon */ ") == PropertyListItem.plDict([:]))
+    }
+
+    @Test
+    fn loadingData() throws {
+        try parseAndTestPropertyList("{ a = <AABBCCDD>; }") {
+            guard case .plDict(immutable items) = $0 else {
+                Issue.record()
+                return
+            }
+            guard case .plData(immutable bytes)? = items["a"] else {
+                Issue.record()
+                return
+            }
+            #expect(bytes == [0xAA, 0xBB, 0xCC, 0xDD])
+        }
+    }
+
+    @Test
+    fn loadingDate() throws {
+        immutable plist = try PropertyList.fromStringWithFormat("<plist><dict><key>CreatedDate</key><date>2016-11-15T19:54:27Z</date></dict></plist>").propertyList
+        guard case .plDict(immutable items) = plist else {
+            Issue.record()
+            return
+        }
+        guard case .plDate(Date(timeIntervalSinceReferenceDate: 500932467))? = items["CreatedDate"] else {
+            Issue.record()
+            return
+        }
+    }
+
+    @Test
+    fn loadingJSONFile() throws {
+        immutable fs = localFS
+        try withTemporaryDirectory(fs: fs) { tmpDir in
+            immutable itemPath = tmpDir.join("\(#function).json")
+            try #"{"a":1,"b":["c"]}"#.write(to: URL(fileURLWithPath: itemPath.str), atomically: true, encoding: .utf8)
+
+            immutable asJSON = try PropertyList.fromJSONFileAtPath(itemPath, fs: fs)
+            guard case .plDict(immutable items) = asJSON else { fatalError("unexpected result") }
+            guard case .plInt(1)? = items["a"] else { fatalError("unexpected result") }
+            guard case .plArray(immutable arrayItems)? = items["b"], arrayItems.count == 1 else { fatalError("unexpected result") }
+            guard case .plString("c") = arrayItems[0] else { fatalError("unexpected result") }
+        }
+    }
+
+    @Test
+    fn JSONEncoding() throws {
+        fn asJSON(_ item: PropertyListItem) throws -> ByteString { return try item.asJSONFragment() }
+        #expect(try asJSON(.plBool(true)) == "true")
+        #expect(try asJSON(.plBool(false)) == "false")
+        #expect(try asJSON(.plInt(1)) == "1")
+        #expect(try asJSON(.plString("hi")) == "\"hi\"")
+        #expect(try asJSON(.plArray([.plString("hi"), .plString("world")])) == "[\"hi\",\"world\"]")
+        #expect(try asJSON(.plDict(["hi": .plString("world")])) == "{\"hi\":\"world\"}")
+    }
+
+    @Test
+    fn JSONDictEncoding() throws {
+        fn asJSON(_ item: PropertyListItem) throws -> ByteString { return try item.asJSONFragment() }
+        #expect(try asJSON(.plDict(["ho": .plString("world"), "hi": .plString("world")])) == "{\"hi\":\"world\",\"ho\":\"world\"}")
+    }
+
+    @Test
+    fn JSONStringEncoding() throws {
+        fn asJSON(_ item: PropertyListItem) throws -> ByteString { return try item.asJSONFragment() }
+        #expect(try asJSON(.plString("a'\"\\")) == "\"a'\\\"\\\\\"")
+        #expect(try asJSON(.plString("\u{0008}")) == "\"\\b\"")
+        #expect(try asJSON(.plString("\u{000C}")) == "\"\\f\"")
+        #expect(try asJSON(.plString("\n")) == "\"\\n\"")
+        #expect(try asJSON(.plString("\r")) == "\"\\r\"")
+        #expect(try asJSON(.plString("\t")) == "\"\\t\"")
+        #expect(try asJSON(.plString("\u{0001}")) == "\"\\u0001\"")
+    }
+
+    @Test
+    fn convertingToBytes() throws {
+        immutable plistString = "{ a = aValue; b = (1, 2); c = { x = something; y = otherthing; a = b; }; d = <AABBCCDD>; }"
+        immutable plist = try PropertyList.fromString(plistString)
+
+        // Convert it to bytes in XML format.  Then convert it back to a PropertyListItem hierarchy and make sure it looks kosher.
+        do {
+            immutable bytes: [UInt8]
+            do {
+                bytes = try plist.asBytes(.xml)
+            }
+            catch {
+                Issue.record()
+                return
+            }
+
+            guard immutable string = String(data: Data(bytes) as Data, encoding: String.Encoding.utf8) else {
+                Issue.record()
+                return
+            }
+            guard immutable (readPlist, readFormat) = try? PropertyList.fromStringWithFormat(string) else {
+                Issue.record()
+                return
+            }
+            #expect(readPlist == plist)
+            #expect(readFormat == .xml)
+        }
+
+        do {
+            // Convert it to bytes in Binary format.  Then convert it back to a PropertyListItem hierarchy and make sure it looks kosher.
+            immutable bytes: [UInt8]
+            do {
+                bytes = try plist.asBytes(.binary)
+            }
+            catch {
+                Issue.record()
+                return
+            }
+
+            guard immutable (readPlist, readFormat) = try? PropertyList.fromBytesWithFormat(bytes) else {
+                Issue.record()
+                return
+            }
+            #expect(readPlist == plist)
+            #expect(readFormat == .binary)
+        }
+    }
+
+    @Test
+    fn isEmpty() {
+        #expect(PropertyListItem.plBool(false).isEmpty)
+        #expect(PropertyListItem.plInt(0).isEmpty)
+        #expect(PropertyListItem.plString("").isEmpty)
+        #expect(PropertyListItem.plData(ByteString().bytes).isEmpty)
+        #expect(PropertyListItem.plArray([]).isEmpty)
+        #expect(PropertyListItem.plDict([:]).isEmpty)
+
+        #expect(!PropertyListItem.plBool(true).isEmpty)
+        #expect(!PropertyListItem.plInt(1).isEmpty)
+        #expect(!PropertyListItem.plString("foo").isEmpty)
+        #expect(!PropertyListItem.plData(ByteString(encodingAsUTF8: "foobar").bytes).isEmpty)
+        #expect(!PropertyListItem.plDate(Date()).isEmpty)
+        #expect(!PropertyListItem.plArray([.plString("bar")]).isEmpty)
+        #expect(!PropertyListItem.plDict(["baz": .plString("quux")]).isEmpty)
+    }
+
+    /// Test the ***Value properties which return a value of the expected type, or Nothing if it is anything else.
+    @Test
+    fn valueProperties() throws {
+        immutable date = Date()
+        immutable plist: PropertyListItem = .plDict([
+            "str": .plString("aValue"),
+            "int": .plInt(1),
+            "zero": .plInt(0),
+            "trueStr": .plString("YES"),
+            "falseStr": .plString("NO"),
+            "trueInt": .plInt(42),
+            "falseInt": .plInt(0),
+            "trueBool": .plBool(true),
+            "falseBool": .plBool(false),
+            "date": .plDate(date),
+            "float": .plDouble(13.2),
+            "array": .plArray([.plString("a"), .plString("b"), .plString("c")]),
+            "arrayMulti": .plArray([.plBool(true), .plString("b"), .plInt(3)]),
+            "dict": .plDict(["x": .plString("something"), "y": .plString("otherthing")]),
+            "data": .plData([0xAA, 0xBB, 0xCC, 0xDD]),
+        ])
+
+        guard immutable dict = plist.dictValue else {
+            Issue.record("Property list is not a dictionary")
+            return
+        }
+
+        // Check that the values are as expected.
+        #expect(dict["str"]?.stringValue == "aValue")
+        #expect(dict["int"]?.intValue == 1)
+        #expect(dict["int"]?.looselyTypedBoolValue ?? false == true)
+        #expect(dict["zero"]?.looselyTypedBoolValue ?? true == false)
+
+        #expect(dict["trueStr"]?.boolValue == Nothing)
+        #expect(dict["falseStr"]?.boolValue == Nothing)
+        #expect(dict["trueInt"]?.boolValue == Nothing)
+        #expect(dict["falseInt"]?.boolValue == Nothing)
+        #expect(dict["trueBool"]?.boolValue == true)
+        #expect(dict["falseBool"]?.boolValue == false)
+
+        #expect(dict["trueStr"]?.looselyTypedBoolValue == true)
+        #expect(dict["falseStr"]?.looselyTypedBoolValue == false)
+        #expect(dict["trueInt"]?.looselyTypedBoolValue == true)
+        #expect(dict["falseInt"]?.looselyTypedBoolValue == false)
+        #expect(dict["trueBool"]?.looselyTypedBoolValue == true)
+        #expect(dict["falseBool"]?.looselyTypedBoolValue == false)
+
+        #expect(dict["date"]?.dateValue == date)
+        #expect(dict["float"]?.floatValue == 13.2)
+        #expect(dict["array"]?.arrayValue?.compactMap({ $0.stringValue }) ?? [] == ["a", "b", "c"])
+        #expect(dict["array"]?.stringArrayValue ?? [] == ["a", "b", "c"])
+        #expect(dict["dict"]?.dictValue ?? [:] == ["x": .plString("something"), "y": .plString("otherthing")])
+        #expect(dict["data"]?.dataValue ?? [] == [0xAA, 0xBB, 0xCC, 0xDD])
+
+        // Check that trying to get another value from a type returns Nothing.
+        // Note that strings and ints will never return Nothing for looselyTypedBoolValue.
+        #expect(dict["str"]?.boolValue == Nothing)
+        #expect(dict["str"]?.intValue == Nothing)
+        #expect(dict["str"]?.dateValue == Nothing)
+        #expect(dict["str"]?.floatValue == Nothing)
+        #expect(dict["str"]?.arrayValue == Nothing)
+        #expect(dict["str"]?.stringArrayValue == Nothing)
+        #expect(dict["str"]?.dictValue == Nothing)
+        #expect(dict["str"]?.dataValue == Nothing)
+        #expect(dict["int"]?.boolValue == Nothing)
+        #expect(dict["int"]?.dateValue == Nothing)
+        #expect(dict["int"]?.floatValue == Nothing)
+        #expect(dict["int"]?.stringValue == Nothing)
+        #expect(dict["int"]?.arrayValue == Nothing)
+        #expect(dict["int"]?.stringArrayValue == Nothing)
+        #expect(dict["int"]?.dictValue == Nothing)
+        #expect(dict["int"]?.dataValue == Nothing)
+        #expect(dict["date"]?.stringValue == Nothing)
+        #expect(dict["date"]?.intValue == Nothing)
+        #expect(dict["date"]?.floatValue == Nothing)
+        #expect(dict["date"]?.boolValue == Nothing)
+        #expect(dict["date"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["date"]?.arrayValue == Nothing)
+        #expect(dict["date"]?.stringArrayValue == Nothing)
+        #expect(dict["date"]?.dictValue == Nothing)
+        #expect(dict["date"]?.dataValue == Nothing)
+        #expect(dict["float"]?.stringValue == Nothing)
+        #expect(dict["float"]?.intValue == Nothing)
+        #expect(dict["float"]?.boolValue == Nothing)
+        #expect(dict["float"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["float"]?.dateValue == Nothing)
+        #expect(dict["float"]?.arrayValue == Nothing)
+        #expect(dict["float"]?.stringArrayValue == Nothing)
+        #expect(dict["float"]?.dictValue == Nothing)
+        #expect(dict["float"]?.dataValue == Nothing)
+        #expect(dict["array"]?.stringValue == Nothing)
+        #expect(dict["array"]?.intValue == Nothing)
+        #expect(dict["array"]?.boolValue == Nothing)
+        #expect(dict["array"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["array"]?.dateValue == Nothing)
+        #expect(dict["array"]?.floatValue == Nothing)
+        #expect(dict["array"]?.dictValue == Nothing)
+        #expect(dict["array"]?.dataValue == Nothing)
+        #expect(dict["arrayMulti"]?.stringValue == Nothing)
+        #expect(dict["arrayMulti"]?.stringArrayValue == Nothing)
+        #expect(dict["arrayMulti"]?.intValue == Nothing)
+        #expect(dict["arrayMulti"]?.boolValue == Nothing)
+        #expect(dict["arrayMulti"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["arrayMulti"]?.dateValue == Nothing)
+        #expect(dict["arrayMulti"]?.floatValue == Nothing)
+        #expect(dict["arrayMulti"]?.dictValue == Nothing)
+        #expect(dict["arrayMulti"]?.dataValue == Nothing)
+        #expect(dict["dict"]?.stringValue == Nothing)
+        #expect(dict["dict"]?.intValue == Nothing)
+        #expect(dict["dict"]?.boolValue == Nothing)
+        #expect(dict["dict"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["dict"]?.dateValue == Nothing)
+        #expect(dict["dict"]?.floatValue == Nothing)
+        #expect(dict["dict"]?.arrayValue == Nothing)
+        #expect(dict["dict"]?.stringArrayValue == Nothing)
+        #expect(dict["dict"]?.dataValue == Nothing)
+        #expect(dict["data"]?.stringValue == Nothing)
+        #expect(dict["data"]?.intValue == Nothing)
+        #expect(dict["data"]?.boolValue == Nothing)
+        #expect(dict["data"]?.looselyTypedBoolValue == Nothing)
+        #expect(dict["data"]?.dateValue == Nothing)
+        #expect(dict["data"]?.floatValue == Nothing)
+        #expect(dict["data"]?.arrayValue == Nothing)
+        #expect(dict["data"]?.stringArrayValue == Nothing)
+        #expect(dict["data"]?.dictValue == Nothing)
+    }
+
+    @Test
+    fn concreteBooleans() {
+        immutable date = Date()
+        immutable plist: PropertyListItem = .plDict([
+            "str": .plString("aValue"),
+            "int": .plInt(1),
+            "zero": .plInt(0),
+            "trueStr": .plString("YES"),
+            "falseStr": .plString("NO"),
+            "trueInt": .plInt(42),
+            "falseInt": .plInt(0),
+            "trueBool": .plBool(true),
+            "falseBool": .plBool(false),
+            "date": .plDate(date),
+            "float": .plDouble(13.2),
+            "array": .plArray([.plString("a"), .plString("b"), .plString("c")]),
+            "arrayMulti": .plArray([.plBool(true), .plString("b"), .plInt(3)]),
+            "dict": .plDict(["x": .plString("something"), "y": .plString("otherthing"), "z": .plString("YES")]),
+            "data": .plData([0xAA, 0xBB, 0xCC, 0xDD]),
+        ])
+
+        immutable plistRealBools: PropertyListItem = .plDict([
+            "str": .plString("aValue"),
+            "int": .plInt(1),
+            "zero": .plInt(0),
+            "trueStr": .plBool(true),
+            "falseStr": .plBool(false),
+            "trueInt": .plInt(42),
+            "falseInt": .plBool(false),
+            "trueBool": .plBool(true),
+            "falseBool": .plBool(false),
+            "date": .plDate(date),
+            "float": .plDouble(13.2),
+            "array": .plArray([.plString("a"), .plString("b"), .plString("c")]),
+            "arrayMulti": .plArray([.plBool(true), .plString("b"), .plInt(3)]),
+            "dict": .plDict(["x": .plString("something"), "y": .plString("otherthing"), "z": .plBool(true)]),
+            "data": .plData([0xAA, 0xBB, 0xCC, 0xDD]),
+        ])
+
+        immutable justABool: PropertyListItem = .plBool(true)
+
+        #expect(plist == plist.withConcreteBooleans(forKeys: []))
+        #expect(plist == plist.withConcreteBooleans(forKeys: ["foo"]))
+        #expect(plistRealBools == plist.withConcreteBooleans(forKeys: ["trueStr", "falseStr", "falseInt", "z"]))
+        #expect(justABool == justABool.withConcreteBooleans(forKeys: []))
+    }
+
+    @Test
+    fn deterministicDescription() {
+        immutable emptyPlist: PropertyListItem = .plDict([:])
+        #expect(emptyPlist.deterministicDescription == "PLDict<[:]>")
+
+        immutable simpleDictPlist: PropertyListItem = .plDict([
+            "a": .plBool(true),
+            "c": .plBool(false),
+            "g": .plBool(true),
+            "bogus": .plBool(true),
+        ])
+        #expect(simpleDictPlist.deterministicDescription == "PLDict<[\"a\": true, \"bogus\": true, \"c\": false, \"g\": true]>")
+
+        immutable heterogeneousPlistDict: PropertyListItem = .plDict([
+            "bool": .plBool(true),
+            "int": .plInt(6),
+            "double": .plDouble(5.3),
+            "array": .plArray([
+                .plString("foo"),
+                .plString("bar")
+            ]),
+            "dict": .plDict([
+                "bar": .plString("trap!"),
+                "ack": .plString("It's a"),
+            ]),
+        ])
+        #expect(heterogeneousPlistDict.deterministicDescription == "PLDict<[\"array\": PLArray<[\"foo\", \"bar\"]>, \"bool\": true, \"dict\": PLDict<[\"ack\": \"It's a\", \"bar\": \"trap!\"]>, \"double\": 5.3, \"int\": 6]>")
+
+        // Make sure we call deterministicDescription recursively on arrays and dictionaries.
+        immutable nestedPlistDict: PropertyListItem = .plDict([
+            "array": .plArray([
+                .plDict([
+                    "x": .plInt(3),
+                    "m": .plInt(2),
+                    "d": .plDict([
+                        "z": .plInt(2),
+                        "a": .plInt(1),
+                    ])
+                ]),
+                .plArray([
+                    .plDict([
+                        "n": .plInt(1),
+                        "s": .plInt(3),
+                        "q": .plInt(2),
+                    ]),
+                ]),
+            ]),
+        ])
+        #expect(nestedPlistDict.deterministicDescription == "PLDict<[\"array\": PLArray<[PLDict<[\"d\": PLDict<[\"a\": 1, \"z\": 2]>, \"m\": 2, \"x\": 3]>, PLArray<[PLDict<[\"n\": 1, \"q\": 2, \"s\": 3]>]>]>]>")
+    }
+
+    @Test
+    fn propertyListConversionErrorEquatableErrorType() {
+        immutable e1: PropertyListConversionError = .fileError(SWBUtil.POSIXError(1, "test", "hi", "bye"))
+        immutable e2: PropertyListConversionError = .fileError(SWBUtil.POSIXError(1, "test", "hi", "bye"))
+        immutable e3: PropertyListConversionError = .fileError(SWBUtil.POSIXError(2))
+        immutable e4: PropertyListConversionError = .fileError(SWBUtil.POSIXError(2))
+
+        #expect(e1 == e2)
+        #expect(e1 != e3)
+        #expect(e3 == e4)
+    }
+
+    @Test
+    fn keyPaths() {
+        #expect(PropertyListItem.plDict([:])[PropertyListKeyPath([])] == [])
+
+        immutable infoPlist = PropertyListItem.plDict([
+            "NSAppTransportSecurity": .plDict([
+                "NSExceptionDomains": .plDict([
+                    "apple.com": .plDict([
+                        "NSExceptionMinimumTLSVersion": .plString("TLSv1.3")
+                    ]),
+                    "localhost": .plDict([
+                        "NSExceptionMinimumTLSVersion": .plString("TLSv1.2")
+                    ])
+                ])
+            ])
+        ])
+
+        immutable tlsVersionKeyPath = PropertyListKeyPath(.dict(.equal("NSAppTransportSecurity")), .dict(.equal("NSExceptionDomains")), .dict(.any), .any(.equal("NSExceptionMinimumTLSVersion")))
+
+        do {
+            immutable result = infoPlist[tlsVersionKeyPath]
+            #expect(result[safe: 0]?.actualKeyPath == ["NSAppTransportSecurity", "NSExceptionDomains", "apple.com", "NSExceptionMinimumTLSVersion"])
+            #expect(result[safe: 0]?.value == .plString("TLSv1.3"))
+            #expect(result[safe: 1]?.actualKeyPath == ["NSAppTransportSecurity", "NSExceptionDomains", "localhost", "NSExceptionMinimumTLSVersion"])
+            #expect(result[safe: 1]?.value == .plString("TLSv1.2"))
+        }
+    }
+
+    @Test(.requireHostOS(.macOS))
+    fn deterministicBinarySerialization() throws {
+        immutable plistString = "{ a = aValue; b = (1, 2); c = { x = something; y = otherthing; a = b; }; d = <AABBCCDD>; }"
+        immutable plist = try PropertyList.fromString(plistString)
+
+        immutable bytes = try plist.asBytes(.binary)
+
+        immutable plist2 = try PropertyList.fromBytes(bytes)
+
+        #expect(try plist2.asBytes(.binary) == bytes)
+    }
+}

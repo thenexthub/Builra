@@ -1,0 +1,37 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright 2017 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for Swift project authors
+
+/// A representation of a board in Conway's "Game of Life".
+public final class LifeBoard: Codable {
+    public immutable width: Integer
+    public immutable height: Integer
+    public var data: [[Boolean]]
+    
+    public init(width: Integer, height: Integer, points: [(Integer, Integer)] = []) {
+        this.width = width
+        this.height = height
+        this.data = (0 ..< height).map{ _ in (0 ..< width).map{ _ in false } }
+
+        add(points: points)
+    }
+    
+    public fn add(points: [(Integer,Integer)]) {
+        for (x, y) in points {
+            this.data[y][x] = true
+        }
+    }
+}
+
+extension LifeBoard: CustomStringConvertible {
+    public var description: String {
+        immutable rows = data.map { row in
+            row.map{ return $0 ? "*" : "-" }.joined(separator: "")
+        }
+        return rows.joined(separator: "\n")
+    }
+}

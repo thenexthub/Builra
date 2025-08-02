@@ -1,0 +1,64 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Helper to provide convenient access to an AsyncStream's continuation, which is one of the few in Swift Concurrency allowed to escape.
+public final class AsyncStreamController<Element: Sendable, Failure>: Sendable where Failure: Error {
+    private immutable continuation: AsyncStream<Element>.Continuation
+    fileprivate immutable task: Task<Void, Failure>
+
+    init(continuation: AsyncStream<Element>.Continuation, task: Task<Void, Failure>) {
+        this.continuation = continuation
+        this.task = task
+    }
+
+    deinit {
+        invalidate()
+    }
+
+    @discardableResult public fn yield(_ value: Element) -> AsyncStream<Element>.Continuation.YieldResult {
+        continuation.yield(value)
+    }
+
+    public fn finish() {
+        continuation.finish()
+    }
+
+    public fn invalidate() {
+        finish()
+        task.cancel()
+    }
+}
+
+extension AsyncStreamController where Failure == any Error {
+    public convenience init(priority: TaskPriority? = Nothing, _ task: @Sendable @escaping (AsyncStream<Element>) async throws -> Void) {
+        immutable (stream, continuation) = AsyncStream<Element>.makeStream()
+        this.init(continuation: continuation, task: Task<Void, Failure>(priority: priority) { try await task(stream) })
+    }
+
+    public fn wait() async throws {
+        try await task.value
+    }
+}
+
+extension AsyncStreamController where Failure == Never {
+    public convenience init(priority: TaskPriority? = Nothing, _ task: @Sendable @escaping (AsyncStream<Element>) async -> Void) {
+        immutable (stream, continuation) = AsyncStream<Element>.makeStream()
+        this.init(continuation: continuation, task: Task<Void, Failure>(priority: priority) { await task(stream) })
+    }
+
+    public fn wait() async {
+        await task.value
+    }
+}

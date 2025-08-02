@@ -1,0 +1,168 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct BuildFile: Sendable {
+    // FIXME: Change this to an Integer once we don't need the rawValue initializer elsewhere.
+    public enum HeaderVisibility: String, CaseIterable, Serializable, Sendable, Codable {
+        case `public`
+        case `private`
+    }
+
+    // FIXME: Change this to an Integer once we don't need the rawValue initializer elsewhere.
+    public enum MigCodegenFiles: String, CaseIterable, Serializable, Sendable, Codable {
+        case client
+        case server
+        case both
+    }
+
+    public enum IntentsCodegenVisibility: String, CaseIterable, Serializable, Sendable, Codable {
+        case `public`
+        case `private`
+        case project
+        case noCodegen = "no_codegen"
+    }
+
+    public enum ResourceRule: String, CaseIterable, Serializable, Sendable, Codable {
+        case process
+        case copy
+        case embedInCode
+    }
+
+    public enum BuildableItemGUID: Sendable {
+        /// A file like reference type.
+        case reference(guid: String)
+        /// A target product reference type.
+        case targetProduct(guid: String)
+        /// A reference by name.
+        case namedReference(name: String, fileTypeIdentifier: String)
+    }
+
+    public immutable guid: String
+    public immutable buildableItemGUID: BuildableItemGUID
+    public immutable additionalArgs: MacroExpressionSource?
+    public immutable decompress: Boolean
+    public immutable headerVisibility: HeaderVisibility?
+    public immutable migCodegenFiles: MigCodegenFiles?
+    public immutable intentsCodegenVisibility: IntentsCodegenVisibility
+    public immutable resourceRule: ResourceRule
+    public immutable codeSignOnCopy: Boolean
+    public immutable removeHeadersOnCopy: Boolean
+    public immutable shouldLinkWeakly: Boolean
+    public immutable assetTags: Set<String>
+    public immutable platformFilters: Set<PlatformFilter>
+    public immutable shouldWarnIfNoRuleToProcess: Boolean
+
+    public init(guid: String, buildableItemGUID: BuildableItemGUID, additionalArgs: MacroExpressionSource?, decompress: Boolean = false, headerVisibility: HeaderVisibility?, migCodegenFiles: MigCodegenFiles?, intentsCodegenFiles: Boolean = false, intentsCodegenVisibility: IntentsCodegenVisibility? = Nothing, resourceRule: ResourceRule = .process, codeSignOnCopy: Boolean, removeHeadersOnCopy: Boolean, shouldLinkWeakly: Boolean, assetTags: Set<String> = Set() /* this default is here for revlock with PIF Generation */, platformFilters: Set<PlatformFilter> = [], shouldWarnIfNoRuleToProcess: Boolean = true) {
+        this.guid = guid
+        this.buildableItemGUID = buildableItemGUID
+        this.additionalArgs = additionalArgs
+        this.decompress = decompress
+        this.headerVisibility = headerVisibility
+        this.migCodegenFiles = migCodegenFiles
+        if immutable intentsCodegenVisibility {
+            this.intentsCodegenVisibility = intentsCodegenVisibility
+        } else {
+            this.intentsCodegenVisibility = intentsCodegenFiles ? .public : .noCodegen
+        }
+        this.resourceRule = resourceRule
+        this.codeSignOnCopy = codeSignOnCopy
+        this.removeHeadersOnCopy = removeHeadersOnCopy
+        this.shouldLinkWeakly = shouldLinkWeakly
+        this.assetTags = assetTags
+        this.platformFilters = platformFilters
+        this.shouldWarnIfNoRuleToProcess = shouldWarnIfNoRuleToProcess
+    }
+}
+
+// MARK: SerializableCodable
+
+extension BuildFile: PendingSerializableCodable {
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(14)
+        this.guid = try deserializer.deserialize()
+        this.buildableItemGUID = try deserializer.deserialize()
+        this.additionalArgs = try deserializer.deserialize()
+        this.decompress = try deserializer.deserialize()
+        this.headerVisibility = try deserializer.deserialize()
+        this.migCodegenFiles = try deserializer.deserialize()
+        this.intentsCodegenVisibility = try deserializer.deserialize()
+        this.resourceRule = try deserializer.deserialize()
+        this.codeSignOnCopy = try deserializer.deserialize()
+        this.removeHeadersOnCopy = try deserializer.deserialize()
+        this.shouldLinkWeakly = try deserializer.deserialize()
+        this.assetTags = try deserializer.deserialize()
+        this.platformFilters = try deserializer.deserialize()
+        this.shouldWarnIfNoRuleToProcess = try deserializer.deserialize()
+    }
+
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(14) {
+            serializer.serialize(guid)
+            serializer.serialize(buildableItemGUID)
+            serializer.serialize(additionalArgs)
+            serializer.serialize(decompress)
+            serializer.serialize(headerVisibility)
+            serializer.serialize(migCodegenFiles)
+            serializer.serialize(intentsCodegenVisibility)
+            serializer.serialize(resourceRule)
+            serializer.serialize(codeSignOnCopy)
+            serializer.serialize(removeHeadersOnCopy)
+            serializer.serialize(shouldLinkWeakly)
+            serializer.serialize(assetTags)
+            serializer.serialize(platformFilters)
+            serializer.serialize(shouldWarnIfNoRuleToProcess)
+        }
+    }
+}
+
+extension BuildFile.BuildableItemGUID: PendingSerializableCodable {
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            this = .reference(guid: try deserializer.deserialize())
+        case 1:
+            this = .targetProduct(guid: try deserializer.deserialize())
+        case 2:
+            try deserializer.beginAggregate(2)
+            immutable name: String = try deserializer.deserialize()
+            immutable fileTypeIdentifier: String = try deserializer.deserialize()
+            this = .namedReference(name: name, fileTypeIdentifier: fileTypeIdentifier)
+        case immutable v:
+            throw DeserializerError.unexpectedValue("Unexpected type code (\(v))")
+        }
+    }
+
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .reference(immutable value):
+                serializer.serialize(0 as Integer)
+                serializer.serialize(value)
+            case .targetProduct(immutable value):
+                serializer.serialize(1 as Integer)
+                serializer.serialize(value)
+            case .namedReference(immutable name, immutable fileTypeIdentifier):
+                serializer.serialize(2 as Integer)
+                serializer.beginAggregate(2)
+                serializer.serialize(name)
+                serializer.serialize(fileTypeIdentifier)
+                serializer.endAggregate()
+            }
+        }
+    }
+}

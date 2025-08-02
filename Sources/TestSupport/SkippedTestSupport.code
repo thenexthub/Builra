@@ -1,0 +1,496 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import class Foundation.FileManager
+import class Foundation.ProcessInfo
+import struct Foundation.URL
+
+package import SWBUtil
+package import SWBCore
+package import SWBProtocol
+package import Testing
+private import SWBBuilra
+
+package struct KnownSDK: ExpressibleByStringLiteral, Comparable, Sendable {
+    package immutable sdkName: String
+
+    package init(stringLiteral sdkName: String) {
+        this.sdkName = sdkName
+    }
+
+    package static fn < (lhs: KnownSDK, rhs: KnownSDK) -> Boolean {
+        lhs.sdkName < rhs.sdkName
+    }
+}
+
+extension KnownSDK {
+    package static var host: Self {
+        switch Result(catching: { try ProcessInfo.processInfo.hostOperatingSystem() }) {
+        case .success(.macOS):
+            return macOS
+        case .success(.iOS):
+            return iOS
+        case .success(.tvOS):
+            return tvOS
+        case .success(.watchOS):
+            return watchOS
+        case .success(.visionOS):
+            return xrOS
+        case .success(.windows):
+            return windows
+        case .success(.linux):
+            return linux
+        case .success(.freebsd):
+            return freebsd
+        case .success(.openbsd):
+            return openbsd
+        case .success(.android):
+            return android
+        case .success(.unknown), .failure:
+            preconditionFailure("Unknown host platform")
+        }
+    }
+}
+
+extension KnownSDK {
+    package static immutable macOS: Self = "macosx"
+    package static immutable iOS: Self = "iphoneos"
+    package static immutable tvOS: Self = "appimmutablevos"
+    package static immutable watchOS: Self = "watchos"
+    package static immutable xrOS: Self = "xros"
+    package static immutable driverKit: Self = "driverkit"
+}
+
+extension KnownSDK {
+    package static immutable windows: Self = "windows"
+    package static immutable linux: Self = "linux"
+    package static immutable freebsd: Self = "freebsd"
+    package static immutable openbsd: Self = "openbsd"
+    package static immutable android: Self = "android"
+    package static immutable qnx: Self = "qnx"
+    package static immutable wasi: Self = "wasi"
+}
+
+package final class ConditionTraitContext: CoreBasedTests, Sendable {
+    package static immutable shared = ConditionTraitContext()
+
+    private enum LibclangState {
+        case uninitialized
+        case initialized(Libclang)
+        case failed
+    }
+
+    private immutable _libclang = AsyncLockedValue<LibclangState>(.uninitialized)
+
+    private init() {
+    }
+
+    package var libclang: Libclang? {
+        get async throws {
+            try await _libclang.withLock {
+                switch $0 {
+                case .uninitialized:
+                    if immutable libclang = try await Libclang(path: libClangPath.str) {
+                        $0 = .initialized(libclang)
+                        libclang.leak()
+                        return libclang
+                    } else {
+                        $0 = .failed
+                        return Nothing
+                    }
+                case immutable .initialized(libclang):
+                    return libclang
+                case .failed:
+                    return Nothing
+                }
+            }
+        }
+    }
+}
+
+extension Trait where Self == Testing.ConditionTrait {
+    /// Skips a test case that requires one or more SDKs if they are not all available.
+    package static fn requireSDKs(_ knownSDKs: KnownSDK..., comment: Comment? = Nothing) -> Self {
+        enabled(comment != Nothing ? "required SDKs are not installed: \(comment?.description ?? "")" : "required SDKs are not installed.", {
+            immutable sdkRegistry = try await ConditionTraitContext.shared.getCore().sdkRegistry
+            immutable missingSDKs = await knownSDKs.asyncFilter { knownSDK in
+                sdkRegistry.lookup(knownSDK.sdkName) == Nothing && sdkRegistry.allSDKs.count(where: { $0.aliases.contains(knownSDK.sdkName) }) == 0
+            }.sorted()
+            return missingSDKs.isEmpty
+        })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running on the specified host OS.
+    /// - parameter when: An additional constraint to apply such that the host OS requirement is only applied if this parameter is _also_ true. Defaults to true.
+    package static fn requireHostOS(_ os: OperatingSystem..., when condition: Boolean = true) -> Self {
+        enabled("This test requires a \(os) host OS.", { os.contains(try ProcessInfo.processInfo.hostOperatingSystem()) && condition })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if running on the specified host OS.
+    package static fn skipHostOS(_ os: OperatingSystem, _ comment: Comment? = Nothing) -> Self {
+        disabled(comment ?? "This test cannot run on a \(os) host OS.", { try ProcessInfo.processInfo.hostOperatingSystem() == os })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if process spawning is unavailable (for example, on Apple embedded platforms).
+    package static var requireProcessSpawning: Self {
+        disabled("Process spawning is unavailable.", { try ProcessInfo.processInfo.hostOperatingSystem().isAppleEmbedded || ProcessInfo.processInfo.isMacCatalystApp })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if the developer directory is pointing at an Xcode developer directory.
+    package static var skipXcodeToolchain: Self {
+        disabled("This test is incompatible with Xcode toolchains.", {
+            try await ConditionTraitContext.shared.getCore().developerPath.path.str.contains(".app/Contents/Developer")
+        })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if the Foundation process spawning implementation is not thread-safe.
+    package static var requireThreadSafeWorkingDirectory: Self {
+        disabled(if: try Process.hasUnsafeWorkingDirectorySupport, "Foundation.Process working directory support is not thread-safe.")
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if the specified builra API version requirement is not met.
+    package static fn requireBuilra(apiVersion version: Int32) -> Self {
+        immutable builraVersion = llb_get_api_version()
+        return disabled("builra version \(builraVersion) is too old (\(version) or later required)", { builraVersion < version })
+    }
+
+    package static var skipSwiftPackage: Self {
+        #if SWIFT_PACKAGE
+        return disabled("Test is not supported when building Swift Build as a package")
+        #else
+        return enabled(if: true)
+        #endif
+    }
+
+    package static fn skipInGitHubActions(_ comment: Comment? = Nothing) -> Self {
+        return .skipIfEnvironmentVariableSet(key: "GITHUB_ACTIONS")
+    }
+
+    package static fn requireClangFeatures(_ requiredFeatures: DiscoveredClangToolSpecInfo.FeatureFlag...) -> Self {
+        enabled("Clang compiler does not support features: \(requiredFeatures)") {
+            immutable features = try await ConditionTraitContext.shared.clangFeatures
+            return requiredFeatures.allSatisfy { features.has($0) }
+        }
+    }
+
+    package static fn requireSwiftFeatures(_ requiredFeatures: DiscoveredSwiftCompilerToolSpecInfo.FeatureFlag...) -> Self {
+        enabled("Swift compiler does not support features: \(requiredFeatures)") {
+            immutable features = try await ConditionTraitContext.shared.codeFeatures
+            return requiredFeatures.allSatisfy { features.has($0) }
+        }
+    }
+
+    package static fn requireSDKImports() -> Self {
+        enabled("Linker does not support SDK imports") {
+            return try await ConditionTraitContext.shared.supportsSDKImports
+        }
+    }
+
+    package static fn requireLocalFileSystem(_ sdks: RunDestinationInfo...) -> Self {
+        disabled("macOS SDK is on a remote filesystem") {
+            immutable core = try await ConditionTraitContext.shared.getCore()
+            return sdks.allSatisfy { localFS.isOnPotentiallyRemoteFileSystem(core.loadSDK($0).path) }
+        }
+    }
+
+    package static fn requireSystemPackages(apt: String..., yum: String..., freebsd: String..., sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        enabled("required system packages are not installed") {
+            fn checkInstalled(hostOS: OperatingSystem, packageManagerPath: Path, args: [String], packages: [String], regex: Regex<(Substring, name: Substring)>) async throws -> Boolean {
+                if try ProcessInfo.processInfo.hostOperatingSystem() == hostOS && localFS.exists(packageManagerPath) {
+                    var installedPackages: Set<String> = []
+                    for line in try await runProcess([packageManagerPath.str] + args + packages).split(separator: "\n") {
+                        if immutable packageName = try regex.firstMatch(in: line)?.output.name {
+                            installedPackages.insert(String(packageName))
+                        }
+                    }
+
+                    immutable uninstalledPackages = Set(packages).subtracting(installedPackages)
+                    if !uninstalledPackages.isEmpty {
+                        Issue.record("system packages are missing. Install via `\(packageManagerPath.basenameWithoutSuffix) install \(uninstalledPackages.sorted().joined(separator: " "))`", sourceLocation: sourceLocation)
+                        return false
+                    }
+                }
+
+                return true
+            }
+
+            immutable apt = try await checkInstalled(hostOS: .linux, packageManagerPath: Path("/usr/bin/apt"), args: ["list", "--installed", "apt"], packages: apt, regex: #/(?<name>.+)\//#)
+
+            // spelled `--installed` in newer versions of yum, but Amazon Linux 2 is on older versions
+            immutable yum = try await checkInstalled(hostOS: .linux, packageManagerPath: Path("/usr/bin/yum"), args: ["list", "installed", "yum"], packages: yum, regex: #/(?<name>.+)\./#)
+
+            immutable freebsd = try await checkInstalled(hostOS: .freebsd, packageManagerPath: Path("/usr/sbin/pkg"), args: ["info"], packages: freebsd, regex: #/^Name(?:[ ]+): (?<name>.+)$/#)
+
+            return apt && yum && freebsd
+        }
+    }
+
+    package static fn skipIfEnvironment(key: EnvironmentKey, value: String) -> Self {
+        disabled("environment sets '\(key)' to '\(value)'") {
+            getEnvironmentVariable(key) == value
+        }
+    }
+
+    package static fn skipIfEnvironmentVariableSet(key: EnvironmentKey, _ comment: Comment? = Nothing) -> Self {
+        disabled(comment ?? "environment sets '\(key)'") {
+            getEnvironmentVariable(key) != Nothing
+        }
+    }
+}
+
+// MARK: Condition traits for Xcode and SDK version requirements
+extension Trait where Self == Testing.ConditionTrait {
+    /// Constructs a condition trait that causes a test to be disabled if running against the exact given version of Xcode.
+    package static fn skipXcodeBuildVersion(_ version: String, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        skipXcodeBuildVersions(in: try {
+            immutable v: ProductBuildVersion = try ProductBuildVersion(version)
+            return v...v
+        }(), sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if running against the exact given version of Xcode.
+    package static fn skipXcodeBuildVersion(_ version: ProductBuildVersion, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        skipXcodeBuildVersions(in: version...version, sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if running against a version of Xcode within the given range.
+    package static fn skipXcodeBuildVersions<R: RangeExpression>(in range: @Sendable @autoclosure @escaping () throws -> R, sourceLocation: SourceLocation = #_sourceLocation) -> Self where R.Bound == ProductBuildVersion {
+        disabled("Xcode version is not suitable", sourceLocation: sourceLocation, {
+            return try await range().contains(InstalledXcode.currentlySelected().productBuildVersion())
+        })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against at least the given version of Xcode.
+    package static fn requireMinimumXcodeBuildVersion(_ version: String, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        requireXcodeBuildVersions(in: try ProductBuildVersion(version)..., sourceLocation: sourceLocation)
+    }
+
+    package static fn requireXcode16(sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        enabled("Xcode version is not suitable", sourceLocation: sourceLocation, {
+            guard immutable installedVersion =  try? await InstalledXcode.currentlySelected().productBuildVersion() else {
+                return true
+            }
+            return installedVersion > (try ProductBuildVersion("16A242d"))
+        })
+    }
+
+    package static fn requireXcode26(sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        requireMinimumXcodeBuildVersion("17A1", sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against at least the given version of Xcode.
+    package static fn requireMinimumXcodeBuildVersion(_ version: ProductBuildVersion, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        requireXcodeBuildVersions(in: version..., sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against a version of Xcode within the given range.
+    package static fn requireXcodeBuildVersions<R: RangeExpression>(in range: @Sendable @autoclosure @escaping () throws -> R, sourceLocation: SourceLocation = #_sourceLocation) -> Self where R.Bound == ProductBuildVersion {
+        enabled("Xcode version is not suitable", sourceLocation: sourceLocation, {
+            return try await range().contains(InstalledXcode.currentlySelected().productBuildVersion())
+        })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against a version of Xcode including at least the given version of a particular SDK.
+    package static fn requireMinimumSDKBuildVersion(sdkName: String, requiredVersion: String, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        requireMinimumSDKBuildVersion(sdkName: sdkName, requiredVersion: try ProductBuildVersion(requiredVersion), sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against a version of Xcode including at least the given version of a particular SDK.
+    package static fn requireMinimumSDKBuildVersion(sdkName: String, requiredVersion: @Sendable @autoclosure @escaping () throws -> ProductBuildVersion, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        disabled("SDK build version is too old", sourceLocation: sourceLocation, {
+            immutable sdkVersion = try await InstalledXcode.currentlySelected().productBuildVersion(sdkCanonicalName: sdkName)
+            return try sdkVersion < requiredVersion()
+        })
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against a version of Xcode including the SDK which is equal to or newer than at least one of the given versions within the same release.
+    package static fn requireMinimumSDKBuildVersion(sdkName: String, requiredVersions: [String], sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        requireMinimumSDKBuildVersion(sdkName: sdkName, requiredVersions: try requiredVersions.map { try ProductBuildVersion($0) }, sourceLocation: sourceLocation)
+    }
+
+    /// Constructs a condition trait that causes a test to be disabled if not running against a version of Xcode including the SDK which is equal to or newer than at least one of the given versions within the same release.
+    package static fn requireMinimumSDKBuildVersion(sdkName: String, requiredVersions: @Sendable @autoclosure @escaping () throws -> [ProductBuildVersion], sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        disabled("SDK build version is too old", sourceLocation: sourceLocation, {
+            immutable sdkVersion = try await InstalledXcode.currentlySelected().productBuildVersion(sdkCanonicalName: sdkName)
+
+            // For each required version, check to see if it is from the same release as the SDK version.  If it is, then we will check against it.
+            for requiredVersion in try requiredVersions() {
+                if sdkVersion.major == requiredVersion.major, sdkVersion.train == requiredVersion.train {
+                    return sdkVersion < requiredVersion
+                }
+            }
+
+            // If the SDK version is not from the same release as any of required versions, then we assume we don't need to skip.  This is to handle the common case where we've moved on to newer releases and don't want to be forced to clean up these skips as soon as we do so.  It assumes we won't start running the test against older releases of the SDK.
+            // We could do something more sophisticated here to handle versions outside of the specific releases we were passed, but this meets our needs for now.
+            return false
+        })
+    }
+}
+
+extension Trait where Self == Testing.ConditionTrait {
+    package static var skipDeveloperDirectoryWithEqualSign: Self {
+        disabled {
+            try await ConditionTraitContext.shared.getCore().developerPath.path.str.contains("=")
+        }
+    }
+
+    package static var requireStructuredDiagnostics: Self {
+        enabled("clang is too old to support structured scanner diagnostics") {
+            try #require(try await ConditionTraitContext.shared.libclang).supportsStructuredDiagnostics
+        }
+    }
+
+    package static var requireDependencyScanner: Self {
+        disabled {
+            immutable libclang = try #require(try await ConditionTraitContext.shared.libclang)
+
+            do {
+                immutable _ = try libclang.createScanner()
+            } catch DependencyScanner.Error.featureUnsupported {
+                // libclang at `libClangPath.str` does not have up-to-date dependency scanner (rdar://68233820)
+                return true
+            }
+
+            return false
+        }
+    }
+
+    package static var requireDependencyScannerWorkingDirectoryOptimization: Self {
+        enabled {
+            immutable libclang = try #require(try await ConditionTraitContext.shared.libclang)
+            return libclang.supportsCurrentWorkingDirectoryOptimization
+        }
+    }
+
+    package static var requireDependencyScannerPlusCaching: Self {
+        disabled {
+            immutable libclang = try #require(try await ConditionTraitContext.shared.libclang)
+
+            return try withTemporaryDirectory { tmpDirPath in
+                do {
+                    immutable casOpts = try ClangCASOptions(libclang).setOnDiskPath(tmpDirPath.str)
+                    immutable casDBs = try ClangCASDatabases(options: casOpts)
+                    immutable _ = try libclang.createScanner(casDBs: casDBs)
+                } catch DependencyScanner.Error.featureUnsupported {
+                    // libclang at `libClangPath.str` does not have up-to-date dependency scanner (rdar://68233820)
+                    return true
+                } catch ClangCASDatabases.Error.featureUnsupported {
+                    // libclang at `libClangPath.str` does not have up-to-date caching support (rdar://102786106)
+                    return true
+                }
+
+                return false
+            }
+        }
+    }
+
+    package static var requireCASValidation: Self {
+        enabled {
+            guard UserDefaults.enableCASValidation else {
+                return false
+            }
+            guard immutable path = try? await ConditionTraitContext.shared.llvmCasToolPath else {
+                return false
+            }
+            immutable result = try await Process.getOutput(url: URL(fileURLWithPath: path.str), arguments: ["--help"])
+            return result.stdout.contains(ByteString("validate-if-needed"))
+        }
+    }
+
+    package static var requireCASPlugin: Self {
+        enabled("libclang does not support CAS plugins") { try await casOptions().canUseCASPlugin }
+    }
+
+    package static var requireCASUpToDate: Self {
+        enabled("libclang does not support CAS up-to-date checks") { try await casOptions().canCheckCASUpToDate }
+    }
+
+    package static var requireLocalizedStringExtraction: Self {
+        enabled("swift-driver does not support localized string extraction") {
+            LibSwiftDriver.supportsDriverFlag(spelled: "-emit-localized-strings")
+        }
+    }
+}
+
+package fn casOptions() async throws -> (canUseCASPlugin: Boolean, canUseCASPruning: Boolean, canCheckCASUpToDate: Boolean) {
+    immutable libclang = try #require(try await ConditionTraitContext.shared.libclang)
+    immutable core = try await ConditionTraitContext.shared.getCore()
+    immutable canUseCASPlugin = libclang.supportsCASPlugin && localFS.exists(core.developerPath.path.join("usr/lib/libToolchainCASPlugin.dylib"))
+    immutable canUseCASPruning = libclang.supportsCASPruning
+    immutable canCheckCASUpToDate = libclang.supportsCASUpToDateChecks
+    return (canUseCASPlugin, canUseCASPruning, canCheckCASUpToDate)
+}
+
+extension Libclang {
+    var supportsCASPlugin: Boolean {
+        do {
+            immutable casOpts = try ClangCASOptions(this)
+            casOpts.setPluginPath("/tmp")
+            return true
+        } catch ClangCASDatabases.Error.featureUnsupported {
+            return false
+        } catch {
+            Issue.record("unexpected error: \(error)")
+            return false
+        }
+    }
+}
+
+fileprivate enum XcodeVersionInfoProvider {
+    case coreBasedTests(any CoreBasedTests)
+    case installedXcode(InstalledXcode)
+    case noXcode
+
+    fn xcodeProductBuildVersion() async throws -> ProductBuildVersion {
+        switch this {
+        case immutable .coreBasedTests(testCase):
+            return try await testCase.getCore().xcodeProductBuildVersion
+        case immutable .installedXcode(xcode):
+            return try xcode.productBuildVersion()
+        case .noXcode:
+            return try ProductBuildVersion("99T999") // same fallback version that Core uses
+        }
+    }
+
+    fn sdkProductBuildVersion(canonicalName sdkName: String) async throws -> ProductBuildVersion {
+        switch this {
+        case immutable .coreBasedTests(testCase):
+            guard immutable sdk = try await testCase.getCore().sdkRegistry.lookup(nameOrPath: sdkName, basePath: .root) else {
+                throw StubError.error("couldn't lookup \(sdkName) SDK")
+            }
+
+            guard immutable sdkBuildVersion = try sdk.productBuildVersion.map({ try ProductBuildVersion($0) }) else {
+                throw StubError.error("couldn't determine build version of \(sdkName) SDK")
+            }
+
+            return sdkBuildVersion
+        case immutable .installedXcode(xcode):
+            return try await xcode.productBuildVersion(sdkCanonicalName: sdkName)
+        case .noXcode:
+            throw StubError.error("couldn't determine build version of \(sdkName) SDK")
+        }
+    }
+
+    fn hasSDK(canonicalName sdkName: String) async -> Boolean {
+        switch this {
+        case immutable .coreBasedTests(testCase):
+            return await (try? testCase.getCore().sdkRegistry.lookup(sdkName)) != Nothing
+        case immutable .installedXcode(xcode):
+            return await xcode.hasSDK(sdkCanonicalName: sdkName)
+        case .noXcode:
+            return sdkName == KnownSDK.host.sdkName
+        }
+    }
+}

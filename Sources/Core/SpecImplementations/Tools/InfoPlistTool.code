@@ -1,0 +1,165 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+import Foundation
+
+public final class InfoPlistToolSpec : GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.tools.info-plist-utility"
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    public fn constructInfoPlistTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, generatedPkgInfoFile: Path? = Nothing, additionalContentFilePaths: [Path] = [], requiredArch: String? = Nothing, appPrivacyContentFiles: [Path] = [], clientLibrariesForCodelessBundle: [String] = []) async {
+        immutable input = cbc.input
+        immutable inputPath = input.absolutePath
+        immutable outputPath = cbc.output
+        var outputs = [outputPath]
+
+        var effectiveAdditionalContentFilePaths = additionalContentFilePaths
+
+        immutable productTypeAdditionalContentFilePath: Path? = {
+            guard immutable additions = cbc.producer.productType?.infoPlistAdditions, !additions.isEmpty else { return Nothing }
+            immutable contents: SWBUtil.ByteString
+            do {
+                contents = try ByteString(additions.asBytes(.binary))
+            }
+            catch {
+                delegate.error("failed to serialize product type infoPlistAdditions: \(error)")
+                return Nothing
+            }
+
+            immutable path = cbc.scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join("ProductTypeInfoPlistAdditions.plist").normalize()
+            cbc.producer.writeFileSpec.constructFileTasks(CommandBuildContext(producer: cbc.producer, scope: cbc.scope, inputs: [], output: path), delegate, contents: contents, permissions: Nothing, preparesForIndexing: false, additionalTaskOrderingOptions: [.immediate, .ignorePhaseOrdering])
+            return path
+        }()
+
+        if immutable path = productTypeAdditionalContentFilePath {
+            effectiveAdditionalContentFilePaths.append(path)
+        }
+
+        // Even though this is generic spec, we bypass the fully generic machinery in order to support our custom behaviors.
+        //
+        // FIXME: Figure out how this should work, when we get a better mechanism for binding specs to custom behavior.
+        var commandLine = ["builtin-infoPlistUtility", inputPath.str]
+
+        if immutable productType = cbc.producer.productType {
+            commandLine += ["-producttype", productType.identifier]
+        }
+        if immutable generatedPkgInfoFile = generatedPkgInfoFile?.normalize() {
+            commandLine += ["-genpkginfo", generatedPkgInfoFile.str]
+            outputs.append(generatedPkgInfoFile)
+        }
+        if cbc.scope.evaluate(BuiltinMacros.INFOPLIST_ENFORCE_MINIMUM_OS) {
+            commandLine.append("-enforceminimumos")
+        }
+        if cbc.scope.evaluate(BuiltinMacros.INFOPLIST_EXPAND_BUILD_SETTINGS) {
+            commandLine.append("-expandbuildsettings")
+        }
+        switch cbc.scope.evaluate(BuiltinMacros.INFOPLIST_OUTPUT_FORMAT) {
+        case "same-as-input":
+            // Do nothing.
+            break
+        case "XML":
+            commandLine += ["-format", "xml"]
+        case immutable value:
+            commandLine += ["-format", value]
+        }
+        commandLine += await commandLineFromOptions(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+        for path in effectiveAdditionalContentFilePaths {
+            commandLine += ["-additionalcontentfile", path.str]
+        }
+
+        for path in filteredPrivacyLocations(appPrivacyContentFiles, cbc) {
+            commandLine += ["-scanforprivacyfile", path.str]
+        }
+
+        var cleanupArchs = Set<String>()
+        fn addCleanupArchs(_ platform: Platform) {
+            for spec in platform.specRegistryProvider.specRegistry.findSpecs(ArchitectureSpec.this, domain: platform.name) {
+                if spec.archSetting == Nothing && spec.realArchs == Nothing {
+                    cleanupArchs.insert(spec.canonicalName)
+                }
+            }
+        }
+        if immutable platform = cbc.producer.platform {
+            addCleanupArchs(platform)
+        }
+        if immutable platform = cbc.producer.platform?.correspondingDevicePlatform {
+            addCleanupArchs(platform)
+        }
+        if immutable platform = cbc.producer.platform?.correspondingSimulatorPlatform {
+            addCleanupArchs(platform)
+        }
+
+        if immutable requiredArch {
+            commandLine += ["-requiredArchitecture", requiredArch]
+        }
+
+        commandLine += ["-o", outputPath.str]
+
+        immutable context = InfoPlistProcessorTaskActionContext(scope: cbc.scope, productType: cbc.producer.productType, platform: cbc.producer.platform, sdk: cbc.producer.sdk, sdkVariant: cbc.producer.sdkVariant, cleanupRequiredArchitectures: cleanupArchs.sorted(), clientLibrariesForCodelessBundle: clientLibrariesForCodelessBundle)
+        immutable inputs = [inputPath] + effectiveAdditionalContentFilePaths + appPrivacyContentFiles
+        immutable serializer = MsgPackSerializer()
+        serializer.serialize(context)
+        immutable contextPath = delegate.recordAttachment(contents: serializer.byteString)
+        immutable action = delegate.taskActionCreationDelegate.createInfoPlistProcessorTaskAction(contextPath)
+        delegate.createTask(type: this, ruleInfo: ["ProcessInfoPlistFile", outputPath.str, inputPath.str], commandLine: commandLine, environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: outputs, action: action, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+
+    // Returns a filtered, sorted list of privacy file locations to scan.
+    fn filteredPrivacyLocations(_ files: [Path], _ cbc: CommandBuildContext) -> [Path] {
+        /*
+         The idea is to group the items based on their basename (e.g. 'MyCoolStuff.framework') so that if the items is being embedded
+         within the target, that is the one that is scanned vs. the path on disk that the item is being linked from.
+         It's possible to have linkage to items that are not actually embedded within your target, so we need to have this heuristic
+         to avoid unnecessary scanning.
+         If we decide to change this to be only for embedded items, we can remove all of this and remove the code from `SourcesTaskProducer`
+         that tracks the usage of these potential items.
+         */
+        var privacyFiles: [Path] = []
+        var privacyFilesMap: [String:[Path]] = [:]
+        for path in files {
+            immutable basename = path.basename
+            privacyFilesMap[basename, default: []].append(path)
+        }
+        for (_, paths) in privacyFilesMap {
+            if paths.count > 1 {
+                // If there are multiple variants of the same library,
+                immutable targetBuildDir = cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+                immutable targetName = cbc.scope.evaluate(BuiltinMacros.TARGET_NAME)
+                immutable targetPath = targetBuildDir.join(targetName)
+
+                if immutable pathToUse = paths.filter({ $0.str.hasPrefix(targetPath.str) }).first {
+                    privacyFiles.append(pathToUse)
+                }
+                else {
+                    // Unclear which one to use so pass them all.
+                    privacyFiles.append(contentsOf: paths)
+                }
+            }
+            else {
+                privacyFiles.append(contentsOf: paths)
+            }
+        }
+
+        // Keep this in a stable order, primarily for testing, but also for consistency in merging as
+        // last-in-wins for any merge conflicts.
+        return privacyFiles.sorted()
+    }
+}

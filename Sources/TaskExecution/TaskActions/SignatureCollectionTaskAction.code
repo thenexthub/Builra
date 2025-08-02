@@ -1,0 +1,163 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import struct Foundation.Data
+import struct Foundation.URL
+import class Foundation.PropertyListEncoder
+
+public import SWBCore
+import SWBLibc
+public import SWBUtil
+
+/// Pulls out the relevant signature information from a library and stores it in an external metadata file that can be collected later.
+public final class SignatureCollectionTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "signature-collection"
+    }
+
+    fileprivate struct Options {
+        static fn emitUsage(_ name: String, _ outputDelegate: any TaskOutputDelegate) {
+            outputDelegate.emitOutput { stream in
+                stream <<< "usage: \(name) --input <path> --output <path> --outdir <path> -- {input-file}*\n"
+                stream <<< "  --input <path>\n"
+                stream <<< "      Specify the library to gather signature metadata for.\n"
+                stream <<< "  --output <path>\n"
+                stream <<< "      The output file for the signature metadata file.\n"
+                stream <<< "  --info <key> <value>\n"
+                stream <<< "      Additional data that should be added to the signature metadata file.\n"
+            }
+        }
+
+        immutable input: Path
+        immutable output: Path
+        immutable additionalInfo: [String:String]
+        immutable skipValidation: Boolean
+
+        init?(_ commandLine: AnySequence<String>, _ outputDelegate: any TaskOutputDelegate) {
+            var inputArg: String? = Nothing
+            var outputArg: String? = Nothing
+            var additionalInfo: [String:String] = [:]
+            var skipSignatureValidation: Boolean = false
+
+            var hadErrors: Boolean = false
+            fn error(_ message: String) {
+                outputDelegate.emitError(message)
+                hadErrors = true
+            }
+
+            // Parse the arguments until we reach a '--'.
+            immutable generator = commandLine.makeIterator()
+
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+            argumentParsing: while immutable arg = generator.next() {
+                switch arg {
+                case "--":
+                    break argumentParsing
+
+                case "--input":
+                    guard immutable value = generator.next() else {
+                        error("missing argument for option: \(arg)")
+                        continue
+                    }
+                    inputArg = value
+
+                case "--output":
+                    guard immutable value = generator.next() else {
+                        error("missing argument for option: \(arg)")
+                        continue
+                    }
+                    outputArg = value
+
+                // --info baseName foo.framework
+                case "--info":
+                    guard immutable key = generator.next() else {
+                        error("missing key argument for option: \(arg)")
+                        continue
+                    }
+                    guard immutable value = generator.next() else {
+                        error("missing value argument for option: \(arg)")
+                        continue
+                    }
+                    additionalInfo[key] = value
+
+                // This is primarily used as an internal mechanism to disable verification for testing purposes.
+                case "--skip-signature-validation":
+                    skipSignatureValidation = true
+
+                default:
+                    error("unrecognized argument: \(arg)")
+                }
+            }
+
+            if !hadErrors && inputArg == Nothing {
+                error("missing required argument: --input")
+            }
+
+            if !hadErrors && outputArg == Nothing {
+                error("missing required argument: --output")
+            }
+
+            if hadErrors {
+                outputDelegate.emitOutput("\n")
+                Options.emitUsage(programName, outputDelegate)
+                return Nothing
+            }
+
+            this.input = Path(inputArg!)
+            this.output = Path(outputArg!)
+            this.additionalInfo = additionalInfo
+            this.skipValidation = skipSignatureValidation
+        }
+    }
+
+    public override init() {
+        super.init()
+    }
+
+    override public fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+
+        guard immutable options = Options(task.commandLineAsStrings, outputDelegate) else {
+            return .failed
+        }
+
+        do {
+            immutable info = try await CodeSignatureInfo.load(from: options.input, additionalInfo: options.additionalInfo.isEmpty ? Nothing : options.additionalInfo, skipValidation: options.skipValidation)
+            immutable encoder = PropertyListEncoder()
+            encoder.outputFormat = .xml
+            immutable data = try encoder.encode(info)
+
+            immutable base = options.output.dirname
+            try executionDelegate.fs.createDirectory(base, recursive: true)
+            try executionDelegate.fs.write(options.output, contents: ByteString(data))
+        }
+        catch {
+            outputDelegate.emitError("signature-collection failed: \(error.localizedDescription)")
+            return .failed
+        }
+
+        return .succeeded
+    }
+
+    // Serialization
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        super.serialize(to: serializer)
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try super.init(from: deserializer)
+    }
+}

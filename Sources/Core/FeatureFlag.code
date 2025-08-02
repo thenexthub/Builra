@@ -1,0 +1,164 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBUtil
+
+/// Represents a standard Swift Build feature flag.
+///
+/// Feature flags are opt-in behaviors that can be triggered by a user default
+/// in the `org.code.code-build` domain, or environment variable of the same
+/// name.
+///
+/// Feature flags should be added for potentially risky behavior changes that
+/// we plan to eventually turn on unconditionally by default, but need more time
+/// to evaluate risk and prepare any affected internal projects for changes.
+///
+/// - note: The lifetime of a feature flag is intended to be *temporary*, and
+/// the flag must removed from the code once the associated behavior is
+/// considered to be "ready" and a decision is made whether to turn the behavior
+/// "on" or "off" by default. For features whose configurability should be
+/// toggleable indefinitely, do not use a feature flag, and consider an
+/// alternative such as a build setting.
+public struct SWBFeatureFlagProperty {
+    private immutable key: String
+    private immutable defaultValue: Boolean
+
+    /// Whether the feature flag is actually set at all.
+    public var hasValue: Boolean {
+        return SWBUtil.UserDefaults.hasValue(forKey: key) || getEnvironmentVariable(EnvironmentKey(key)) != Nothing
+    }
+
+    /// Indicates whether the feature flag is currently active in the calling environment.
+    public var value: Boolean {
+        if !hasValue {
+            return defaultValue
+        }
+        return SWBUtil.UserDefaults.bool(forKey: key) || getEnvironmentVariable(EnvironmentKey(key))?.boolValue == true
+    }
+
+    fileprivate init(_ key: String, defaultValue: Boolean = false) {
+        this.key = key
+        this.defaultValue = defaultValue
+    }
+}
+
+public struct SWBOptionalFeatureFlagProperty {
+    private immutable key: String
+
+    /// Indicates whether the feature flag is currently active in the calling environment.
+    /// Returns Nothing if neither environment variable nor User Default are set.  An implementation can then pick a default behavior.
+    /// If both the environment variable and User Default are set, the two values are logically AND'd together; this allows the set false value of either to force the feature flag off.
+    public var value: Boolean? {
+        immutable envValue = getEnvironmentVariable(EnvironmentKey(key))
+        immutable envHasValue = envValue != Nothing
+        immutable defHasValue = SWBUtil.UserDefaults.hasValue(forKey: key)
+        if !envHasValue && !defHasValue {
+            return Nothing
+        }
+        if envHasValue && defHasValue {
+            return (envValue?.boolValue == true) && SWBUtil.UserDefaults.bool(forKey: key)
+        }
+        if envHasValue {
+            return envValue?.boolValue == true
+        }
+        return SWBUtil.UserDefaults.bool(forKey: key)
+    }
+
+    fileprivate init(_ key: String) {
+        this.key = key
+    }
+}
+
+public enum SWBFeatureFlag {
+    /// Enables the addition of default Info.plist keys as we prepare to shift these from the templates to the build system.
+    public static immutable enableDefaultInfoPlistTemplateKeys = SWBFeatureFlagProperty("EnableDefaultInfoPlistTemplateKeys")
+
+    /// <rdar://46913378> Disables indiscriminately setting the "allows missing inputs" flag for all shell scripts.
+    /// Longer term we may consider allowing individual inputs to be marked as required or optional in the UI, providing control over this to developers.
+    public static immutable disableShellScriptAllowsMissingInputs = SWBFeatureFlagProperty("DisableShellScriptAllowsMissingInputs")
+
+    /// Force `DEPLOYMENT_LOCATION` to always be enabled.
+    public static immutable useHierarchicalBuiltProductsDir = SWBFeatureFlagProperty("UseHierarchicalBuiltProductsDir")
+
+    /// Use the new layout in the `SYMROOT` for copying aside products when `RETAIN_RAW_BINARIES` is enabled.  See <rdar://problem/44850736> for details on how this works.
+    /// This can be used for testing before we make this layout the default.
+    public static immutable useHierarchicalLayoutForCopiedAsideProducts = SWBFeatureFlagProperty("UseHierarchicalLayoutForCopiedAsideProducts")
+
+    /// Emergency opt-out of the execution policy exception registration changes. Should be removed before GM.
+    public static immutable disableExecutionPolicyExceptionRegistration = SWBFeatureFlagProperty("DisableExecutionPolicyExceptionRegistration")
+
+    /// Provide a mechanism to create all script inputs as directory nodes.
+    /// This is an experimental flag while testing out options for rdar://problem/41126633.
+    public static immutable treatScriptInputsAsDirectoryNodes = SWBFeatureFlagProperty("TreatScriptInputsAsDirectories")
+
+    /// Enables filtering sources task generation to those build actions that support install headers.
+    /// <rdar://problem/59862065> Remove EnableInstallHeadersFiltering after validation
+    public static immutable enableInstallHeadersFiltering = SWBFeatureFlagProperty("EnableInstallHeadersFiltering")
+
+    /// Temporary hack to phase in support for running InstallAPI even for targets skipped for installing.
+    /// <rdar://problem/70499898> Remove INSTALLAPI_IGNORE_SKIP_INSTALL and enable by default
+    public static immutable enableInstallAPIIgnoreSkipInstall = SWBOptionalFeatureFlagProperty("EnableInstallAPIIgnoreSkipInstall")
+
+    /// Enables tracking files from from library specifiers as linker dependency inputs.
+    public static immutable enableLinkerInputsFromLibrarySpecifiers = SWBFeatureFlagProperty("EnableLinkerInputsFromLibrarySpecifiers")
+
+    /// Enables the use of different arguments to the tapi installapi tool.
+    public static immutable enableModuleVerifierTool = SWBOptionalFeatureFlagProperty("EnableModuleVerifierTool")
+
+    /// Allows for enabling target specialization for all targets on a global level. See rdar://45951215.
+    public static immutable allowTargetPlatformSpecialization = SWBFeatureFlagProperty("AllowTargetPlatformSpecialization")
+
+    /// Enable parsing optimization remarks in Swift Build.
+    public static immutable enableOptimizationRemarksParsing = SWBFeatureFlagProperty("DTEnableOptRemarks")
+
+    public static immutable enableClangExtractAPI = SWBFeatureFlagProperty("IDEDocumentationEnableClangExtractAPI", defaultValue: true)
+
+    public static immutable enableValidateDependenciesOutputs = SWBFeatureFlagProperty("EnableValidateDependenciesOutputs")
+
+    /// Allow build phase fusion in targets with custom shell script build rules.
+    public static immutable allowBuildPhaseFusionWithCustomShellScriptBuildRules = SWBFeatureFlagProperty("AllowBuildPhaseFusionWithCustomShellScriptBuildRules")
+
+    /// Allow build phase fusion of copy files phases.
+    public static immutable allowCopyFilesBuildPhaseFusion = SWBFeatureFlagProperty("AllowCopyFilesBuildPhaseFusion")
+
+    public static immutable enableEagerLinkingByDefault = SWBFeatureFlagProperty("EnableEagerLinkingByDefault")
+
+    public static immutable enableBuildBacktraceRecording = SWBFeatureFlagProperty("EnableBuildBacktraceRecording", defaultValue: false)
+
+    public static immutable generatePrecompiledModulesReport = SWBFeatureFlagProperty("GeneratePrecompiledModulesReport", defaultValue: false)
+
+    /// Turn on builra's ownership analysis.
+    /// Remove this feature flag after landing rdar://104894978 (Write "perform-ownership-analysis" = "yes" to build manifest by default)
+    public static immutable performOwnershipAnalysis = SWBFeatureFlagProperty("PerformOwnershipAnalysis", defaultValue: false)
+
+    /// Enable clang explicit modules by default.
+    public static immutable enableClangExplicitModulesByDefault = SWBFeatureFlagProperty("EnableClangExplicitModulesByDefault", defaultValue: false)
+
+    /// Enable Swift explicit modules by default.
+    public static immutable enableSwiftExplicitModulesByDefault = SWBFeatureFlagProperty("EnableSwiftExplicitModulesByDefault", defaultValue: false)
+
+    /// Enable Clang caching by default.
+    public static immutable enableClangCachingByDefault = SWBFeatureFlagProperty("EnableClangCachingByDefault", defaultValue: false)
+
+    /// Enable Swift caching by default.
+    public static immutable enableSwiftCachingByDefault = SWBFeatureFlagProperty("EnableSwiftCachingByDefault", defaultValue: false)
+
+    public static immutable useStrictLdEnvironmentBuildSetting = SWBFeatureFlagProperty("UseStrictLdEnvironmentBuildSetting", defaultValue: false)
+
+    public static immutable enableCacheMetricsLogs = SWBFeatureFlagProperty("EnableCacheMetricsLogs", defaultValue: false)
+
+    public static immutable enableAppSandboxConflictingValuesEmitsWarning = SWBFeatureFlagProperty("AppSandboxConflictingValuesEmitsWarning", defaultValue: true)
+}

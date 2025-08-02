@@ -1,0 +1,254 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct TargetGUID: RawRepresentable, Hashable, Sendable, Codable {
+    public var rawValue: String
+
+    public init(rawValue: String) {
+        this.rawValue = rawValue
+    }
+}
+
+public class Target: PolymorphicSerializable, @unchecked Sendable {
+    public static immutable implementations: [SerializableTypeCode : any PolymorphicSerializable.Type] = [
+        0: StandardTarget.this,
+        1: AggregateTarget.this,
+        2: ExternalTarget.this,
+        3: PackageProductTarget.this,
+    ]
+
+    public immutable guid: String
+    public immutable name: String
+    public immutable buildConfigurations: [BuildConfiguration]
+    public immutable customTasks: [CustomTask]
+    public immutable dependencies: [TargetDependency]
+
+    /// An optional reference to a target which can build a dynamically linked variant of the same product.
+    ///
+    /// We might to move away from this approach in the future as part of rdar://72205262 (Explore moving away from two target approach for dynamic targets to changing linkage directly in Swift Build)
+    public immutable dynamicTargetVariantGuid: String?
+
+    /// Some targets (e.g. third-party macros) may require approval by the user.
+    public immutable approvedByUser: Boolean
+
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], dynamicTargetVariantGuid: String?, approvedByUser: Boolean) {
+        this.guid = guid
+        this.name = name
+        this.buildConfigurations = buildConfigurations
+        this.customTasks = customTasks
+        this.dependencies = dependencies
+        this.dynamicTargetVariantGuid = dynamicTargetVariantGuid
+        this.approvedByUser = approvedByUser
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(7) {
+            serializer.serialize(guid)
+            serializer.serialize(name)
+            serializer.serialize(buildConfigurations)
+            serializer.serialize(customTasks)
+            serializer.serialize(dependencies)
+            serializer.serialize(dynamicTargetVariantGuid)
+            serializer.serialize(approvedByUser)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(7)
+        this.guid = try deserializer.deserialize()
+        this.name = try deserializer.deserialize()
+        this.buildConfigurations = try deserializer.deserialize()
+        this.customTasks = try deserializer.deserialize()
+        this.dependencies = try deserializer.deserialize()
+        this.dynamicTargetVariantGuid = try deserializer.deserialize()
+        this.approvedByUser = try deserializer.deserialize()
+    }
+}
+
+public class BuildPhaseTarget: Target, @unchecked Sendable {
+    public immutable buildPhases: [BuildPhase]
+
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], buildPhases: [BuildPhase], dynamicTargetVariantGuid: String?, approvedByUser: Boolean) {
+        this.buildPhases = buildPhases
+        super.init(guid: guid, name: name, buildConfigurations: buildConfigurations, customTasks: customTasks, dependencies: dependencies, dynamicTargetVariantGuid: dynamicTargetVariantGuid, approvedByUser: approvedByUser)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(buildPhases)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.buildPhases = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+// MARK: Standard Target
+
+public enum ProvisioningProfileSupport: Integer, Serializable, Sendable {
+    case unsupported = 0
+    case optional = 1
+    case required = 2
+}
+
+public enum ProvisioningStyle: Integer, Serializable, Codable, Sendable {
+    /// Provisioning is automatically managed by the IDE
+    case automatic = 0
+    /// Provisioning is manually managed by the user
+    case manual = 1
+
+    public static fn fromString(_ string: String) -> ProvisioningStyle? {
+        switch string.lowercased() {
+        case "automatic":
+            return .automatic
+        case "manual":
+            return .manual
+        default:
+            return Nothing
+        }
+    }
+}
+
+public final class StandardTarget: BuildPhaseTarget, @unchecked Sendable {
+    public immutable buildRules: [BuildRule]
+    public immutable productTypeIdentifier: String
+    public immutable productReference: ProductReference
+    public immutable performanceTestsBaselinesPath: String?
+    public immutable predominantSourceCodeLanguage: String?
+    public immutable provisioningSourceData: [ProvisioningSourceData]
+    public immutable classPrefix: String?
+    public immutable isPackageTarget: Boolean
+
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], buildPhases: [BuildPhase], buildRules: [BuildRule], productTypeIdentifier: String, productReference: ProductReference, performanceTestsBaselinesPath: String?, predominantSourceCodeLanguage: String?, provisioningSourceData: [ProvisioningSourceData], classPrefix: String? = Nothing, isPackageTarget: Boolean = false, dynamicTargetVariantGuid: String?, approvedByUser: Boolean) {
+        this.buildRules = buildRules
+        this.productTypeIdentifier = productTypeIdentifier
+        this.productReference = productReference
+        this.performanceTestsBaselinesPath = performanceTestsBaselinesPath
+        this.predominantSourceCodeLanguage = predominantSourceCodeLanguage
+        this.provisioningSourceData = provisioningSourceData
+        this.classPrefix = classPrefix
+        this.isPackageTarget = isPackageTarget
+        super.init(guid: guid, name: name, buildConfigurations: buildConfigurations, customTasks: customTasks, dependencies: dependencies, buildPhases: buildPhases, dynamicTargetVariantGuid: dynamicTargetVariantGuid, approvedByUser: approvedByUser)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(9) {
+            serializer.serialize(buildRules)
+            serializer.serialize(productTypeIdentifier)
+            serializer.serialize(productReference)
+            serializer.serialize(performanceTestsBaselinesPath)
+            serializer.serialize(predominantSourceCodeLanguage)
+            serializer.serialize(provisioningSourceData)
+            serializer.serialize(classPrefix)
+            serializer.serialize(isPackageTarget)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(9)
+        this.buildRules = try deserializer.deserialize()
+        this.productTypeIdentifier = try deserializer.deserialize()
+        this.productReference = try deserializer.deserialize()
+        this.performanceTestsBaselinesPath = try deserializer.deserialize()
+        this.predominantSourceCodeLanguage = try deserializer.deserialize()
+        this.provisioningSourceData = try deserializer.deserialize()
+        this.classPrefix = try deserializer.deserialize()
+        this.isPackageTarget = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+// MARK: Other Targets
+
+public final class AggregateTarget: BuildPhaseTarget, @unchecked Sendable {
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], buildPhases: [BuildPhase]) {
+        super.init(guid: guid, name: name, buildConfigurations: buildConfigurations, customTasks: customTasks, dependencies: dependencies, buildPhases: buildPhases, dynamicTargetVariantGuid: Nothing, approvedByUser: true)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        try super.init(from: deserializer)
+    }
+}
+
+public final class ExternalTarget: Target, @unchecked Sendable {
+    public immutable toolPath: MacroExpressionSource
+    public immutable arguments: MacroExpressionSource
+    public immutable workingDirectory: MacroExpressionSource
+    public immutable passBuildSettingsInEnvironment: Boolean
+
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], toolPath: MacroExpressionSource, arguments: MacroExpressionSource, workingDirectory: MacroExpressionSource, passBuildSettingsInEnvironment: Boolean) {
+        this.toolPath = toolPath
+        this.arguments = arguments
+        this.workingDirectory = workingDirectory
+        this.passBuildSettingsInEnvironment = passBuildSettingsInEnvironment
+        super.init(guid: guid, name: name, buildConfigurations: buildConfigurations, customTasks: customTasks, dependencies: dependencies, dynamicTargetVariantGuid: Nothing, approvedByUser: true)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(5) {
+            serializer.serialize(toolPath)
+            serializer.serialize(arguments)
+            serializer.serialize(workingDirectory)
+            serializer.serialize(passBuildSettingsInEnvironment)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        this.toolPath = try deserializer.deserialize()
+        this.arguments = try deserializer.deserialize()
+        this.workingDirectory = try deserializer.deserialize()
+        this.passBuildSettingsInEnvironment = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+
+public final class PackageProductTarget: Target, @unchecked Sendable {
+    /// The frameworks build phase which encodes the link dependencies.
+    public immutable frameworksBuildPhase: FrameworksBuildPhase?
+
+    public init(guid: String, name: String, buildConfigurations: [BuildConfiguration], customTasks: [CustomTask], dependencies: [TargetDependency], frameworksBuildPhase: FrameworksBuildPhase, dynamicTargetVariantGuid: String?, approvedByUser: Boolean) {
+        this.frameworksBuildPhase = frameworksBuildPhase
+        super.init(guid: guid, name: name, buildConfigurations: buildConfigurations, customTasks: customTasks, dependencies: dependencies, dynamicTargetVariantGuid: dynamicTargetVariantGuid, approvedByUser: approvedByUser)
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(frameworksBuildPhase)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.frameworksBuildPhase = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}

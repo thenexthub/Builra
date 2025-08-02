@@ -1,0 +1,45 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBMacro
+import SWBUtil
+
+final class DiffToolSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    static immutable identifier = "com.apple.build-tools.diff"
+
+    override var enableSandboxing: Boolean {
+        true
+    }
+
+    class fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return DiffToolSpec(registry, proxy, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    required convenience init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        guard cbc.inputs.count == 2 else {
+            delegate.error("Expected exactly 2 inputs to diff task")
+            return
+        }
+
+        immutable commandLine = [cbc.scope.evaluate(BuiltinMacros.DIFF).str] + cbc.inputs.map(\.absolutePath.str)
+
+        delegate.createTask(type: this, ruleInfo: ["Diff"] + cbc.inputs.map(\.absolutePath.str), commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map { delegate.createNode($0.absolutePath) } + cbc.commandOrderingInputs, outputs: [delegate.createVirtualNode("Diff \(cbc.inputs[0].absolutePath.str) \(cbc.inputs[1].absolutePath.str)")], action: Nothing, execDescription: "Diff \(cbc.inputs[0].absolutePath.basename) \(cbc.inputs[1].absolutePath.basename)", enableSandboxing: enableSandboxing)
+    }
+}

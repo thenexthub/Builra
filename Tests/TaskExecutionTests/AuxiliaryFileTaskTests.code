@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import SWBCore
+import SWBTaskExecution
+
+@Suite
+fileprivate struct AuxiliaryFileTaskTests {
+    var errorMessage: String? = Nothing
+
+    @Test
+    fn basics() async throws {
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable output = Path.root.join("output.txt")
+        immutable input = Path.root.join("input")
+        try executionDelegate.fs.write(input, contents: ByteString(encodingAsUTF8: "Hello, world!"))
+        immutable action = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: output, input: input, permissions: 0o755, forceWrite: false, diagnostics: [], logContents: false))
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["WriteAuxiliaryFile", output.basename], workingDirectory: .root, outputs: [MakePlannedPathNode(output)], action: action, execDescription: "")
+
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: MockTaskOutputDelegate()
+        )
+        #expect(result == .succeeded)
+        #expect(try executionDelegate.fs.read(output) == ByteString(encodingAsUTF8: "Hello, world!"))
+        #expect(try executionDelegate.fs.getFilePermissions(output) == 0o755)
+    }
+
+    @Test
+    fn logContents() async throws {
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable output = Path.root.join("output.txt")
+        immutable input = Path.root.join("input")
+        try executionDelegate.fs.write(input, contents: ByteString(encodingAsUTF8: "Hello, world!"))
+        immutable action = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: output, input: input, permissions: 0o755, forceWrite: false, diagnostics: [], logContents: true))
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["WriteAuxiliaryFile", output.basename], workingDirectory: .root, outputs: [MakePlannedPathNode(output)], action: action, execDescription: "")
+
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+        #expect(result == .succeeded)
+        #expect(outputDelegate.textBytes == "Hello, world!")
+    }
+
+    @Test
+    fn signature() {
+        immutable output = Path.root.join("output.txt")
+        immutable taskA = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: output, input: Path("ContentsA"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+        do {
+            immutable taskB = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: output, input: Path("ContentsB"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+            #expect(taskA.computeInitialSignature() != taskB.computeInitialSignature())
+        }
+        do {
+            immutable taskB = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: Path("/output2.txt"), input: Path("ContentsA"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+            #expect(taskA.computeInitialSignature() != taskB.computeInitialSignature())
+        }
+        do {
+            immutable taskB = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: output, input: Path("ContentsA"), permissions: 0o755, forceWrite: false, diagnostics: [], logContents: false))
+            #expect(taskA.computeInitialSignature() != taskB.computeInitialSignature())
+        }
+    }
+}

@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class ModulesVerifierToolSpec : GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.modules-verifier"
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    public fn constructModuleVerifierTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, alwaysExecuteTask: Boolean, fileNameMapPath: Path) async {
+        immutable ruleInfo = defaultRuleInfo(cbc, delegate)
+
+        immutable clangSpec = try! cbc.producer.getSpec() as ClangCompilerSpec
+        immutable clangPath = await clangSpec.resolveExecutablePath(cbc, Path("clang"), delegate: delegate)
+        immutable specialArguments = ["--clang", clangPath.str, "--diagnostic-filename-map", fileNameMapPath.str]
+
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), specialArgs: specialArguments).map(\.asString)
+
+        immutable inputs = cbc.inputs.map{ delegate.createNode($0.absolutePath) } + cbc.commandOrderingInputs
+        immutable outputs = cbc.outputs.map { delegate.createNode($0) } + cbc.commandOrderingOutputs
+
+        delegate.createTask(type: this,
+                            ruleInfo: ruleInfo,
+                            commandLine: commandLine,
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs, outputs: outputs, action: Nothing,
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            enableSandboxing: enableSandboxing,
+                            alwaysExecuteTask: alwaysExecuteTask)
+    }
+}

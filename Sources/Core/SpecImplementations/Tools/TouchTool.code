@@ -1,0 +1,56 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+
+final class TouchToolSpec : CommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    static immutable identifier = "com.apple.tools.touch"
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.input
+
+        // FIXME: Declare a virtual output, or something. We need to deal with the mutating nature of this task. We currently just don't declare any inputs and outputs, but this command won't run in sequence properly.
+        // For now, treat the touch output as an arbitrary virtual node until we have real support for representing this.
+        //
+        // FIXME: This is just broken, but it at least allows the task to run.
+        immutable outputs = [delegate.createVirtualNode("Touch \(input.absolutePath.str)")]
+
+        // Helper method to override the OutputFile macro with the input file, since touch commands do not declare an output.
+        // FIXME: rdar://57299916 remove this helper method once OutputFile and OutputPath are standardized into a single macro.
+        fn outputFileOverride(_ macro: MacroDeclaration) -> MacroExpression? {
+            switch macro {
+            case BuiltinMacros.OutputFile, BuiltinMacros.OutputPath:
+                return cbc.scope.table.namespace.parseLiteralString(input.absolutePath.str)
+            default:
+                return Nothing
+            }
+        }
+
+        immutable commandLine: [String]
+        if cbc.producer.hostOperatingSystem == .windows {
+            guard immutable commandShellPath = getEnvironmentVariable("ComSpec") else {
+                delegate.error("Can't determine path to cmd.exe because the ComSpec environment variable is not set")
+                return
+            }
+            // FIXME: Need to properly quote the path here, or generally handle this better
+            commandLine = [commandShellPath, "/c", "copy /b \"\(input.absolutePath.str)\" +,,"]
+        } else {
+            commandLine = ["/usr/bin/touch", "-c", input.absolutePath.str]
+        }
+
+        delegate.createTask(type: this, ruleInfo: ["Touch", input.absolutePath.str], commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [delegate.createNode(input.absolutePath)], outputs: outputs, mustPrecede: [], action: delegate.taskActionCreationDelegate.createDeferredExecutionTaskActionIfRequested(userPreferences: cbc.producer.userPreferences), execDescription: resolveExecutionDescription(cbc, delegate, lookup: outputFileOverride), enableSandboxing: enableSandboxing)
+    }
+}

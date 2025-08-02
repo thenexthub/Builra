@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Author: kenton@google.com (Kenton Varda)
+
+syntax = "proto2";
+
+package protobuf_unittest.no_generic_services_test;
+
+
+// *_generic_services are false by default.
+
+message TestMessage {
+  optional int32 a = 1;
+  extensions 1000 to max;
+}
+
+enum TestEnum {
+  FOO = 1;
+}
+
+extend TestMessage {
+  optional int32 test_extension = 1000;
+}
+
+service TestService {
+  rpc Foo(TestMessage) returns (TestMessage);
+}

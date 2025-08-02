@@ -1,0 +1,62 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Name = "DAE files";
+        Type = FileType;
+        Identifier = "text.xml.dae";
+        BasedOn = "text.xml";
+        Extensions = (
+            dae,
+        );
+        AppliesToBuildRules = YES;
+        UTI = "org.khronos.collada.digital-asset-exchange";
+    },
+    {
+        Name = "SceneKit Particle System Document";
+        Type = FileType;
+        Identifier = "file.scp";
+        BasedOn = file;
+        Extensions = (
+            scnp,
+        );
+        UTI = "com.apple.scenekit.particlesystem";
+    },
+    {
+        Name = "SceneKit Asset Catalog";
+        Type = FileType;
+        Identifier = "wrapper.scnassets";
+        BasedOn = wrapper;
+        IsWrapperFolder = YES;
+        IsTransparent = YES;
+        Extensions = (
+            scnassets,
+        );
+        UTI = "com.apple.scenekit.assetcatalog";
+    },
+    {
+        Name = "SceneKit shader cache";
+        Type = FileType;
+        Identifier = "wrapper.scncache";
+        BasedOn = wrapper;
+        IsWrapperFolder = YES;
+        IsTransparent = YES;
+        Extensions = (
+            scncache,
+        );
+        UTI = "com.apple.scenekit.shadercache";
+    },
+)

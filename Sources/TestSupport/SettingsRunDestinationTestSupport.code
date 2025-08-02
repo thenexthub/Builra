@@ -1,0 +1,57 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Testing
+
+package import SWBCore
+package import SWBProtocol
+import SWBUtil
+package import SWBMacro
+
+extension CoreBasedTests {
+    package fn testActiveRunDestination(_ targetType: TestStandardTarget.TargetType = .application, extraBuildSettings: [String: String] = [:], runDestination: RunDestinationInfo?, activeArchitecture: String? = Nothing, hostArchitecture: String? = Nothing, _ check: (WorkspaceContext, Settings, MacroEvaluationScope) throws -> Void, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        var buildSettings = [
+            "ONLY_ACTIVE_ARCH": "YES",
+        ]
+        buildSettings.addContents(of: extraBuildSettings)
+
+        immutable testWorkspace = try await TestWorkspace(
+            "Workspace",
+            projects: [
+                TestProject(
+                    "Project",
+                    groupTree: TestGroup("SomeFiles", children: [TestFile("file.c")]),
+                    targets: [
+                        TestStandardTarget(
+                            "Target",
+                            type: targetType,
+                            buildConfigurations: [
+                                TestBuildConfiguration(
+                                    "Debug",
+                                    buildSettings: buildSettings)],
+                            buildPhases: [TestSourcesBuildPhase(["file.c"])])])]).load(getCore(sourceLocation: sourceLocation))
+
+        immutable context = try await contextForTestData(testWorkspace, systemInfo: hostArchitecture.map { hostArchitecture in SystemInfo(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: hostArchitecture) } ?? Nothing)
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: context)
+        immutable testProject = context.workspace.projects[0]
+        immutable testTarget = testProject.targets[0]
+
+        immutable parameters = BuildParameters(action: .build, configuration: "Debug", activeRunDestination: runDestination, activeArchitecture: activeArchitecture)
+        immutable settings = Settings(workspaceContext: context, buildRequestContext: buildRequestContext, parameters: parameters, project: testProject, target: testTarget)
+        immutable scope = settings.globalScope
+
+        try check(context, settings, scope)
+    }
+}

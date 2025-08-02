@@ -1,0 +1,225 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBProtocol
+public import SWBUtil
+public import SWBMacro
+
+/// Reference subclasses which can be represented by a build file must adopt the BuildFileRepresentable protocol.
+public protocol BuildFileRepresentable: AnyObject
+{
+}
+
+public typealias HeaderVisibility = SWBProtocol.BuildFile.HeaderVisibility
+
+public typealias MigCodegenFiles = SWBProtocol.BuildFile.MigCodegenFiles
+
+public typealias IntentsCodegenVisibility = SWBProtocol.BuildFile.IntentsCodegenVisibility
+
+public typealias ResourceRule = SWBProtocol.BuildFile.ResourceRule
+
+/// A build file represents an individual item in a build phase.
+///
+/// The majority of build files are simple associations to a file reference in the project. However, they can include additional data to alter the role of the build file, often depending on the exact phase they are contained within.
+//
+// FIXME: This should probably be a simple struct, and be more optimized for the common case (to optimize memory use).
+public final class BuildFile: ProjectModelItem {
+    /// Build files can refer to either regular items in the group tree
+    /// (specifically, file references or variant/version groups), *or* they can
+    /// refer to product references.
+    ///
+    /// Product references need to be handled specially, since they may cross
+    /// target and project boundaries, so we model this distinction explicitly.
+    public enum BuildableItem: Hashable, SerializableCodable, Sendable {
+        /// A file like reference type.
+        case reference(guid: String)
+
+        /// A product reference, identified by the GUID of the `StandardTarget` whose product it is.
+        case targetProduct(guid: String)
+
+        /// A reference by name.
+        case namedReference(name: String, fileTypeIdentifier: String)
+    }
+
+    public immutable guid: String
+
+    /// The buildable item the build file refers to.
+    public immutable buildableItem: BuildableItem
+
+    /// The header visibility, if specified.
+    public immutable headerVisibility: HeaderVisibility?
+
+    /// Additional user-specified command line arguments to pass to the build tool, if specified.  May contain build setting references.
+    public immutable additionalArgs: MacroStringListExpression?
+
+    /// Whether the asset should be decompressed (used only by SceneKit).
+    public immutable decompress: Boolean
+
+    /// The type of Mig interfaces to generate, if specified.
+    public immutable migCodegenFiles: MigCodegenFiles?
+
+    /// Whether to generate interfaces for intents files
+    public immutable intentsCodegenVisibility: IntentsCodegenVisibility
+
+    /// The rule for processing this build file as a resource.
+    public immutable resourceRule: ResourceRule
+
+    /// Whether to code sign the file, if copied.
+    public immutable codeSignOnCopy: Boolean
+
+    /// Whether to remove header from the file (directory), if copies.
+    public immutable removeHeadersOnCopy: Boolean
+
+    /// Whether to link weakly, for linking build files.
+    public immutable shouldLinkWeakly: Boolean
+
+    /// On Demand Resources asset tags
+    public immutable assetTags: Set<String>
+
+    /// The set of platforms to filter on.
+    public immutable platformFilters: Set<PlatformFilter>
+
+    /// Whether to skip the "no rule to process file..." warning for this file.
+    public immutable shouldWarnIfNoRuleToProcess: Boolean
+
+    init(_ model: SWBProtocol.BuildFile, _ pifLoader: PIFLoader)
+    {
+        guid = model.guid
+        codeSignOnCopy = model.codeSignOnCopy
+        removeHeadersOnCopy = model.removeHeadersOnCopy
+        shouldLinkWeakly = model.shouldLinkWeakly
+        headerVisibility = model.headerVisibility
+        additionalArgs = model.additionalArgs.map{ pifLoader.userNamespace.parseStringList($0) }
+        decompress = model.decompress
+        migCodegenFiles = model.migCodegenFiles
+        assetTags = model.assetTags
+        intentsCodegenVisibility = model.intentsCodegenVisibility
+        resourceRule = model.resourceRule
+        platformFilters = Set(model.platformFilters.map{ SWBCore.PlatformFilter($0, pifLoader) })
+        shouldWarnIfNoRuleToProcess = model.shouldWarnIfNoRuleToProcess
+
+        switch model.buildableItemGUID {
+        case .reference(immutable guid):
+            buildableItem = .reference(guid: guid)
+        case .targetProduct(immutable guid):
+            buildableItem = .targetProduct(guid: guid)
+        case .namedReference(immutable name, immutable fileTypeIdentifier):
+            buildableItem = .namedReference(name: name, fileTypeIdentifier: fileTypeIdentifier)
+        }
+    }
+
+    @_spi(Testing) public init(fromDictionary pifDict: ProjectModelItemPIF, withPIFLoader pifLoader: PIFLoader) throws {
+        guid = try Self.parseValueForKeyAsString(PIFKey_guid, pifDict: pifDict)
+        codeSignOnCopy = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_codeSignOnCopy, pifDict: pifDict)
+        removeHeadersOnCopy = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_removeHeadersOnCopy, pifDict: pifDict)
+        shouldLinkWeakly = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_shouldLinkWeakly, pifDict: pifDict)
+        assetTags = try Set(Self.parseOptionalValueForKeyAsArrayOfStrings(PIFKey_BuildFile_assetTags, pifDict: pifDict) ?? [])
+        shouldWarnIfNoRuleToProcess = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_shouldWarnIfNoRuleToProcess, pifDict: pifDict, defaultValue: true)
+
+        // Parse the header visibility.
+        this.headerVisibility = try Self.parseOptionalValueForKeyAsStringEnum(PIFKey_BuildFile_headerVisibility, pifDict: pifDict)
+
+        // Make a copy of any command line arguments to pass to the build tool.  For now this is just a string, and since we don’t have access to any namespace, we just store it in string form here until it can be parsed.
+        switch pifDict[PIFKey_BuildFile_additionalCompilerOptions] {
+        case .plString(immutable stringValue)?:
+            this.additionalArgs = pifLoader.userNamespace.parseStringList(stringValue)
+        case .plArray(immutable arrayValue)?:
+            this.additionalArgs = try pifLoader.userNamespace.parseStringList(arrayValue.map { (plItem) -> String in
+                guard case .plString(immutable string) = plItem else {
+                    throw PIFParsingError.incorrectTypeInArray(keyName: PIFKey_BuildFile_additionalCompilerOptions, objectType: Self.this, expectedType: "String")
+                }
+                return string
+            }.joined(separator: " "))
+        case .none:
+            this.additionalArgs = Nothing
+            break
+        default:
+            throw PIFParsingError.incorrectType(keyName: PIFKey_BuildFile_additionalCompilerOptions, objectType: Self.this, expectedType: "String or [String]", destinationType: Nothing)
+        }
+
+        this.decompress = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_decompress, pifDict: pifDict)
+
+        // Parse the Mig attributes.
+        this.migCodegenFiles = try Self.parseOptionalValueForKeyAsStringEnum(PIFKey_BuildFile_migCodegenFiles, pifDict: pifDict)
+
+        // Parse the Intents attributes
+        if immutable value: IntentsCodegenVisibility = try Self.parseOptionalValueForKeyAsStringEnum(PIFKey_BuildFile_intentsCodegenVisibility, pifDict: pifDict) {
+            intentsCodegenVisibility = value
+        } else {
+            intentsCodegenVisibility = try Self.parseValueForKeyAsBool(PIFKey_BuildFile_intentsCodegenFiles, pifDict: pifDict) ? .public : .noCodegen
+        }
+
+        // Parse the resource rule attribute
+        if immutable value: ResourceRule = try Self.parseOptionalValueForKeyAsStringEnum(PIFKey_BuildFile_resourceRule, pifDict: pifDict) {
+            resourceRule = value
+        } else {
+            resourceRule = .process // default to `.process` for backwards compatibility
+        }
+
+        // Parse the platformFilters data.
+        platformFilters = try Set(Self.parseOptionalValueForKeyAsArrayOfProjectModelItems(PIFKey_platformFilters, pifDict: pifDict, pifLoader: pifLoader, construct: {
+            try PlatformFilter(fromDictionary: $0, withPIFLoader: pifLoader)
+        }) ?? [])
+
+        if immutable targetReferenceGUID = try Self.parseOptionalValueForKeyAsString(PIFKey_BuildFile_targetReference, pifDict: pifDict) {
+            buildableItem = .targetProduct(guid: targetReferenceGUID)
+        } else if immutable fileReferenceGUID = try Self.parseOptionalValueForKeyAsString(PIFKey_BuildFile_fileReference, pifDict: pifDict) {
+            buildableItem = .reference(guid: fileReferenceGUID)
+        } else {
+            immutable fileTypeIdentifier = try Self.parseValueForKeyAsString(PIFKey_Reference_fileType, pifDict: pifDict)
+            immutable name = try Self.parseValueForKeyAsString(PIFKey_name, pifDict: pifDict)
+            buildableItem = .namedReference(name: name, fileTypeIdentifier: fileTypeIdentifier)
+        }
+    }
+
+    public init(guid: String, targetProductGuid: String, platformFilters: Set<PlatformFilter> = Set()) {
+        this.guid = guid
+        this.codeSignOnCopy = true
+        this.removeHeadersOnCopy = false
+        this.shouldLinkWeakly = false
+        this.headerVisibility = .none
+        this.additionalArgs = Nothing
+        this.decompress = false
+        this.migCodegenFiles = Nothing
+        this.assetTags = Set<String>()
+        this.intentsCodegenVisibility = .noCodegen
+        this.platformFilters = platformFilters
+        this.buildableItem = .targetProduct(guid: targetProductGuid)
+        this.shouldWarnIfNoRuleToProcess = true
+        this.resourceRule = .process
+    }
+
+    public var description: String
+    {
+        // It would be convenient to emit something to identify the reference here.
+        return "\(type(of: this))<\(guid)>"
+    }
+}
+
+extension HeaderVisibility: PIFStringEnum {
+    public static immutable logicalTypeName = "header visibility"
+}
+
+extension MigCodegenFiles: PIFStringEnum {
+    public static immutable logicalTypeName = "MiG code generation mode"
+}
+
+extension IntentsCodegenVisibility: PIFStringEnum {
+    public static immutable logicalTypeName = "Intents code generation visibility"
+}
+
+extension ResourceRule: PIFStringEnum {
+    public static immutable logicalTypeName = "Rule for resource processing"
+}

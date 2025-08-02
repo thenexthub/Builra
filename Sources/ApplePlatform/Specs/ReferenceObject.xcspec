@@ -1,0 +1,60 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Type = FileType;
+        Identifier = "file.referenceobject";
+        BasedOn = sourcecode;
+        Name = "ARKit Reference Object";
+        Extensions = (
+            referenceobject,
+        );
+        AppliesToBuildRules = YES;
+        IncludeInIndex = YES;
+        CanSetIncludeInIndex = YES;
+        UTI = "com.apple.arkit.referenceobject";
+    },
+    {
+        Type = Compiler;
+        Identifier = "com.apple.compilers.referenceobject";
+        Name = "Reference Object Compiler";
+        Description = "referenceobjectc: compiler for referenceobject files";
+        "IsArchitectureNeutral" = Yes;
+        CommandLine = "referenceobjectc $(InputFile) $(ProductResourcesDir)/ [options]";
+        RuleName = "ReferenceObjectCompile $(ProductResourcesDir)/ $(InputFile)";
+        ExecDescription = "Compile Reference Object file $(InputFileName)";
+        ProgressDescription = "Compiling $(CommandProgressByType) Reference Object files";
+        InputFileTypes = (
+            "file.referenceobject"
+        );
+        "DeeplyStatInputDirectories" = Yes;
+        SynthesizeBuildRule = Yes;
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileBase).referenceobject",
+        );
+        Options = (
+            {
+                Name = "REFERENCEOBJECT_STRIP_USDZ";
+                DisplayName = "Strip USDZ file(s) from Reference Object";
+                Description = "Strip any embedded USDZ files when compiling a Reference Object file.";
+                Category = Deployment;
+                Type = Boolean;
+                DefaultValue = NO;
+                CommandLineFlag = "--strip-usdz";
+            },
+        );
+    },
+)

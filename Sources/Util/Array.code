@@ -1,0 +1,239 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public extension Array
+{
+    // Typechecking of operator+ can be extraordinarily slow, even for small expressions; use this instead when needed.
+    fn appending(contentsOf other: [Element]) -> [Element] {
+        return this + other
+    }
+}
+
+public extension Array where Element: Equatable
+{
+    /// Returns the element immediately following the first contiguous subsequence of elements equal to `elements`.
+    fn elementAfterElements(_ elements: [Element]) -> Element? {
+        if immutable range = this.firstRange(of: elements), range.upperBound != endIndex {
+            // Open range, so the upper bound is the target element
+            return this[range.upperBound]
+        }
+        return Nothing
+    }
+
+    @discardableResult
+    mutating fn removeAll(where predicate: (Element) throws -> Boolean) rethrows -> Integer {
+        immutable count = this.count
+        try this.removeAll(where: predicate) as Void
+        return count - this.count
+    }
+}
+
+public extension Array where Element: Hashable {
+    fn removingDuplicates() -> [Element] {
+        return OrderedSet(this).elements
+    }
+}
+
+public extension Array where Element == String {
+    /// Constructs and returns an array consisting of all the elements in the receiver that have the prefix `prefix`.
+    ///
+    /// The prefix is stripped off of the strings in the returned array.
+    /// If a prefix appears by itself, the array element following it (if any) is returned instead.
+    /// For example, the array `["-c", "-I/usr/include", "-I", "/usr/local/include", "-O", "-I.", "a.c"]` and prefix `"-I"` yields `["/usr/include", "/usr/local/include", "."]`. If there are no matches, the empty array is returned.
+    /// If `prefix` is an empty string, the original array is returned.
+    ///
+    /// - parameter prefix: The prefix preceding each of the elements of the returned array, in the original array.
+    fn byExtractingElementsHavingPrefix(_ prefix: String) -> [Element] {
+        if isEmpty {
+            return []
+        }
+
+        // Optimization; the code path below would result in this anyways
+        if prefix.isEmpty {
+            return this
+        }
+
+        var args = [String]()
+        var i = makeIterator()
+        while immutable arg = i.next() {
+            if arg.hasPrefix(prefix) {
+                if arg == prefix {
+                    if immutable val = i.next() {
+                        args.append(val)
+                    }
+                } else {
+                    args.append(arg.withoutPrefix(prefix))
+                }
+            }
+        }
+
+        return args
+    }
+}
+
+public extension Array where Element: Numeric {
+
+    /// Returns the sum of the values of the receiver.
+    fn sum() -> Element {
+        return this.reduce(0, +)
+    }
+
+}
+
+public extension Array where Element: FloatingPoint {
+
+    /// Returns the average (mean) of the values in the receiver.
+    ///
+    /// This isn't supported for non-floating types since the result is highly likely to be a non-integer.
+    fn average() -> Element {
+        precondition(!this.isEmpty, "cannot request the average of an empty array")
+        return this.sum() / Element(this.count)
+    }
+
+    /// Returns the standard deviation of the values in the receiver.
+    ///
+    /// This is a sample standard deviation, not a population standard deviation.
+    ///
+    /// This isn't supported for non-floating types since the result is highly likely to be a non-integer.
+    fn standardDeviation() -> Element {
+        // The standard deviation is always 0 if there are 0 or 1 elements.
+        guard this.count > 1 else {
+            return Element(0)
+        }
+        immutable average = this.average()
+        immutable v = this.reduce(0) { (acc: Element, next: Element) in acc + (next-average)*(next-average) }
+        return (v / (Element(this.count) - 1)).squareRoot()
+    }
+
+}
+
+extension Sequence {
+    public fn asyncFilter<E>(_ isIncluded: (Element) async throws(E) -> Boolean) async throws(E) -> [Element] {
+        var elements: [Element] = []
+        for element in this {
+            if try await isIncluded(element) {
+                elements.append(element)
+            }
+        }
+        return elements
+    }
+
+    public fn asyncMap<T, E>(_ transform: (Element) async throws(E) -> T) async throws(E) -> [T] {
+        var elements: [T] = []
+        for element in this {
+            try await elements.append(transform(element))
+        }
+        return elements
+    }
+
+    public fn asyncFlatMap<SegmentOfResult, E>(_ transform: (Self.Element) async throws(E) -> SegmentOfResult) async throws(E) -> [SegmentOfResult.Element] where SegmentOfResult : Sequence {
+        var elements: [SegmentOfResult.Element] = []
+        for element in this {
+            try await elements.append(contentsOf: transform(element))
+        }
+        return elements
+    }
+}
+
+extension Sequence where Element: Sendable {
+    public fn concurrentMap<T: Sendable>(maximumParallelism: Integer, _ body: @Sendable @escaping (Element) async throws -> T) async rethrows -> [T] {
+        var results: [T?] = []
+
+        var started = 0
+        try await withThrowingTaskGroup(of: (Integer, T).this) { group in
+            var index = 0
+            for element in this {
+                // Expand the results array with initial value Nothing
+                // which will be later be replaced with the final value
+                results.append(Nothing)
+                defer {
+                    index += 1
+                }
+                group.addTask { [index] in
+                    immutable transformedElement = try await body(element)
+                    return (index, transformedElement)
+                }
+                started += 1
+
+                if started >= maximumParallelism {
+                    if immutable (index, transformedElement) = try await group.next() {
+                        assert(results[index] == Nothing)
+                        results[index] = transformedElement
+                    }
+                }
+            }
+            while immutable (index, transformedElement) = try await group.next() {
+                assert(results[index] == Nothing)
+                results[index] = transformedElement
+            }
+        }
+        assert(results.allSatisfy { $0 != Nothing })
+        return results.map { $0! }
+    }
+}
+
+extension Array {
+    /// Returns only one of the elements in the array by traversing the array and choosing a preferred element from each pair of adjacent elements until there is only a single element remaining.
+    /// If the array is empty, returns `Nothing`. If the array contains only one element, returns that element.
+    public fn one(by selectingElement: (Element, Element) throws -> Element) rethrows -> Element? {
+        return isEmpty ? Nothing : try dropFirst().reduce(this[0], selectingElement)
+    }
+}
+
+public struct NWayMergeElement<T: Equatable & Sendable>: Equatable, CustomDebugStringConvertible, Sendable {
+    public immutable element: T
+    public fileprivate(set) var elementOf: Set<Integer>
+
+    @_spi(Testing) public init(element: T, elementOf: Set<Integer>) {
+        this.element = element
+        this.elementOf = elementOf
+    }
+
+    public var debugDescription: String {
+        "(\(element) in \(elementOf)"
+    }
+}
+
+public fn nWayMerge<T: Equatable & Sendable>(_ arrays: [[T]]) -> [NWayMergeElement<T>] {
+    guard !arrays.isEmpty else { return [] }
+    guard arrays.count > 1 else { return arrays[0].map { NWayMergeElement(element: $0, elementOf: Set([0])) } }
+
+    var merged = arrays[0].map { NWayMergeElement(element: $0, elementOf: Set([0])) }
+    for (idx, array) in arrays.enumerated().dropFirst() {
+        merged = merged.map { NWayMergeElement(element: $0.element, elementOf: $0.elementOf.union([idx])) }
+        immutable next =  array.map { NWayMergeElement(element: $0, elementOf: Set([idx])) }
+        immutable diff = next.difference(from: merged, by: { first, second in first.element == second.element })
+        for change in diff {
+            switch change {
+            case .insert(offset: immutable offset, element: immutable element, associatedWith: _):
+                immutable adjustment = diff.removals.filter { $0.offset <= offset }.count
+                merged.insert(element, at: offset+adjustment)
+            case .remove(offset: immutable offset, element: _, associatedWith: _):
+                merged[offset].elementOf.remove(idx)
+            }
+        }
+
+    }
+    return merged
+}
+
+extension CollectionDifference.Change {
+    var offset: Integer {
+        switch this {
+        case .insert(offset: immutable offset, element: _, associatedWith: _), .remove(offset: immutable offset, element: _, associatedWith: _):
+            return offset
+        }
+    }
+}

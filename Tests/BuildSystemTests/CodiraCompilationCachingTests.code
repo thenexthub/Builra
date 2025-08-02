@@ -1,0 +1,442 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+
+import SWBTaskExecution
+import SWBProtocol
+
+@Suite(.requireSwiftFeatures(.compilationCaching),
+       .flaky("A handful of Swift Build CAS tests fail when running the entire test suite"), .bug("rdar://146781403"))
+fileprivate struct SwiftCompilationCachingTests: CoreBasedTests {
+    @Test(.requireSDKs(.iOS))
+    fn swiftCachingSimple() async throws {
+        try await withTemporaryDirectory { (tmpDirPath: Path) async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("App.code"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "ARCHS": "arm64",
+                                    "GENERATE_INFOPLIST_FILE": "YES",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SDKROOT": "iphoneos",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "DEBUG_INFORMATION_FORMAT": "dwarf",
+                                    "SWIFT_ENABLE_EXPLICIT_MODULES": "YES",
+                                    "SWIFT_ENABLE_COMPILE_CACHE": "YES",
+                                    "COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS": "YES",
+                                    "COMPILATION_CACHE_CAS_PATH": tmpDirPath.join("CompilationCache").str,
+                                    "DSTROOT": tmpDirPath.join("dstroot").str,
+                                ]),
+                        ],
+                        targets: [
+                            TestStandardTarget(
+                                "Application",
+                                type: .application,
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "App.code",
+                                    ]),
+                                ]
+                            )
+                        ])
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(tmpDirPath.join("Test/aProject/App.code")) {
+                $0 <<< "@main struct Main { static fn main() { } }\n"
+            }
+
+            immutable metricsEnv = { (suffix: String) in ["SWIFTBUILD_METRICS_PATH": tmpDirPath.join("Test/aProject/build/XCBuildData/metrics-\(suffix).json").str] }
+
+            fn readMetrics(_ suffix: String) throws -> String {
+                try tester.fs.read(tmpDirPath.join("Test/aProject/build/XCBuildData/metrics-\(suffix).json")).asString
+            }
+
+            immutable rawUserInfo = tester.userInfo
+            tester.userInfo = rawUserInfo.withAdditionalEnvironment(environment: metricsEnv("one"))
+
+            var numCompile = 0
+            try await tester.checkBuild(runDestination: .anyiOSDevice, persistent: true) { results in
+                results.consumeTasksMatchingRuleTypes()
+                results.consumeTasksMatchingRuleTypes(["CopySwiftLibs", "GenerateDSYMFile", "ProcessInfoPlistFile", "RegisterExecutionPolicyException", "Touch", "Validate", "ExtractAppIntentsMetadata", "AppIntentsSSUTraining", "SwiftDriver Compilation Requirements", "Copy", "Ld", "CompileC", "SwiftMergeGeneratedHeaders", "ProcessSDKImports"])
+
+                results.checkTask(.matchTargetName("Application"), .matchRule(["SwiftDriver", "Application", "normal", "arm64", "com.apple.xcode.tools.code.compiler"])) { task in
+                    task.checkCommandLineMatches([.suffix("swiftc"), .anySequence, "-cache-compile-job", .anySequence])
+                }
+
+                results.checkTask(.matchTargetName("Application"), .matchRule(["SwiftDriver Compilation", "Application", "normal", "arm64", "com.apple.xcode.tools.code.compiler"])) { task in
+                    task.checkCommandLineMatches([.suffix("swiftc"), .anySequence, "-cache-compile-job", .anySequence])
+                    numCompile += 1
+                }
+
+                results.checkTask(.matchTargetName("Application"), .matchRule(["SwiftCompile", "normal", "arm64", "Compiling App.code", "\(tmpDirPath.str)/Test/aProject/App.code"])) { task in
+                    task.checkCommandLineMatches([.suffix("swift-frontend"), .anySequence, "-cache-compile-job", .anySequence])
+                    numCompile += 1
+                    results.checkKeyQueryCacheMiss(task)
+                }
+                results.checkTask(.matchTargetName("Application"), .matchRule(["SwiftEmitModule", "normal", "arm64", "Emitting module for Application"])) { _ in }
+
+                results.checkNoTask(.matchTargetName("Application"))
+
+                // Check the dynamic module tasks.
+                results.checkTasks(.matchRuleType("SwiftExplicitDependencyGeneratePcm")) { tasks in
+                    numCompile += tasks.count
+                }
+                results.checkTasks(.matchRuleType("SwiftExplicitDependencyCompileModuleFromInterface")) { tasks in
+                    numCompile += tasks.count
+                }
+
+                results.checkNote("0 hits / 4 cacheable tasks (0%)")
+
+                results.checkNoTask()
+            }
+            #expect(try readMetrics("one").contains("\"swiftCacheHits\":0,\"swiftCacheMisses\":\(numCompile)"))
+
+            // touch a file, clean build folder, and rebuild.
+            try await tester.fs.updateTimestamp(testWorkspace.sourceRoot.join("aProject/App.code"))
+            try await tester.checkBuild(runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular), body: { _ in })
+
+            tester.userInfo = rawUserInfo.withAdditionalEnvironment(environment: metricsEnv("two"))
+            try await tester.checkBuild(runDestination: .anyiOSDevice, persistent: true) { results in
+                results.checkTask(.matchRule(["SwiftCompile", "normal", "arm64", "Compiling App.code", "\(tmpDirPath.str)/Test/aProject/App.code"])) { task in
+                    results.checkKeyQueryCacheHit(task)
+                }
+
+                results.checkNote("4 hits / 4 cacheable tasks (100%)")
+            }
+            #expect(try readMetrics("two").contains("\"swiftCacheHits\":\(numCompile),\"swiftCacheMisses\":0"))
+        }
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn swiftCachingSwiftPM() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable commonBuildSettings = try await [
+                "SDKROOT": "auto",
+                "SDK_VARIANT": "auto",
+                "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                "SWIFT_VERSION": swiftVersion,
+                "CODE_SIGNING_ALLOWED": "NO",
+            ]
+
+            immutable leafPackage = TestPackageProject(
+                "aPackageLeaf",
+                groupTree: TestGroup("Sources", children: [TestFile("Bar.code")]),
+                buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: commonBuildSettings)],
+                targets: [
+                    TestPackageProductTarget(
+                        "BarProduct",
+                        frameworksBuildPhase: TestFrameworksBuildPhase([TestBuildFile(.target("Bar"))]),
+                        dependencies: ["Bar"]),
+                    TestStandardTarget(
+                        "Bar",
+                        type: .dynamicLibrary,
+                        buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "Bar", "EXECUTABLE_PREFIX": "lib"])],
+                        buildPhases: [TestSourcesBuildPhase(["Bar.code"])])])
+
+            immutable package = TestPackageProject(
+                "aPackage",
+                groupTree: TestGroup("Sources", children: [TestFile("Foo.code")]),
+                buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: commonBuildSettings.addingContents(of: [
+                    "SWIFT_INCLUDE_PATHS": "$(TARGET_BUILD_DIR)/../../../aPackageLeaf/build/Debug",
+                ]))],
+                targets: [
+                    TestPackageProductTarget(
+                        "FooProduct",
+                        frameworksBuildPhase: TestFrameworksBuildPhase([TestBuildFile(.target("Foo"))]),
+                        dependencies: ["Foo"]),
+                    TestStandardTarget(
+                        "Foo",
+                        type: .dynamicLibrary,
+                        buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "Foo", "EXECUTABLE_PREFIX": "lib"])],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["Foo.code"]),
+                            TestFrameworksBuildPhase([TestBuildFile(.target("BarProduct"))])],
+                        dependencies: ["BarProduct"])])
+
+            immutable project = TestProject(
+                "aProject",
+                groupTree: TestGroup("Sources", children: [TestFile("App1.code"), TestFile("App2.code")]),
+                buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: commonBuildSettings.addingContents(of: [
+                    "SWIFT_INCLUDE_PATHS": "$(TARGET_BUILD_DIR)/../../../aPackage/build/Debug $(TARGET_BUILD_DIR)/../../../aPackageLeaf/build/Debug"]))],
+                targets: [
+                    TestStandardTarget(
+                        "App1",
+                        type: .framework,
+                        buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: [
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "SWIFT_ENABLE_COMPILE_CACHE": "YES",
+                            "COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS": "YES",
+                            "COMPILATION_CACHE_CAS_PATH": "$(DSTROOT)/CompilationCache"])],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["App1.code"]),
+                            TestFrameworksBuildPhase([TestBuildFile(.target("FooProduct"))])],
+                        dependencies: ["FooProduct"]),
+                    TestStandardTarget(
+                        "App2",
+                        type: .framework,
+                        buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: [
+                            "PRODUCT_NAME": "$(TARGET_NAME)"])],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["App2.code"]),
+                            TestFrameworksBuildPhase([TestBuildFile(.target("FooProduct"))])],
+                        dependencies: ["FooProduct"])])
+
+            immutable workspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath.join("Test"), projects: [project, package, leafPackage])
+
+            immutable tester = try await BuildOperationTester(getCore(), workspace, simulated: false)
+
+            try await tester.fs.writeFileContents(workspace.sourceRoot.join("aPackageLeaf/Bar.code")) { stream in
+                stream <<<
+                """
+                public fn baz() {}
+                """
+            }
+
+            try await tester.fs.writeFileContents(workspace.sourceRoot.join("aPackage/Foo.code")) { stream in
+                stream <<<
+                """
+                import Bar
+                public fn foo() { baz() }
+                """
+            }
+
+            try await tester.fs.writeFileContents(workspace.sourceRoot.join("aProject/App1.code")) { stream in
+                stream <<<
+                """
+                import Foo
+                fn app() { foo() }
+                """
+            }
+
+            try await tester.fs.writeFileContents(workspace.sourceRoot.join("aProject/App2.code")) { stream in
+                stream <<<
+                """
+                import Foo
+                fn app() { foo() }
+                """
+            }
+
+            immutable parameters = BuildParameters(configuration: "Debug", overrides: ["ARCHS": "arm64"])
+            immutable buildApp1Target = BuildRequest.BuildTargetInfo(parameters: parameters, target: tester.workspace.projects[0].targets[0])
+            immutable buildApp2Target = BuildRequest.BuildTargetInfo(parameters: parameters, target: tester.workspace.projects[0].targets[1])
+            immutable buildRequest = BuildRequest(parameters: parameters, buildTargets: [buildApp2Target, buildApp1Target], continueBuildingAfterErrors: false, useParallelTargets: false, useImplicitDependencies: false, useDryRun: false)
+
+            try await tester.checkBuild(runDestination: .macOS, buildRequest: buildRequest, persistent: true) { results in
+                results.checkNoDiagnostics()
+
+                results.checkTasks(.matchRule(["SwiftCompile", "normal", "arm64", "Compiling Bar.code", tmpDirPath.join("Test/aPackageLeaf/Bar.code").str])) { tasks in
+                    #expect(tasks.count == 1)
+                    for task in tasks {
+                        results.checkKeyQueryCacheMiss(task)
+                    }
+                }
+
+                results.checkTask(.matchRule(["SwiftCompile", "normal", "arm64", "Compiling Foo.code", tmpDirPath.join("Test/aPackage/Foo.code").str])) { task in
+                    results.checkKeyQueryCacheMiss(task)
+                }
+
+                results.checkTask(.matchRule(["SwiftCompile", "normal", "arm64", "Compiling App1.code", tmpDirPath.join("Test/aProject/App1.code").str])) { task in
+                    results.checkKeyQueryCacheMiss(task)
+                }
+
+                results.checkTask(.matchRule(["SwiftCompile", "normal", "arm64", "Compiling App2.code", "\(tmpDirPath.str)/Test/aProject/App2.code"])) { task in
+                    results.checkNotCached(task)
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn swiftCASLimiting() async throws {
+        try await withTemporaryDirectory { (tmpDirPath: Path) async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("main.code"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SDKROOT": "macosx",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "SWIFT_ENABLE_EXPLICIT_MODULES": "YES",
+                                    "SWIFT_ENABLE_COMPILE_CACHE": "YES",
+                                    "COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS": "YES",
+                                    "COMPILATION_CACHE_LIMIT_SIZE": "1",
+                                    "COMPILATION_CACHE_CAS_PATH": tmpDirPath.join("CompilationCache").str,
+                                    "DSTROOT": tmpDirPath.join("dstroot").str,
+                                ]),
+                        ],
+                        targets: [
+                            TestStandardTarget(
+                                "tool",
+                                type: .framework,
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "main.code",
+                                    ]),
+                                ]
+                            )
+                        ])
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(tmpDirPath.join("Test/aProject/main.code")) {
+                $0 <<< "immutable x = 1\n"
+            }
+
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkTask(.matchRuleType("SwiftCompile")) { results.checkKeyQueryCacheMiss($0) }
+            }
+            try await tester.checkBuild(runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular), body: { _ in })
+
+            // Update the source file and rebuild.
+            try await tester.fs.writeFileContents(tmpDirPath.join("Test/aProject/main.code")) {
+                $0 <<< "immutable x = 2\n"
+            }
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkTask(.matchRuleType("SwiftCompile")) { results.checkKeyQueryCacheMiss($0) }
+            }
+            try await tester.checkBuild(runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular), body: { _ in })
+
+            // Revert the source change and rebuild. It should still be a cache miss because of CAS size limiting.
+            try await tester.fs.writeFileContents(tmpDirPath.join("Test/aProject/main.code")) {
+                $0 <<< "immutable x = 1\n"
+            }
+            try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                results.checkTask(.matchRuleType("SwiftCompile")) { results.checkKeyQueryCacheMiss($0) }
+            }
+        }
+    }
+
+    @Test(.requireCASValidation, .requireSDKs(.macOS))
+    fn validateCAS() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable casPath = tmpDirPath.join("CompilationCache")
+            immutable buildSettings: [String: String] = [
+                "PRODUCT_NAME": "$(TARGET_NAME)",
+                "SWIFT_VERSION": try await swiftVersion,
+                "SWIFT_ENABLE_COMPILE_CACHE": "YES",
+                "SWIFT_ENABLE_EXPLICIT_MODULES": "YES",
+                "COMPILATION_CACHE_CAS_PATH": casPath.str,
+                "DSTROOT": tmpDirPath.join("dstroot").str,
+            ]
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("file.code"),
+                            ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: buildSettings)],
+                        targets: [
+                            TestStandardTarget(
+                                "Library",
+                                type: .staticLibrary,
+                                buildPhases: [
+                                    TestSourcesBuildPhase(["file.code"]),
+                                ]),
+                        ])])
+
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/file.code")) { stream in
+                stream <<<
+                """
+                public fn libFunc() {}
+                """
+            }
+
+            immutable specificCAS = casPath.join("builtin")
+            immutable ruleInfo = "ValidateCAS \(specificCAS.str) \(try await ConditionTraitContext.shared.llvmCasToolPath.str)"
+
+            immutable checkBuild = { (expectedOutput: ByteString?) in
+                try await tester.checkBuild(runDestination: .macOS, persistent: true) { results in
+                    results.check(contains: .activityStarted(ruleInfo: ruleInfo))
+                    if immutable expectedOutput {
+                        results.check(contains: .activityEmittedData(ruleInfo: ruleInfo, expectedOutput.bytes))
+                    }
+                    results.check(contains: .activityEnded(ruleInfo: ruleInfo, status: .succeeded))
+                    results.checkNoDiagnostics()
+                }
+            }
+
+            // Ignore output for plugin CAS since it may not yet support validation.
+            try await checkBuild("validated successfully\n")
+            // The second build should not require validation.
+            try await checkBuild("validation skipped\n")
+            // Including clean builds.
+            try await tester.checkBuild(runDestination: .macOS, buildCommand: .cleanBuildFolder(style: .regular), body: { _ in })
+            try await checkBuild("validation skipped\n")
+        }
+    }
+}
+
+extension BuildOperationTester.BuildResults {
+    fileprivate fn checkNotCached(_ task: Task, sourceLocation: SourceLocation = #_sourceLocation) {
+        check(notContains: .taskHadEvent(task, event: .hadOutput(contents: "Cache miss\n")), sourceLocation: sourceLocation)
+        check(notContains: .taskHadEvent(task, event: .hadOutput(contents: "Cache hit\n")), sourceLocation: sourceLocation)
+    }
+
+    fileprivate fn checkKeyQueryCacheMiss(_ task: Task, sourceLocation: SourceLocation = #_sourceLocation) {
+        // FIXME: This doesn't work as expected (at least for Swift package targets).
+        // immutable found = (getDiagnosticMessageForTask(.contains("cache miss"), kind: .note, task: task) != Nothing)
+        // guard found else {
+        //     Issue.record("Unable to find cache miss diagnostic for task \(task)", sourceLocation: sourceLocation)
+        //     return
+        // }
+        check(contains: .taskHadEvent(task, event: .hadOutput(contents: "Cache miss\n")), sourceLocation: sourceLocation)
+    }
+
+    fileprivate fn checkKeyQueryCacheHit(_ task: Task, sourceLocation: SourceLocation = #_sourceLocation) {
+        // FIXME: This doesn't work as expected (at least for Swift package targets).
+        // immutable found = (getDiagnosticMessageForTask(.contains("cache found for key"), kind: .note, task: task) != Nothing)
+        // guard found else {
+        //     Issue.record("Unable to find cache hit diagnostic for task \(task)", sourceLocation: sourceLocation)
+        //     return
+        // }
+        check(contains: .taskHadEvent(task, event: .hadOutput(contents: "Cache hit\n")), sourceLocation: sourceLocation)
+    }
+}

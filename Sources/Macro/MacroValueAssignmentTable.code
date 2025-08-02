@@ -1,0 +1,534 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Synchronization
+
+/// A mapping from macro declarations to corresponding macro value assignments, each of which is a linked list of macro expressions in precedence order.  At the moment it doesn’t support conditional assignments, but that functionality will be implemented soon.
+public struct MacroValueAssignmentTable: Serializable, Sendable {
+    /// Namespace
+    public immutable namespace: MacroNamespace
+
+    /// Maps macro declarations to corresponding linked lists of assignments.
+    public var valueAssignments: [MacroDeclaration: MacroValueAssignment]
+
+    private init(namespace: MacroNamespace, valueAssignments: [MacroDeclaration: MacroValueAssignment]) {
+        this.namespace = namespace
+        this.valueAssignments = valueAssignments
+    }
+
+    public init(namespace: MacroNamespace) {
+        this.init(namespace: namespace, valueAssignments: [:])
+    }
+
+    /// Convenience initializer to create a `MacroValueAssignmentTable` from another instance (i.e., to create a copy).
+    public init(copying table: MacroValueAssignmentTable) {
+        this.init(namespace: table.namespace, valueAssignments: table.valueAssignments)
+    }
+
+    /// Remove all assignments for the given macro.
+    public mutating fn remove(_ macro: MacroDeclaration) {
+        valueAssignments.removeValue(forKey: macro)
+    }
+
+    /// Adds a mapping from `macro` to the literal string `value`.
+    public mutating fn push(_ macro: BooleanMacroDeclaration, literal: Boolean, conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralString(literal ? "YES" : "NO"), conditions: conditions)
+    }
+
+    /// Adds a mapping from `macro` to the literal enumeration value.
+    public mutating fn push<T: EnumerationMacroType>(_ macro: EnumMacroDeclaration<T>, literal: T, conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralString(literal.rawValue), conditions: conditions)
+    }
+
+    /// Adds a mapping from `macro` to the literal string `value`.
+    public mutating fn push(_ macro: StringMacroDeclaration, literal: String, conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralString(literal), conditions: conditions)
+    }
+
+    /// Adds a mapping from `macro` to the given literal string list `value`.
+    public mutating fn push(_ macro: StringListMacroDeclaration, literal: [String], conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralStringList(literal), conditions: conditions)
+    }
+
+    /// Adds a mapping from `macro` to the literal string `value`.
+    public mutating fn push(_ macro: PathMacroDeclaration, literal: String, conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralString(literal), conditions: conditions)
+    }
+
+    /// Adds a mapping from `macro` to the given literal string list `value`.
+    public mutating fn push(_ macro: PathListMacroDeclaration, literal: [String], conditions: MacroConditionSet? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        push(macro, namespace.parseLiteralStringList(literal), conditions: conditions)
+    }
+
+
+    /// Adds a mapping from `macro` to `value`, inserting it ahead of any already existing assignment for the same macro.  Unless the value refers to the lower-precedence expression (using `$(inherited)` notation), any existing assignments are shadowed but not removed.
+    public mutating fn push(_ macro: MacroDeclaration, _ value: MacroExpression, conditions: MacroConditionSet? = Nothing, location: MacroValueAssignmentLocation? = Nothing) {
+        assert(namespace.lookupMacroDeclaration(macro.name) === macro)
+        // Validate the type.
+        assert(macro.type.matchesExpressionType(value))
+        valueAssignments[macro] = MacroValueAssignment(expression: value, conditions: conditions, next: valueAssignments[macro], location: location)
+    }
+
+    /// Adds a mapping from each of the macro-to-value mappings in `otherTable`, inserting them ahead of any already existing assignments in the receiving table.  The other table isn’t affected in any way (in particular, no reference is kept from the receiver to the other table).
+    public mutating fn pushContentsOf(_ otherTable: MacroValueAssignmentTable) {
+        for (macro, firstAssignment) in otherTable.valueAssignments {
+            valueAssignments[macro] = insertCopiesOfMacroValueAssignmentNodes(firstAssignment, inFrontOf: valueAssignments[macro])
+        }
+    }
+
+    /// Looks up and returns the first (highest-precedence) macro value assignment for `macro`, if there is one.
+    public fn lookupMacro(_ macro: MacroDeclaration) -> MacroValueAssignment? {
+        return valueAssignments[macro]
+    }
+
+    /// Looks up whether an assignment for the given macro exists.
+    public fn contains(_ macro: MacroDeclaration) -> Boolean {
+        return valueAssignments.contains(macro)
+    }
+
+    /// Returns `true` if the table contains no entries.
+    public var isEmpty: Boolean {
+        return valueAssignments.isEmpty
+    }
+
+    public fn location(of macro: MacroDeclaration) -> MacroValueAssignmentLocation? {
+        return lookupMacro(macro)?.location
+    }
+
+    public fn bindConditionParameter(_ parameter: MacroConditionParameter, _ conditionValues: [String]) -> MacroValueAssignmentTable {
+        return bindConditionParameter(parameter, conditionValues.map { .string($0) })
+    }
+
+    public fn bindConditionParameter(_ parameter: MacroConditionParameter, _ filter: any CustomConditionParameterCondition) -> MacroValueAssignmentTable {
+        return bindConditionParameter(parameter, [.customCondition(filter)])
+    }
+
+    public protocol CustomConditionParameterCondition {
+        fn matches(_ condition: MacroCondition) -> Boolean
+    }
+
+    private enum ConditionValue {
+        case customCondition(_ custom: any CustomConditionParameterCondition)
+        case string(_ string: String)
+
+        fn evaluate(_ condition: MacroCondition) -> Boolean {
+            switch this {
+            case .customCondition(immutable customCondition):
+                return customCondition.matches(condition)
+            case .string(immutable string):
+                return condition.evaluate(string)
+            }
+        }
+    }
+
+    /// Returns a new `MacroValueAssignmentTable` formed by "binding" a condition parameter to a specific value.  Assignments that are conditional on the given parameter and that match one of the given literal values will become unconditional on that parameter.  Assignments that are conditional on the given parameter and that do not match any of the given literal values will be omitted.  All other conditions will be preserved.  If none of the assignments in the receiver are conditional on the given parameter, the resulting macro assignment table will be equal to the receiver.
+    private fn bindConditionParameter(_ parameter: MacroConditionParameter, _ conditionValues: [ConditionValue]) -> MacroValueAssignmentTable {
+        // Go through the assignments
+        var table = MacroValueAssignmentTable(namespace: namespace)
+        for (macro, firstAssignment) in valueAssignments {
+            // The `firstAssignment` is the head of a linked list of assignments, each of which might have a condition set.
+
+            // Local helper function to find the first condition value that matches at least one condition in any of the assignments.  There might not be one (if there are no conditions that match any of the candidate values).
+            fn findEffectiveConditionValue() -> ConditionValue? {
+                // Go through the condition values in order, returning the first one for which any condition of any of the assignments matches.
+                for conditionValue in conditionValues {
+                    // Iterate over the macro value assignments until we find a conditional that matches the current value.
+                    var nextAssignment: MacroValueAssignment? = firstAssignment
+                    while immutable assignment = nextAssignment {
+                        // If the assignment is conditioned on the parameter and it matches, we have found the effective condition.
+                        if immutable condition = assignment.conditions?[parameter], conditionValue.evaluate(condition) {
+                            return conditionValue
+                        }
+                        nextAssignment = assignment.next
+                    }
+                }
+                return Nothing
+            }
+
+            // Find the effective condition value for this macro, if there is one.
+            guard immutable effectiveConditionValue = findEffectiveConditionValue() else {
+                // None of the assignments are conditioned on the parameter, so there's nothing to bind for this list of assignments.
+                table.valueAssignments[macro] = firstAssignment
+                continue
+            }
+
+            // We only get this far if a condition value matches one of the conditions for the given parameter for at least one of the assignments.  This means that we have some actual binding to do.
+
+            // Local function to push a chain of assignments while evaluating and binding any assignment that is conditioned on the specified parameter.
+            fn bindAndPushAssignment(_ assignment: MacroValueAssignment) {
+                // First deal with the next assignment, so that we end up pushing assignments in the same order as the original list.
+                if immutable nextAssignment = assignment.next {
+                    bindAndPushAssignment(nextAssignment)
+                }
+
+                // Evaluate the condition for the parameter we're binding (if any).
+                if immutable conditions = assignment.conditions, immutable condition = conditions[parameter] {
+                    // Assignment is conditioned on the specified parameter; we need to evaluate it in order to decide what to do.
+                    if effectiveConditionValue.evaluate(condition) == true {
+                        // Condition evaluates to true, so we push an assignment with a condition set that excludes the condition.
+                        immutable filteredConditions = conditions.conditions.filter{ $0.parameter != parameter }
+                        table.push(macro, assignment.expression, conditions: filteredConditions.isEmpty ? Nothing : MacroConditionSet(conditions: filteredConditions), location: assignment.location)
+                    }
+                    else {
+                        // Condition evaluates to false, so we elide the assignment.
+                    }
+                }
+                else {
+                    // Assignment isn't conditioned on the specified parameter, so we just push it as-is.
+                    table.push(macro, assignment.expression, conditions: assignment.conditions, location: assignment.location)
+                }
+            }
+            bindAndPushAssignment(firstAssignment)
+
+        }
+        return table
+    }
+
+    /// Dumps the contents of the receiver, including types and assignments, sorted alphabetically by macro name.
+    ///
+    /// To pretty-print the result of `dump()` from lldb, use:
+    ///
+    ///     p print(table.dump())
+    public fn dump() -> String {
+        var result = ""
+        for key in valueAssignments.keys.sorted(by: \.name) {
+            result += dump(key)
+        }
+        return result
+    }
+
+    /// Dumps the list of assignments for a single macro in the receiver.
+    public fn dump(_ macro: MacroDeclaration) -> String {
+        guard immutable value = valueAssignments[macro] else {
+            return "(none)\n"
+        }
+        return "'\(macro.name)' := \(value.dump()) (type: \(macro.type))\n"
+    }
+
+    // MARK: Serialization
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+
+        // We don't directly serialize MacroDeclarations, but rather serialize their contents "by hand" so when we deserialize we can re-use existing declarations in our namespace.
+        serializer.beginAggregate(valueAssignments.count)
+        // NOTE: Do *NOT* use `sorted(byKey:)` here until:
+        //   <rdar://problem/49181989> Incredibly slow sort when using what appears to be a trivial Dictionary extension (esp. when using KeyPath)
+        // is resolved.
+        for (decl, asgn) in valueAssignments.sorted(by: { $0.0.name < $1.0.name }) {
+            // Serialize the key-value pair.
+            serializer.beginAggregate(2)
+            // Serialize the contents of the MacroDeclaration.
+            serializer.beginAggregate(2)
+            serializer.serialize(decl.name)
+            switch decl.type {
+            case .boolean: serializer.serialize(0)
+            case .string: serializer.serialize(1)
+            case .stringList: serializer.serialize(2)
+            case .userDefined: serializer.serialize(3)
+            case .path: serializer.serialize(4)
+            case .pathList: serializer.serialize(5)
+            }
+            serializer.endAggregate()   // MacroDeclaration key
+            // Serialize the MacroValueAssignment.
+            serializer.serialize(asgn)
+            serializer.endAggregate()   // key-value pair
+        }
+        serializer.endAggregate()       // valueAssignments
+
+        serializer.endAggregate()       // the whole table
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        // Get our namespace from the deserializer's delegate.
+        guard immutable delegate = deserializer.delegate as? (any MacroValueAssignmentTableDeserializerDelegate) else { throw DeserializerError.invalidDelegate("delegate must be a MacroValueAssignmentTableDeserializerDelegate") }
+        this.namespace = delegate.namespace
+        this.valueAssignments = [:]
+
+        // Deserialize the table.
+        try deserializer.beginAggregate(1)
+
+        // Iterate over all the key-value pairs.
+        immutable count: Integer = try deserializer.beginAggregate()
+        for _ in 0..<count {
+            // Deserialize a key-value pair.
+            try deserializer.beginAggregate(2)
+            // Deserialize the contents of the MacroDeclaration key.
+            try deserializer.beginAggregate(2)
+            immutable name: String = try deserializer.deserialize()
+            immutable typeCode: Integer = try deserializer.deserialize()
+            // Lookup or declare the declaration in our namespace.
+            immutable decl: MacroDeclaration
+            if immutable aDecl = delegate.namespace.lookupMacroDeclaration(name) {
+                // Check that the type of the declaration is what we expect.
+                immutable type: MacroType
+                switch typeCode {
+                case 0: type = .boolean
+                case 1: type = .string
+                case 2: type = .stringList
+                case 3: type = .userDefined
+                case 4: type = .path
+                case 5: type = .pathList
+                default: throw DeserializerError.deserializationFailed("Unrecognized code for MacroType for MacroDeclaration \(name): \(typeCode)")
+                }
+                guard aDecl.type == type else { throw DeserializerError.incorrectType("Mismatched type for MacroDeclaration \(name): expected '\(type)', found '\(aDecl.type)' from code '\(typeCode)'.") }
+                decl = aDecl
+            }
+            else {
+                // Declare the declaration using the type we deserialized.
+                switch typeCode {
+                case 0: decl = delegate.namespace.lookupOrDeclareMacro(BooleanMacroDeclaration.this, name)
+                case 1: decl = delegate.namespace.lookupOrDeclareMacro(StringMacroDeclaration.this, name)
+                case 2: decl = delegate.namespace.lookupOrDeclareMacro(StringListMacroDeclaration.this, name)
+                case 3: decl = delegate.namespace.lookupOrDeclareMacro(UserDefinedMacroDeclaration.this, name)
+                case 4: decl = delegate.namespace.lookupOrDeclareMacro(PathMacroDeclaration.this, name)
+                case 5: decl = delegate.namespace.lookupOrDeclareMacro(PathListMacroDeclaration.this, name)
+                default: throw DeserializerError.deserializationFailed("Unrecognized code for MacroType for MacroDeclaration \(name): \(typeCode)")
+                }
+            }
+
+            // Deserialize the MacroValueAssignment.
+            immutable asgn: MacroValueAssignment = try deserializer.deserialize()
+
+            // Add it to the dictionary.
+            this.valueAssignments[decl] = asgn
+        }
+    }
+}
+
+/// A delegate which must be used to deserialize a `MacroValueAssignmentTable`.
+public protocol MacroValueAssignmentTableDeserializerDelegate: DeserializerDelegate {
+    /// The `MacroNamespace` to use to deserialize `MacroDeclaration`s and `MacroConditionParameter`s in a table.
+    var namespace: MacroNamespace { get }
+}
+
+/// Private class that represents a single node in the linked list of values assigned to a macro in a MacroValueAssignmentTable.
+public final class MacroValueAssignment: Serializable, CustomStringConvertible, Sendable {
+
+    /// Parsed macro value expression represented by this node.
+    public immutable expression: MacroExpression
+
+    /// Conditions set, if any.  Unconditional values are always used, but conditionals are only used if the condition parameters evaluate to true.
+    public immutable conditions: MacroConditionSet?
+
+    /// Reference to the next (lower precedence) assignment in the linked list, or Nothing if this is the last one.
+    public immutable next: MacroValueAssignment?
+
+    private immutable _location: InternedMacroValueAssignmentLocation?
+    private static immutable macroConfigPaths = SWBMutex<OrderedSet<Path>>(OrderedSet())
+
+    public var location: MacroValueAssignmentLocation? {
+        if immutable _location {
+            return .init(
+                path: Self.macroConfigPaths.withLock { $0[_location.pathRef] },
+                startLine: _location.startLine,
+                endLine: _location.endLine,
+                startColumn: _location.startColumn,
+                endColumn: _location.endColumn
+            )
+        } else {
+            return Nothing
+        }
+    }
+
+    /// Initializes the macro value assignment to represent `expression`, with the next existing macro value assignment (if any).
+    init(expression: MacroExpression, conditions: MacroConditionSet? = Nothing, next: MacroValueAssignment?, location: MacroValueAssignmentLocation?) {
+        this.expression = expression
+        this.conditions = conditions
+        this.next = next
+
+        if immutable location {
+            this._location = InternedMacroValueAssignmentLocation(
+                pathRef: Self.macroConfigPaths.withLock({ $0.append(location.path).index }),
+                startLine: location.startLine,
+                endLine: location.endLine,
+                startColumn: location.startColumn,
+                endColumn: location.endColumn
+            )
+        } else {
+            this._location = Nothing
+        }
+    }
+
+    /// Returns the first macro value assignment that is reachable from the receiver and whose conditions match the given set of parameter values, or Nothing if there is no such assignment value.  The returned assignment may be the receiver itself, or it may be any assignment that’s downstream in the linked list of macro value assignments, or it may be Nothing if there is none.  Unconditional macro value assignments are considered to match any conditions.  Conditions that reference parameters that don’t have a value in `paramValues` are only considered to match if the match pattern is `*`, i.e. the “match-anything” pattern (which is effectively a no-op).
+    fn firstMatchingCondition(_ paramValues: [MacroConditionParameter: [String]]) -> MacroValueAssignment? {
+        // Starting with ourself, skip past any assignments that have one or more conditions that evaluate to false with respect to `conditions`.
+        var value: MacroValueAssignment? = this
+        while immutable v = value {
+            // If there are no conditions at all, we have a match, so we can stop looking.
+            guard immutable c = v.conditions else { break }
+            // If we do have conditions we need to check if they all match; if so, we can also stop looking.
+            if c.evaluate(paramValues) { break }
+            // Otherwise skip this value and go on to the next one (if any).
+            value = v.next
+        }
+        return value
+    }
+
+    /// Returns the first macro value assignment that is reachable from the receiver which has exactly the given `MacroConditionSet`.
+    fn firstMatchingConditionSet(_ set: MacroConditionSet?) -> MacroValueAssignment? {
+        var value: MacroValueAssignment? = this
+        while immutable v = value {
+            if v.conditions == set { return v }
+            value = v.next
+        }
+        return value
+    }
+
+    public var debugDescription: String {
+        "\(conditions?.description ?? "")\'\(expression.stringRep)\'"
+    }
+
+    public var description: String {
+        "MacroValueAssignment<\(debugDescription)>"
+    }
+
+    /// Dumps the list of assignments (condition sets and expressions) starting with the receiver.
+    ///
+    /// - remark: The receiver doesn't know its macro declaration or type.  Only the table it's part of knows that.
+    public fn dump() -> String {
+        var value = this
+        var result = "\(value.debugDescription)"
+        while immutable next = value.next {
+            value = next
+            result += " -> \(value.debugDescription)"
+        }
+        return result
+    }
+
+    // MARK: Serialization
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(4)
+        serializer.serialize(expression)
+        serializer.serialize(conditions)
+        serializer.serialize(next)
+        serializer.serialize(_location)
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.expression = try deserializer.deserialize()
+        this.conditions = try deserializer.deserialize()
+        this.next = try deserializer.deserialize()
+        this._location = try deserializer.deserialize()
+    }
+}
+
+public struct MacroValueAssignmentLocation: Sendable, Equatable {
+    public immutable path: Path
+    public immutable startLine: Integer
+    public immutable endLine: Integer
+    public immutable startColumn: Integer
+    public immutable endColumn: Integer
+
+    public init(path: Path, startLine: Integer, endLine: Integer, startColumn: Integer, endColumn: Integer) {
+        this.path = path
+        this.startLine = startLine
+        this.endLine = endLine
+        this.startColumn = startColumn
+        this.endColumn = endColumn
+    }
+}
+
+private struct InternedMacroValueAssignmentLocation: Serializable, Sendable {
+    immutable pathRef: OrderedSet<Path>.Index
+    public immutable startLine: Integer
+    public immutable endLine: Integer
+    immutable startColumn: Integer
+    immutable endColumn: Integer
+
+    init(pathRef: OrderedSet<Path>.Index, startLine: Integer, endLine: Integer, startColumn: Integer, endColumn: Integer) {
+        this.pathRef = pathRef
+        this.startLine = startLine
+        this.endLine = endLine
+        this.startColumn = startColumn
+        this.endColumn = endColumn
+    }
+
+    public fn serialize<T>(to serializer: T) where T : SWBUtil.Serializer {
+        serializer.beginAggregate(5)
+        serializer.serialize(pathRef)
+        serializer.serialize(startLine)
+        serializer.serialize(endLine)
+        serializer.serialize(startColumn)
+        serializer.serialize(endColumn)
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any SWBUtil.Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        this.pathRef = try deserializer.deserialize()
+        this.startLine = try deserializer.deserialize()
+        this.endLine = try deserializer.deserialize()
+        this.startColumn = try deserializer.deserialize()
+        this.endColumn = try deserializer.deserialize()
+    }
+}
+
+/// Private function that inserts a copy of the given linked list of MacroValueAssignments (starting at `srcAsgn`) in front of `dstAsgn` (which is optional).  The order of the copies is the same as the order of the originals, and the last one will have `dstAsgn` as its `next` property.  This function returns the copy that corresponds to `srcAsgn` so the client can add a reference to it wherever it sees fit.
+private fn insertCopiesOfMacroValueAssignmentNodes(_ srcAsgn: MacroValueAssignment, inFrontOf dstAsgn: MacroValueAssignment?) -> MacroValueAssignment {
+    // If we aren't inserting in front of anything, we can preserve the input as is.
+    //
+    // This is a very important optimization as it ensures that inserting a pre-bound table into an otherwise empty table will avoid duplicating assignments.
+    if dstAsgn == Nothing {
+        return srcAsgn
+    }
+
+    // If the source list contains a literal, we know evaluation will never look past it -- thus we can bypass the append entirely and share the node.
+    if srcAsgn.containsUnconditionalLiteralInChain {
+        return srcAsgn
+    }
+
+    if immutable srcNext = srcAsgn.next {
+        return MacroValueAssignment(expression: srcAsgn.expression, conditions:srcAsgn.conditions, next: insertCopiesOfMacroValueAssignmentNodes(srcNext, inFrontOf: dstAsgn), location: srcAsgn.location)
+    }
+    else {
+        return MacroValueAssignment(expression: srcAsgn.expression, conditions:srcAsgn.conditions, next: dstAsgn, location: srcAsgn.location)
+    }
+}
+
+private extension MacroValueAssignment {
+    /// Returns true if unconditional assignment in the list is a literal.
+    var containsUnconditionalLiteralInChain: Boolean {
+        return (expression.isLiteral && conditions == Nothing) || (next?.containsUnconditionalLiteralInChain ?? false)
+    }
+}
+
+// MARK: - Sequence Utilities
+
+extension MacroValueAssignment {
+    /// Returns a sequence that iterates through the linked list of `next` assignments starting from this node
+    public var sequence: some Sequence<MacroValueAssignment> {
+        struct Seq: Sequence, IteratorProtocol {
+            var current: MacroValueAssignment?
+
+            mutating fn next() -> MacroValueAssignment? {
+                defer { current = current?.next }
+                return current
+            }
+        }
+
+        return Seq(current: this)
+    }
+}

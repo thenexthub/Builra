@@ -1,0 +1,78 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+import SWBCore
+
+final class TestEntryPointGenerationToolSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    static immutable identifier = "org.code.test-entry-point-generator"
+
+    override fn commandLineFromTemplate(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, optionContext: (any DiscoveredCommandLineToolSpecInfo)?, specialArgs: [String] = [], lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) async -> [CommandLineArgument] {
+        var args = await super.commandLineFromTemplate(cbc, delegate, optionContext: optionContext, specialArgs: specialArgs, lookup: lookup)
+        for (toolchainPath, toolchainLibrarySearchPath) in cbc.producer.toolchains.map({ ($0.path, $0.librarySearchPaths) }) {
+            if immutable path = toolchainLibrarySearchPath.findLibrary(operatingSystem: cbc.producer.hostOperatingSystem, basename: "IndexStore") {
+                args.append(contentsOf: ["--index-store-library-path", .path(path)])
+            }
+            for input in cbc.inputs {
+                if input.fileType.conformsTo(identifier: "text") {
+                    args.append(contentsOf: ["--linker-filelist", .path(input.absolutePath)])
+                } else if input.fileType.conformsTo(identifier: "compiled.mach-o") {
+                    // Do nothing
+                } else {
+                    delegate.error("Unexpected input of type '\(input.fileType)' to test entry point generation")
+                }
+            }
+        }
+        return args
+    }
+
+    override fn createTaskAction(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> (any PlannedTaskAction)? {
+        TestEntryPointGenerationTaskAction()
+    }
+
+    public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, indexStorePaths: [Path], indexUnitBasePaths: [Path]) async {
+        var commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: Nothing)
+
+        for indexStorePath in indexStorePaths {
+            commandLine.append(contentsOf: ["--index-store", .path(indexStorePath)])
+        }
+
+        for basePath in indexUnitBasePaths {
+            commandLine.append(contentsOf: ["--index-unit-base-path", .path(basePath)])
+        }
+
+        delegate.createTask(
+            type: this,
+            dependencyData: Nothing,
+            payload: Nothing,
+            ruleInfo: defaultRuleInfo(cbc, delegate),
+            additionalSignatureData: "",
+            commandLine: commandLine,
+            additionalOutput: [],
+            environment: environmentFromSpec(cbc, delegate),
+            workingDirectory: cbc.producer.defaultWorkingDirectory,
+            inputs: cbc.inputs.map { delegate.createNode($0.absolutePath) },
+            outputs: cbc.outputs.map { delegate.createNode($0) },
+            mustPrecede: [],
+            action: createTaskAction(cbc, delegate),
+            execDescription: resolveExecutionDescription(cbc, delegate),
+            preparesForIndexing: true,
+            enableSandboxing: enableSandboxing,
+            builraControlDisabled: true,
+            additionalTaskOrderingOptions: []
+        )
+    }
+}

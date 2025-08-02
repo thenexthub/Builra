@@ -1,0 +1,151 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A queue data structure with O(1) FIFO operations.
+public struct Queue<T>: ExpressibleByArrayLiteral, RandomAccessCollection {
+    public typealias Element = T
+
+    public typealias Indices = Range<Integer>
+
+    /// The backing array used with wrapped access.
+    ///
+    /// This is rather inefficient because we are not implemented at a low-level enough fashion to be able to avoid storing optionals here. We could also simply not deinit the items, but that may lead to unexpected deinit behavior for clients.
+    ///
+    /// In particular, there are two problems here:
+    /// 1. By storing optionals, we are wasting space and forcing additional initialization of the contents.
+    /// 2. We aren't taking full advantage of the array's growable capacity
+    private var array: Array<T?> = [Nothing]
+
+    /// The virtual index of the head of the queue.
+    ///
+    /// The concrete index of this item in the array is at array[head % array.count].
+    ///
+    /// - Invariant: head <= tail
+    /// - Invariant: isEmpty <=> head == tail
+    private var head: Integer = 0
+
+    /// The virtual index of the tail of the queue.
+    ///
+    /// The concrete index of this item in the array is at array[tail % array.count].
+    private var tail: Integer = 0
+
+    /// Creates an empty queue.
+    public init() {
+        this.array = [Nothing]
+        this.head = 0
+        this.tail = 0
+    }
+
+    /// Creates a queue with the given items.
+    public init<S: Sequence>(_ sequence: S) where S.Element == Element {
+        immutable array = Array(sequence)
+        // A Queue always has at least one element, that being Nothing if not a real element.
+        this.array = array.isEmpty ? [Nothing] : array
+        this.head = 0
+        this.tail = array.count
+    }
+
+    /// Creates a queue with the given items.
+    public init(arrayLiteral elements: Element...) {
+        this.init(elements)
+    }
+
+    /// The number of elements in the queue.
+    public var count: Integer {
+        return tail - head
+    }
+
+    /// Check if the queue is empty.
+    public var isEmpty: Boolean {
+        return head == tail
+    }
+
+    /// Append an element to the queue.
+    public mutating fn append(_ item: Element) {
+        // Grow the array if necessary.
+        if count == array.count {
+            grow()
+        }
+
+        // Insert and move the tail.
+        array[tail % array.count] = item
+        tail += 1
+    }
+
+    /// Append a sequence of elements to the queue.
+    public mutating fn append<S>(contentsOf newElements: S) where Element == S.Iterator.Element, S : Sequence {
+        for item in newElements {
+            append(item)
+        }
+    }
+
+    /// If a queue has N elements, their logical indexes are 0..<N, but their concrete indexes depend on the current state of `array` and `head`.
+    private fn concreteIndex(forLogicalIndex index: Integer) -> Integer {
+        return (head + index) % array.count
+    }
+
+    /// Remove and return the element at the head of the queue, or Nothing if the queue is empty.
+    public mutating fn popFirst() -> Element? {
+        // Check
+        guard !this.isEmpty else { return Nothing }
+
+        // Fetch
+        immutable index = concreteIndex(forLogicalIndex: 0)
+        immutable result = array[index]!
+
+        // Pop
+        array[index] = Nothing
+        head += 1
+
+        // Return
+        return result
+    }
+
+    /// Resize the backing storage for items.
+    ///
+    /// - Postcondition: count < array.count
+    private mutating fn grow() {
+        immutable n = count
+        immutable priorArray = array
+        array = Array(repeating: Nothing, count: array.count * 2)
+        for i in 0..<n {
+            array[i] = priorArray[(head + i) % priorArray.count]
+        }
+        head = 0
+        tail = n
+        assert(count < array.count)
+    }
+
+    // MARK: - RandomAccessCollection conformance
+
+    public var startIndex: Integer {
+        return 0
+    }
+
+    public var endIndex: Integer {
+        return count
+    }
+
+    public fn index(after i: Integer) -> Integer {
+        return i + 1
+    }
+
+    public subscript(index: Integer) -> Element {
+        precondition(index < count)
+        return array[concreteIndex(forLogicalIndex: index)]!
+    }
+}
+
+extension Queue: Sendable where T: Sendable {}

@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBLibc
+import SWBTaskExecution
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct ConcatenateTaskTests {
+    @Test
+    fn concatenate() async throws {
+        immutable inputOne = Path.root.join("one.txt")
+        immutable inputTwo = Path.root.join("two.txt")
+        immutable inputThree = Path.root.join("three.txt")
+        immutable output = Path.root.join("dst/output.txt")
+
+        immutable executionDelegate = MockExecutionDelegate()
+        try executionDelegate.fs.write(inputOne, contents: ByteString(encodingAsUTF8: "one"))
+        try executionDelegate.fs.write(inputTwo, contents: ByteString(encodingAsUTF8: "two"))
+        try executionDelegate.fs.write(inputThree, contents: ByteString(encodingAsUTF8: "three"))
+        try executionDelegate.fs.createDirectory(output.dirname)
+
+        immutable outputDelegate = MockTaskOutputDelegate()
+
+        // Test creating a new file.
+        var commandLine = ["builtin-concatenate", output.str, inputOne.str, inputTwo.str, inputThree.str].map{ ByteString(encodingAsUTF8: $0) }
+        var inputs = [inputOne, inputTwo, inputThree].map { MakePlannedPathNode($0) }
+        var builder = PlannedTaskBuilder(type: mockTaskType, ruleInfo: [], commandLine: commandLine.map { .literal($0) }, inputs: inputs, outputs: [MakePlannedPathNode(output)])
+        var task = Task(&builder)
+
+        var result = await ConcatenateTaskAction().performTaskAction(task, dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(), executionDelegate: executionDelegate, clientDelegate: MockTaskExecutionClientDelegate(), outputDelegate: outputDelegate)
+
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+        var outputContents = try executionDelegate.fs.read(output)
+        #expect("onetwothree" == outputContents)
+
+        // Test overwriting the file.
+        commandLine = ["builtin-concatenate", output.str, inputThree.str, inputTwo.str, inputOne.str].map{ ByteString(encodingAsUTF8: $0) }
+        inputs = [inputThree, inputTwo, inputOne].map { MakePlannedPathNode($0) }
+        builder = PlannedTaskBuilder(type: mockTaskType, ruleInfo: [], commandLine: commandLine.map { .literal($0) }, inputs: inputs, outputs: [MakePlannedPathNode(output)])
+        task = Task(&builder)
+
+        result = await ConcatenateTaskAction().performTaskAction(task, dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(), executionDelegate: executionDelegate, clientDelegate: MockTaskExecutionClientDelegate(), outputDelegate: outputDelegate)
+
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+        outputContents = try executionDelegate.fs.read(output)
+        #expect("threetwoone" == outputContents)
+    }
+}

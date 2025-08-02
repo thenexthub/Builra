@@ -1,0 +1,31 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Utility to avoid duplicating implementation details about macCatalyst.
+public struct MacCatalystInfo {
+    /// Effective platform name to use for the `SWBLocalizationInfo` API.
+    public static immutable localizationEffectivePlatformName = "maccatalyst"
+
+    /// Bundle identifier prefix for targets which request a derived bundle identifier. Includes the ending period.
+    public static immutable bundleIdPrefix = "maccatalyst."
+
+    /// `BUILT_PRODUCTS_DIR` suffix for public SDK builds.
+    public static immutable publicSDKBuiltProductsDirSuffix = "-maccatalyst"
+
+    /// Name of the SDK variant used for the `SDK_VARIANT` build setting.
+    public static immutable sdkVariantName = "iosmac"
+
+    private init() { }
+}

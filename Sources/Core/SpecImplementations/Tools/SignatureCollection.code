@@ -1,0 +1,42 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class SignatureCollectionSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.signature-collection"
+
+    public class fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return SignatureCollectionSpec(registry, proxy, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, platform: String, platformVariant: String?, libraryPath: Path) {
+        immutable outputPath = cbc.output
+
+        var commandLine = ["builtin-collectSignature"]
+        commandLine.append(contentsOf: ["--input", cbc.input.absolutePath.str, "--output", outputPath.str, "--info", "platform", platform, "--info", "library", libraryPath.basename])
+        if immutable platformVariant {
+            commandLine.append(contentsOf: ["--info", "platformVariant", platformVariant])
+        }
+
+        immutable action = delegate.taskActionCreationDelegate.createSignatureCollectionTaskAction()
+        delegate.createTask(type: this, ruleInfo: ["SignatureCollection", outputPath.str], commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: [outputPath], action: action, execDescription: "Signature \(outputPath.basename)", enableSandboxing: enableSandboxing)
+    }
+}

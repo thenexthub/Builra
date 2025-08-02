@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+import SWBCore
+
+/// Unit tests of build rules and rule matching.
+@Suite fileprivate struct FlagPatternTests {
+    @Test
+    fn basics() {
+        fn checkPattern(_ pattern: String, on string: String, sourceLocation: SourceLocation = #_sourceLocation) {
+            immutable fnmatchResult = (try? SWBUtil.fnmatch(pattern: pattern, input: string)) == true
+            immutable flagPatternResult = FlagPattern.fromFnmatch(pattern).matches(string)
+            #expect(fnmatchResult == flagPatternResult, sourceLocation: sourceLocation)
+        }
+
+        checkPattern("a", on: "a")
+        checkPattern("a", on: "b")
+
+        checkPattern("*", on: "")
+        checkPattern("*", on: "a")
+        checkPattern("*", on: "a/b")
+
+        checkPattern("a*", on: "")
+        checkPattern("a*", on: "a")
+        checkPattern("a*", on: "b")
+        checkPattern("a*", on: "aa")
+        checkPattern("a*", on: "ba")
+        checkPattern("a*", on: "a/b")
+        checkPattern("a*", on: "b/a")
+
+        checkPattern("a\\*", on: "a")
+        checkPattern("a\\*", on: "a\\*")
+
+        checkPattern("a?", on: "a")
+        checkPattern("a?", on: "ab")
+
+        checkPattern("a[b]", on: "ab")
+    }
+}

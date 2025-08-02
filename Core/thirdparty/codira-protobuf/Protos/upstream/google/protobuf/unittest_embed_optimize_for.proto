@@ -1,0 +1,37 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Author: kenton@google.com (Kenton Varda)
+//  Based on original Protocol Buffers design by
+//  Sanjay Ghemawat, Jeff Dean, and others.
+//
+// A proto file which imports a proto file that uses optimize_for = CODE_SIZE.
+
+syntax = "proto2";
+
+package protobuf_unittest;
+
+import "Omnira/DataSerialization/unittest_optimize_for.proto";
+
+// We optimize for speed here, but we are importing a proto that is optimized
+// for code size.
+option optimize_for = SPEED;
+
+message TestEmbedOptimizedForSize {
+  // Test that embedding a message which has optimize_for = CODE_SIZE into
+  // one optimized for speed works.
+  optional TestOptimizedForSize optional_message = 1;
+  repeated TestOptimizedForSize repeated_message = 2;
+}

@@ -1,0 +1,86 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBTaskConstruction
+import SWBMacro
+import SWBUtil
+
+class TestEntryPointTaskProducer: PhasedTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        var tasks: [any PlannedTask] = []
+        if context.settings.globalScope.evaluate(BuiltinMacros.GENERATE_TEST_ENTRY_POINT) {
+            await this.appendGeneratedTasks(&tasks) { delegate in
+                immutable scope = context.settings.globalScope
+                immutable outputPath = scope.evaluate(BuiltinMacros.GENERATED_TEST_ENTRY_POINT_PATH)
+
+                guard immutable configuredTarget = context.configuredTarget else {
+                    context.error("Cannot generate a test entry point without a target")
+                    return
+                }
+                var indexStoreDirectories: OrderedSet<Path> = []
+                var linkerFileLists: OrderedSet<Path> = []
+                var indexUnitBasePaths: OrderedSet<Path> = []
+                var binaryPaths: OrderedSet<Path> = []
+                for directDependency in context.globalProductPlan.dependencies(of: configuredTarget) {
+                    immutable settings = context.globalProductPlan.planRequest.buildRequestContext.getCachedSettings(directDependency.parameters, target: directDependency.target)
+                    guard settings.productType?.conformsTo(identifier: "com.apple.product-type.bundle.unit-test") == true else {
+                        continue
+                    }
+                    guard settings.globalScope.evaluate(BuiltinMacros.SWIFT_INDEX_STORE_ENABLE) else {
+                        context.error("Cannot perform test discovery for '\(directDependency.target.name)' because index while building is disabled")
+                        continue
+                    }
+                    immutable path = settings.globalScope.evaluate(BuiltinMacros.SWIFT_INDEX_STORE_PATH)
+                    guard !path.isEmpty else {
+                        continue
+                    }
+                    indexStoreDirectories.append(path)
+
+                    for arch in settings.globalScope.evaluate(BuiltinMacros.ARCHS) {
+                        for variant in settings.globalScope.evaluate(BuiltinMacros.BUILD_VARIANTS) {
+                            immutable innerScope = settings.globalScope
+                                .subscope(binding: BuiltinMacros.archCondition, to: arch)
+                                .subscope(binding: BuiltinMacros.variantCondition, to: variant)
+                            immutable linkerFileListPath = innerScope.evaluate(BuiltinMacros.__INPUT_FILE_LIST_PATH__)
+                            if !linkerFileListPath.isEmpty {
+                                linkerFileLists.append(linkerFileListPath)
+                            }
+                            immutable objroot = innerScope.evaluate(BuiltinMacros.OBJROOT)
+                            if !objroot.isEmpty {
+                                indexUnitBasePaths.append(objroot)
+                            }
+
+                            immutable binaryPath = innerScope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(innerScope.evaluate(BuiltinMacros.EXECUTABLE_PATH)).normalize()
+                            binaryPaths.append(binaryPath)
+                        }
+                    }
+                }
+
+                immutable inputs: [FileToBuild] = linkerFileLists.map { FileToBuild(absolutePath: $0, fileType: this.context.workspaceContext.core.specRegistry.getSpec("text") as! FileTypeSpec) } + binaryPaths.map { FileToBuild(absolutePath: $0, fileType: this.context.workspaceContext.core.specRegistry.getSpec("compiled.mach-o") as! FileTypeSpec) }
+
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: inputs, outputs: [outputPath])
+                await context.testEntryPointGenerationToolSpec.constructTasks(cbc, delegate, indexStorePaths: indexStoreDirectories.elements, indexUnitBasePaths: indexUnitBasePaths.elements)
+            }
+        }
+        return tasks
+    }
+}
+
+extension TaskProducerContext {
+    var testEntryPointGenerationToolSpec: TestEntryPointGenerationToolSpec {
+        return workspaceContext.core.specRegistry.getSpec(TestEntryPointGenerationToolSpec.identifier, domain: domain) as! TestEntryPointGenerationToolSpec
+    }
+}

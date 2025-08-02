@@ -1,0 +1,392 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBUtil
+import SWBTestSupport
+import SWBTaskExecution
+import SWBProtocol
+
+@Suite
+fileprivate struct DevelopmentAssetsDiagnosticTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsExcludeNoDirectory() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that specified development resources need to exist to get excluded
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [])
+                ])
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Release")
+            try await BuildOperationTester(getCore(), testProject, simulated: false).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkNoTask(.matchRuleItem("Preview"))
+
+                results.checkTask(.matchRuleType("ValidateDevelopmentAssets")) { task in
+                    results.checkError("[targetIntegrity] One of the paths in DEVELOPMENT_ASSET_PATHS does not exist: \(tmpDirPath.str)/Preview Assets (for task: [\"ValidateDevelopmentAssets\", \"\(tmpDirPath.str)/build/aProject.build/Release/AppTarget.build\"])")
+                    results.checkTaskResult(task, expected: .exit(exitStatus: .exit(1), metrics: Nothing))
+                }
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsExclude() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that specified development resources get excluded
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg", path: "ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png", path: "ExampleImage2.jpg")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [TestCopyFilesBuildPhase(["ExampleImage1.jpg", "ExampleImage2.png"], destinationSubfolder: .frameworks, onlyForDeployment: false)])
+                ])
+
+            immutable fs = localFS
+            try fs.createDirectory(Path("\(tmpDirPath.str)/Preview Assets"), recursive: true)
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage1.jpg"), contents: ByteString(""))
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage2.png"), contents: ByteString(""))
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Release")
+            try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkNoTask(.matchRuleItemPattern(.contains("Preview")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage1")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage2")))
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsExcludeDeploymentPostprocessing() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that specified development resources get excluded
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg", path: "ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png", path: "ExampleImage2.jpg")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Debug")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Debug",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [TestCopyFilesBuildPhase(["ExampleImage1.jpg", "ExampleImage2.png"], destinationSubfolder: .frameworks, onlyForDeployment: false)])
+                ])
+
+            immutable fs = localFS
+            try fs.createDirectory(Path("\(tmpDirPath.str)/Preview Assets"), recursive: true)
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage1.jpg"), contents: ByteString(""))
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage2.png"), contents: ByteString(""))
+
+            immutable parameters = BuildParameters(action: .build, configuration: "Release", overrides: ["DEPLOYMENT_POSTPROCESSING": "YES"])
+            try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkNoTask(.matchRuleItemPattern(.contains("Preview")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage1")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage2")))
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsNoExcludeNotSpecified() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that specified development resources get not excluded
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg", path: "ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png", path: "ExampleImage2.jpg")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release", buildSettings: [
+                    "CODE_SIGNING_ALLOWED": "NO",
+                    "DSTROOT": tmpDirPath.join("dstroot").str,
+                ])],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release")],
+                                       buildPhases: [
+                                        TestCopyFilesBuildPhase(["ExampleImage1.jpg", "ExampleImage2.png"], destinationSubfolder: .frameworks, onlyForDeployment: false)
+                                       ])
+                ])
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Release")
+
+            immutable fs = localFS
+            try fs.createDirectory(Path("\(tmpDirPath.str)/Preview Assets"), recursive: true)
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage1.jpg"), contents: ByteString(""))
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage2.jpg"), contents: ByteString(""))
+
+            try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkTask(.matchRuleItemPattern(.contains("ExampleImage1"))) { task in
+                    #expect(task.ruleInfo.first == "Copy")
+                }
+                results.checkTask(.matchRuleItemPattern(.contains("ExampleImage2"))) { task in
+                    #expect(task.ruleInfo.first == "Copy")
+                }
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsNoExcludeDevelopment() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that specified development resources get not excluded
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg", path: "ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png", path: "ExampleImage2.jpg")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Debug")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Debug",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [
+                                        TestCopyFilesBuildPhase(["ExampleImage1.jpg", "ExampleImage2.png"], destinationSubfolder: .frameworks, onlyForDeployment: false)
+                                       ])
+                ])
+
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug")
+
+            immutable fs = localFS
+            try fs.createDirectory(Path("\(tmpDirPath.str)/Preview Assets"), recursive: true)
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage1.jpg"), contents: ByteString(""))
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage2.jpg"), contents: ByteString(""))
+
+            try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkTask(.matchRuleItemPattern(.contains("ExampleImage1"))) { task in
+                    #expect(task.ruleInfo.first == "Copy")
+                }
+                results.checkTask(.matchRuleItemPattern(.contains("ExampleImage2"))) { task in
+                    #expect(task.ruleInfo.first == "Copy")
+                }
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsFileRemovedRebuild() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Test that errors are emitted if files get removed during null rebuilds
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [ TestGroup("Preview Assets") ]),
+                buildConfigurations: [TestBuildConfiguration("Debug")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Debug",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])])
+                ])
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Debug")
+
+            immutable fs = localFS
+            immutable developmentAssetsDirectoryPath = Path("\(tmpDirPath.str)/Preview Assets")
+            try fs.createDirectory(developmentAssetsDirectoryPath, recursive: true)
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs)
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                // we don't expect errors because the specified directory exists
+                results.checkNoDiagnostics()
+            }
+
+            // removing the directory should emit the error, even it nothing else changed
+            try fs.removeDirectory(developmentAssetsDirectoryPath)
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkError("[targetIntegrity] One of the paths in DEVELOPMENT_ASSET_PATHS does not exist: \(tmpDirPath.str)/Preview Assets (for task: [\"ValidateDevelopmentAssets\", \"\(tmpDirPath.str)/build/aProject.build/Debug/AppTarget.build\"])")
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    /// Tests that the diagnostic gets disambiguated with the project path in the case of multiple projects with the same name in the workspace.
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsExcludeNoDirectoryTwoProjects() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testProject = TestProject(
+                "aProject",
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [])
+                ])
+
+            immutable testProject2 = TestProject(
+                "aProject",
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage3.jpg"),
+                                                    TestFile("ExampleImage4.png")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release",
+                                                                                    buildSettings: [
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'"
+                                                                                    ])],
+                                       buildPhases: [])
+                ])
+
+            immutable testWorkspace = TestWorkspace("aWorkspace", sourceRoot: tmpDirPath, projects: [testProject, testProject2])
+            immutable parameters = BuildParameters(action: .install, configuration: "Release")
+            try await BuildOperationTester(getCore(), testWorkspace, simulated: false).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkNoTask(.matchRuleItem("Preview"))
+
+                results.checkError("[targetIntegrity] One of the paths in DEVELOPMENT_ASSET_PATHS does not exist: \(tmpDirPath.str)/aProject/Preview Assets (for task: [\"ValidateDevelopmentAssets\", \"\(tmpDirPath.str)/aProject/build/aProject.build/Release/AppTarget.build\"])")
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn developmentAssetsOverriddenSRCROOT() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            // Some environments override SRCROOT but that shouldn't interfere with relative paths in DEVELOPMENT_ASSET_PATHS since they are based in PROJECT_DIR
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup("AppTarget",
+                                     children: [
+                                        TestGroup("Preview Assets",
+                                                  children: [
+                                                    TestFile("ExampleImage1.jpg", path: "ExampleImage1.jpg"),
+                                                    TestFile("ExampleImage2.png", path: "ExampleImage2.jpg")
+                                                  ])
+                                     ]),
+                buildConfigurations: [TestBuildConfiguration("Release")],
+                targets: [
+                    TestStandardTarget("AppTarget",
+                                       type: .commandLineTool,
+                                       buildConfigurations: [TestBuildConfiguration("Release",
+                                                                                    buildSettings: [
+                                                                                        "CODE_SIGNING_ALLOWED": "NO",
+                                                                                        "DEVELOPMENT_ASSET_PATHS": "'Preview Assets'",
+                                                                                        "SRCROOT": "Sources"
+                                                                                    ])],
+                                       buildPhases: [TestCopyFilesBuildPhase(["ExampleImage1.jpg", "ExampleImage2.png"], destinationSubfolder: .frameworks, onlyForDeployment: false)])
+                ])
+
+            immutable fs = localFS
+            try fs.createDirectory(Path("\(tmpDirPath.str)/Preview Assets"), recursive: true)
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage1.jpg"), contents: ByteString(""))
+            try fs.write(Path("\(tmpDirPath.str)/Preview Assets/ExampleImage2.png"), contents: ByteString(""))
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Release")
+            try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: fs).checkBuild(parameters: parameters, runDestination: .macOS) { results in
+                results.checkNoTask(.matchRuleItemPattern(.contains("Preview")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage1")))
+                results.checkNoTask(.matchRuleItemPattern(.contains("ExampleImage2")))
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

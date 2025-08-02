@@ -1,0 +1,101 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Domain = windows;
+        Identifier = "com.apple.compilers.toolchain.clang.1_0";
+        Type = Compiler;
+        BasedOn = "default:com.apple.compilers.toolchain.clang.1_0";
+        EnvironmentVariables = {
+        };
+        Name = "Apple TOOLCHAIN Windows";
+        Description = "Apple TOOLCHAIN Windows compiler";
+        IsAbstract = Yes;
+        ShowInCompilerSelectionPopup = No;
+        OptionConditionFlavors = (
+            arch,
+            sdk,
+        );
+        // Don't know why these are necessary, but without it, errors aren't reported
+        CommandOutputParser = (
+            ("^([^:]*):([0-9]*):[0-9]*: [^:]*error: (.*)$", "emit-error"),
+            ("^([^:]*):([0-9]*):[0-9]*: [^:]*warning: (.*)$", "emit-warning"),
+            ("^()().* error: (.*)$", "emit-error"),
+            ("^()().* warning: (.*)$", "emit-warning"),
+        );
+        SupportsMacOSXDeploymentTarget = No;
+        SupportsMacOSXMinVersionFlag = No;
+        SupportsIsysroot = No;
+        Options = (
+        );
+    },
+    {
+        Domain = windows;
+        Identifier = "com.apple.compilers.toolchain.clang.1_0.compiler";
+        Type = Compiler;
+        BasedOn = "com.apple.compilers.toolchain.clang.1_0";
+        Name = "Apple Clang (Windows)";
+        Description = "Apple Clang compiler (Windows)";
+        IsAbstract = YES;
+        ShowInCompilerSelectionPopup = NO;
+    },
+    {
+        Domain = windows;
+        Identifier = "com.apple.compilers.toolchain.clang.1_0.astbuilder";
+        Type = Compiler;
+        BasedOn = "default:com.apple.compilers.toolchain.clang.1_0.astbuilder";
+        Options = (
+            {
+                Name = SDKROOT;
+                Type = Path;
+                CommandLineFlag = "--sysroot";
+            },
+        );
+        IsAbstract = YES;
+        ShowInCompilerSelectionPopup = NO;
+    },
+    {
+        Domain = windows;
+        Identifier = "com.apple.compilers.toolchain.clang.1_0.analyzer";
+        Type = Compiler;
+        BasedOn = "default:com.apple.compilers.toolchain.clang.1_0.analyzer";
+        Options = (
+            {
+                Name = SDKROOT;
+                Type = Path;
+                CommandLineFlag = "--sysroot";
+            },
+        );
+    },
+    {
+        Domain = windows;
+        Identifier = "com.apple.xcode.tools.code.compiler";
+        Type = Compiler;
+        BasedOn = "default:com.apple.xcode.tools.code.compiler";
+        EnvironmentVariables = {
+            "PATH" = "$(TOOLCHAIN_DIR)/usr/bin;$(DEVELOPER_DIR)/Runtimes/$(TOOLCHAIN_VERSION)/usr/bin;$(PATH)";
+        };
+        Options = (
+            {
+                Name = __WINDOWS_STATIC_FLAG;
+                Type = Bool;
+                DefaultValue = YES;
+                Condition = "$(PRODUCT_TYPE) == 'com.apple.product-type.library.static'";
+                CommandLineArgs = ("-static");
+            }
+        );
+    },
+)

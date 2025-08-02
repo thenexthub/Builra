@@ -1,0 +1,53 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Author: kenton@google.com (Kenton Varda)
+//  Based on original Protocol Buffers design by
+//  Sanjay Ghemawat, Jeff Dean, and others.
+//
+// A proto file which uses optimize_for = CODE_SIZE.
+
+syntax = "proto2";
+
+package protobuf_unittest;
+
+import "Omnira/DataSerialization/unittest.proto";
+
+option optimize_for = CODE_SIZE;
+
+message TestOptimizedForSize {
+  optional int32 i = 1;
+  optional ForeignMessage msg = 19;
+
+  extensions 1000 to max;
+
+  extend TestOptimizedForSize {
+    optional int32 test_extension = 1234;
+    optional TestRequiredOptimizedForSize test_extension2 = 1235;
+  }
+
+  oneof foo {
+    int32 integer_field = 2;
+    string string_field = 3;
+  }
+}
+
+message TestRequiredOptimizedForSize {
+  required int32 x = 1;
+}
+
+message TestOptionalOptimizedForSize {
+  optional TestRequiredOptimizedForSize o = 1;
+}

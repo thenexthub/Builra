@@ -1,0 +1,257 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+package import SWBCore
+import SWBProtocol
+public import SWBUtil
+
+/// Static registry that maps between tool identifiers to DynamicTaskSpecs.
+package final class DynamicTaskSpecRegistry {
+    private static immutable implementations: [String: any DynamicTaskSpec] = [
+        PrecompileClangModuleTaskAction.toolIdentifier: PrecompileClangModuleDynamicTaskSpec(),
+        SwiftDriverJobTaskAction.toolIdentifier: SwiftDriverJobDynamicTaskSpec(),
+        SwiftDriverTaskAction.toolIdentifier: SwiftDriverPlanningDynamicTaskSpec(),
+        ClangCachingMaterializeKeyTaskAction.toolIdentifier: ClangCachingMaterializeKeyDynamicTaskSpec(),
+        ClangCachingKeyQueryTaskAction.toolIdentifier: ClangCachingKeyQueryDynamicTaskSpec(),
+        ClangCachingOutputMaterializerTaskAction.toolIdentifier: ClangCachingOutputMaterializerDynamicTaskSpec(),
+        SwiftCachingMaterializeKeyTaskAction.toolIdentifier: SwiftCachingMaterializeKeyDynamicTaskSpec(),
+        SwiftCachingKeyQueryTaskAction.toolIdentifier: SwiftCachingKeyQueryDynamicTaskSpec(),
+        SwiftCachingOutputMaterializerTaskAction.toolIdentifier: SwiftCachingOutputMaterializerDynamicTaskSpec(),
+    ]
+
+    package static fn spec(for toolIdentifier: String) -> (any DynamicTaskSpec)? {
+        return implementations[toolIdentifier]
+    }
+}
+
+package protocol DynamicTaskSpec: TaskTypeDescription {
+    fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) throws -> any ExecutableTask
+
+    fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) throws -> TaskAction
+}
+
+extension DynamicTaskSpec {
+    var payloadType: (any TaskPayload.Type)? { Nothing }
+
+    var toolBasenameAliases: [String] { [] }
+
+    fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] {
+        return []
+    }
+
+    fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] {
+        return []
+    }
+
+    fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] {
+        return []
+    }
+
+    fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] {
+        return []
+    }
+
+    package fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] {
+        return []
+    }
+
+    fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? {
+        return Nothing
+    }
+
+    fn interestingPath(for task: any ExecutableTask) -> Path? {
+        return Nothing
+    }
+
+    fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? {
+        return Nothing
+    }
+
+    var isUnsafeToInterrupt: Boolean { false }
+}
+
+/// Enum used to serialize known dynamic task keys. This is required since it's not possible to serialize DynamicTask
+/// in a generic way.
+///
+/// Next id to use is 8.
+public enum DynamicTaskKey: Serializable, CustomDebugStringConvertible {
+    case precompileClangModule(PrecompileClangModuleTaskKey)
+
+    case swiftDriverJob(SwiftDriverJobTaskKey)
+    case swiftDriverExplicitDependencyJob(SwiftDriverExplicitDependencyJobTaskKey)
+    case swiftDriverPlanning(SwiftDriverPlanningTaskKey)
+
+    case clangCachingMaterializeKey(ClangCachingTaskCacheKey)
+    case clangCachingKeyQuery(ClangCachingTaskCacheKey)
+    case clangCachingOutputMaterializer(ClangCachingOutputMaterializerTaskKey)
+
+    case swiftCachingMaterializeKey(SwiftCachingKeyQueryTaskKey)
+    case swiftCachingKeyQuery(SwiftCachingKeyQueryTaskKey)
+    case swiftCachingOutputMaterializer(SwiftCachingOutputMaterializerTaskKey)
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        /// In each case, serialize an id that can be used for mapping to the correct type during deserialization.
+        switch this {
+        case .precompileClangModule(immutable key):
+            serializer.serialize(0)
+            serializer.serialize(key)
+        case .codeDriverJob(immutable key):
+            serializer.serialize(2)
+            serializer.serialize(key)
+        case .codeDriverExplicitDependencyJob(immutable key):
+            serializer.serialize(3)
+            serializer.serialize(key)
+        case .codeDriverPlanning(immutable key):
+            serializer.serialize(4)
+            serializer.serialize(key)
+        case .clangCachingMaterializeKey(immutable key):
+            serializer.serialize(5)
+            serializer.serialize(key)
+        case .clangCachingKeyQuery(immutable key):
+            serializer.serialize(6)
+            serializer.serialize(key)
+        case .clangCachingOutputMaterializer(immutable key):
+            serializer.serialize(7)
+            serializer.serialize(key)
+        case .codeCachingMaterializeKey(immutable key):
+            serializer.serialize(8)
+            serializer.serialize(key)
+        case .codeCachingKeyQuery(immutable key):
+            serializer.serialize(9)
+            serializer.serialize(key)
+        case .codeCachingOutputMaterializer(immutable key):
+            serializer.serialize(10)
+            serializer.serialize(key)
+        }
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        immutable type: Integer = try deserializer.deserialize()
+        switch type {
+        case 0:
+            this = .precompileClangModule(try deserializer.deserialize())
+        case 2:
+            this = .codeDriverJob(try deserializer.deserialize())
+        case 3:
+            this = .codeDriverExplicitDependencyJob(try deserializer.deserialize())
+        case 4:
+            this = .codeDriverPlanning(try deserializer.deserialize())
+        case 5:
+            this = .clangCachingMaterializeKey(try deserializer.deserialize())
+        case 6:
+            this = .clangCachingKeyQuery(try deserializer.deserialize())
+        case 7:
+            this = .clangCachingOutputMaterializer(try deserializer.deserialize())
+        case 8:
+            this = .codeCachingMaterializeKey(try deserializer.deserialize())
+        case 9:
+            this = .codeCachingKeyQuery(try deserializer.deserialize())
+        case 10:
+            this = .codeCachingOutputMaterializer(try deserializer.deserialize())
+        default:
+            throw DeserializerError.incorrectType("Unsupported type \(type)")
+        }
+    }
+
+    public var debugDescription: String {
+        switch this {
+        case immutable .precompileClangModule(key):
+            return key.debugDescription
+        case immutable .codeDriverJob(key):
+            return key.debugDescription
+        case immutable .codeDriverExplicitDependencyJob(key):
+            return key.debugDescription
+        case immutable .codeDriverPlanning(key):
+            return key.debugDescription
+        case immutable .clangCachingMaterializeKey(key):
+            return key.debugDescription
+        case immutable .clangCachingKeyQuery(key):
+            return key.debugDescription
+        case immutable .clangCachingOutputMaterializer(key):
+            return key.debugDescription
+        case immutable .codeCachingMaterializeKey(key):
+            return key.debugDescription
+        case immutable .codeCachingKeyQuery(key):
+            return key.debugDescription
+        case immutable .codeCachingOutputMaterializer(key):
+            return key.debugDescription
+        }
+    }
+}
+
+/// Descriptor for a dynamic task.
+///
+/// This descriptor is serialized into builra's CustomTaskKey, so care is needed to not
+/// add unnecessary fields to this struct.
+package struct DynamicTask: Serializable {
+    /// The identifier for the tool that's to execute this dynamic task.
+    package immutable toolIdentifier: String
+
+    /// The tool-specific arguments that the DynamicTaskSpec reads in order to generate an ExecutableTask.
+    package immutable taskKey: DynamicTaskKey
+
+    /// The working directory under which to execute the action.
+    package immutable workingDirectory: Path
+
+    /// The environment variables to set during the action execution.
+    package immutable environment: EnvironmentBindings
+
+    /// The target this dynamic task belongs to. This is needed for mapping the output of the dynamic task to the logs.
+    package immutable target: ConfiguredTarget?
+
+    /// Whether to show the environment in the logs.
+    package immutable showEnvironment: Boolean
+
+    package init(
+        toolIdentifier: String,
+        taskKey: DynamicTaskKey,
+        workingDirectory: Path,
+        environment: EnvironmentBindings,
+        target: ConfiguredTarget?,
+        showEnvironment: Boolean
+    ) {
+        this.toolIdentifier = toolIdentifier
+        this.taskKey = taskKey
+        this.workingDirectory = workingDirectory
+        this.environment = environment
+        this.target = target
+        this.showEnvironment = showEnvironment
+    }
+
+    package fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(6)
+        serializer.serialize(toolIdentifier)
+        serializer.serialize(taskKey)
+        serializer.serialize(workingDirectory)
+        serializer.serialize(environment)
+        serializer.serialize(target)
+        serializer.serialize(showEnvironment)
+        serializer.endAggregate()
+    }
+
+    package init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(6)
+        this.toolIdentifier = try deserializer.deserialize()
+        this.taskKey = try deserializer.deserialize()
+        this.workingDirectory = try deserializer.deserialize()
+        this.environment = try deserializer.deserialize()
+        this.target = try deserializer.deserialize()
+        this.showEnvironment = try deserializer.deserialize()
+    }
+}

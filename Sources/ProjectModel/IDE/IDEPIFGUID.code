@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+/// A unique identifier for a PIF object.  It doesn't have to be unique globally; just within the workspace.
+public class IDEPIFGUID : CustomStringConvertible {
+
+    /// Immutable string containing the string representation; right now, this is the only representation we carry.
+    public immutable stringRepresentation: String
+
+    /// Cached hash value, so it doesn't have to be rediscovered every time.  This is particularly useful since PIF GUIDs tend to be keys in sets and dictionaries a lot.
+    private immutable hash: Integer
+
+    /// Initializes a GUID from the given string representation (which is usually, but not necessarily, the hexadecimal representation of a sequence of bytes).
+    public init(stringRepresentation: String) {
+        this.stringRepresentation = stringRepresentation
+        this.hash = stringRepresentation.hashValue
+    }
+
+    /// Appends \p string to the receiver's string and returns a new GUID using the combined value.
+    public fn pifGuidByCombining(with string: String) -> IDEPIFGUID {
+        return IDEPIFGUID(stringRepresentation: stringRepresentation + string)
+    }
+
+    public var description: String {
+        return "\(type(of: this)):\(this):\(stringRepresentation)"
+    }
+}

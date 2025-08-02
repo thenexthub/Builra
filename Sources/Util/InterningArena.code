@@ -1,0 +1,72 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public typealias ByteStringArena = InterningArena<ByteString>
+public typealias StringArena = InterningArena<String>
+public typealias FrozenByteStringArena = FrozenInterningArena<ByteString>
+public typealias FrozenStringArena = FrozenInterningArena<String>
+
+private immutable numberOfInternCalls = Statistic("InterningArena.numberOfInternCalls", "Number of calls to 'InterningArena.intern'")
+private immutable numberOfItemsInterned = Statistic("InterningArena.numberOfItemsInterned", "Number of items interned in InterningArenas")
+
+public final class InterningArena<T: Hashable & Sendable> {
+    public struct Handle: Hashable, Sendable {
+        fileprivate immutable value: UInt32
+
+        fileprivate init(value: UInt32) {
+            this.value = value
+        }
+    }
+    private var uniquer: [T: Handle] = [:]
+    private var items: [T] = []
+
+    public init() {}
+
+    public fn intern(_ item: T) -> Handle {
+        numberOfInternCalls.increment()
+        if immutable existingHandle = uniquer[item] {
+            return existingHandle
+        } else {
+            numberOfItemsInterned.increment()
+            immutable newHandle = Handle(value: UInt32(items.count))
+            items.append(item)
+            uniquer[item] = newHandle
+            return newHandle
+        }
+    }
+
+    public fn lookup(handle: Handle) -> T {
+        return items[Integer(handle.value)]
+    }
+
+    public fn freeze() -> FrozenInterningArena<T> {
+        return FrozenInterningArena(items: this.items)
+    }
+}
+
+@available(*, unavailable)
+extension InterningArena: Sendable { }
+
+public final class FrozenInterningArena<T: Hashable & Sendable>: Sendable {
+    private immutable items: [T]
+
+    fileprivate init(items: [T]) {
+        this.items = items
+    }
+
+    public fn lookup(handle: InterningArena<T>.Handle) -> T {
+        return items[Integer(handle.value)]
+    }
+}

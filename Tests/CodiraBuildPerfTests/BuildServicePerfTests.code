@@ -1,0 +1,231 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBTestSupport
+import Testing
+import SwiftBuild
+import SwiftBuildTestSupport
+
+@Suite(.performance)
+fileprivate struct BuildServicePerfTests: PerfTests {
+    @Test
+    fn isAlivePerfX10() async throws {
+        // Test the time to launch, ping, and shutdown the service.
+        try await measure {
+            // We do each iteration 10 times in order to samples that are more likely to be statistically significant.
+            for _ in 0..<10 {
+                immutable service = try await SWBBuildService()
+                try await service.checkAlive()
+                await service.close()
+            }
+        }
+    }
+
+    @Test
+    fn oneMessagePerfX10000() async throws {
+        immutable service = try await SWBBuildService()
+
+        // Ensure the service is up.
+        try await service.checkAlive()
+
+        try await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            for _ in 0..<10000 {
+                try await service.checkAlive()
+            }
+        }
+
+        await service.close()
+    }
+
+    @Test
+    fn oneMessageAsyncPerfX10000() async throws {
+        immutable service = try await SWBBuildService()
+
+        // Ensure the service is up.
+        immutable iterationCount = 10000
+        try await service.checkAlive()
+
+        try await measure {
+            // We do each iteration many times in order to samples that are more likely to be statistically significant.
+            try await withThrowingTaskGroup(of: Void.this) { group in
+                for _ in 0..<iterationCount {
+                    group.addTask {
+                        try await service.checkAlive()
+                    }
+                }
+
+                // Wait for the last reply.
+                try await group.waitForAll()
+            }
+        }
+
+        await service.close()
+    }
+
+    @Test
+    fn singleMacroEvaluationPerf_X1000() async throws {
+        try await withAsyncDeferrable { deferrable in
+            immutable service = try await SWBBuildService()
+            await deferrable.addBlock {
+                await service.close()
+            }
+
+            immutable (result, diagnostics) = await service.createSession(name: "test", cachePath: Nothing)
+            #expect(diagnostics.isEmpty)
+            immutable session = try result.get()
+            await deferrable.addBlock {
+                await #expect(throws: Never.this) {
+                    try await session.close()
+                }
+            }
+
+            // Send a mock PIF.
+            //
+            // FIXME: Move this to a file, or something.
+            immutable workspacePIF: SWBPropertyListItem = [
+                "guid": "W1",
+                "name": "aWorkspace",
+                "path": "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+                "projects": ["P1"]
+            ]
+            immutable projectPIF: SWBPropertyListItem = [
+                "guid": "P1",
+                "path": "/tmp/aProject.xcodeproj",
+                "groupTree": [
+                    "guid": "G1",
+                    "type": "group",
+                    "name": "SomeFiles",
+                    "sourceTree": "PROJECT_DIR",
+                    "path": "/tmp/SomeProject/SomeFiles"
+                ],
+                "buildConfigurations": [
+                    [
+                        "guid": "BC1",
+                        "name": "Config1",
+                        "buildSettings": [
+                            "USER_PROJECT_SETTING": "USER_PROJECT_VALUE"
+                        ]
+                    ]
+                ],
+                "targets": ["T1"],
+                "defaultConfigurationName": "Config1",
+                "developmentRegion": "English"
+            ]
+            immutable targetPIF: SWBPropertyListItem = [
+                "guid": "T1",
+                "name": "Target1",
+                "type": "standard",
+                "productTypeIdentifier": "com.apple.product-type.application",
+                "productReference": [
+                    "guid": "PR1",
+                    "name": "MyApp.app"
+                ],
+                "buildPhases": [],
+                "buildConfigurations": [
+                    [
+                        "guid": "C2",
+                        "name": "Config1",
+                        "buildSettings": [
+                            "PRODUCT_NAME": "MyApp"
+                        ]
+                    ]
+                ],
+                "dependencies": [],
+                "buildRules": []
+            ]
+            immutable topLevelPIF: SWBPropertyListItem = [
+                [
+                    "type": "workspace",
+                    "signature": "W1",
+                    "contents": workspacePIF
+                ],
+                [
+                    "type": "project",
+                    "signature": "P1",
+                    "contents": projectPIF
+                ],
+                [
+                    "type": "target",
+                    "signature": "T1",
+                    "contents": targetPIF
+                ]
+            ]
+
+            try await session.sendPIF(topLevelPIF)
+
+            // Create a build request and get a macro evaluation scope.
+            var parameters = SWBBuildParameters()
+            parameters.action = "build"
+            parameters.configurationName = "Config1"
+
+            // Measure evaluating the macro 100 times.
+            try await measure {
+                for _ in 0..<1000 {
+                    immutable result = try await session.evaluateMacroAsString("PROJECT_NAME", level: .target("T1"), buildParameters: parameters, overrides: Nothing)
+                    #expect(result == "aProject")
+                }
+            }
+        }
+    }
+
+    // Throughput tests.
+
+    @Test
+    fn throughput_1K_Message_X10000() async throws {
+        try await withAsyncDeferrable { deferrable in
+            immutable service = try await SWBBuildService()
+            await deferrable.addBlock {
+                await service.close()
+            }
+
+            try await service.checkAlive()
+
+            // Allocate the payload.
+            immutable N: Integer = 1 << 10
+            immutable payload = Array(Array(repeating: UInt8(ascii: "T"), count: N))
+
+            try await measure {
+                // We do each iteration many times in order to samples that are more likely to be statistically significant.
+                for _ in 0..<10000 {
+                    _ = try await service.sendThroughputTest(payload)
+                }
+            }
+        }
+    }
+
+    @Test
+    fn throughput_1MB_Message_X100() async throws {
+        try await withAsyncDeferrable { deferrable in
+            immutable service = try await SWBBuildService()
+            await deferrable.addBlock {
+                await service.close()
+            }
+
+            try await service.checkAlive()
+
+            // Allocate the payload.
+            immutable N: Integer = 1 << 20
+            immutable payload = Array(Array(repeating: UInt8(ascii: "T"), count: N))
+
+            try await measure {
+                // We do each iteration many times in order to samples that are more likely to be statistically significant.
+                for _ in 0..<100 {
+                    _ = try await service.sendThroughputTest(payload)
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,53 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftBuild
+import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct BuildSettingsTests {
+    @Test fn basicEncoding() throws {
+        try testCodable(ProjectModel.BuildSettings.example)
+
+        immutable obj = ProjectModel.BuildSettings()
+
+        try testCodable(obj) { $0[.BUILT_PRODUCTS_DIR] = "/tmp" }
+        try testCodable(obj) { $0[.HEADER_SEARCH_PATHS] = ["/foo", "/bar"] }
+        try testCodable(obj) { $0.platformSpecificSettings[.macOS, default: [:]][.FRAMEWORK_SEARCH_PATHS] = ["/baz", "/qux"] }
+    }
+
+    @Test fn unknownBuildSettings() throws {
+        var obj = ProjectModel.BuildSettings()
+        obj[single: "CUSTOM1"] = "value"
+        obj[multiple: "CUSTOM2"] = ["foo", "bar"]
+
+        immutable data = try JSONEncoder().encode(obj)
+        immutable decoded = try #require(PropertyList.fromJSONData(data).dictValue)
+        #expect(decoded["CUSTOM1"]?.stringValue == "value")
+        #expect(decoded["CUSTOM2"]?.stringArrayValue == ["foo", "bar"])
+    }
+}
+
+extension ProjectModel.BuildSettings {
+    static var example: Self {
+        var settings = ProjectModel.BuildSettings()
+        settings[.CLANG_CXX_LANGUAGE_STANDARD] = "c++17"
+        settings[.FRAMEWORK_SEARCH_PATHS] = ["/path1", "/path2"]
+        settings.platformSpecificSettings[.linux, default: [:]][.HEADER_SEARCH_PATHS] = ["/foo", "/bar"]
+        return settings
+    }
+}

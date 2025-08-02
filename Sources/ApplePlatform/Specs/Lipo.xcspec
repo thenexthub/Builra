@@ -1,0 +1,46 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Identifier = com.apple.xcode.linkers.lipo;
+        Type = Linker;
+        Name = "Lipo";
+        Description = "Create a universal binary using lipo";
+        IsAbstract = Yes;       // This is an internal tool, so we keep it out of the user interface
+        BinaryFormats = (mach-o);
+        CommandLine = "lipo -create -arch_only [inputs] [options] -output $(OutputPath)";
+        RuleName = "CreateUniversalBinary $(OutputPath) $(CURRENT_VARIANT) $(ARCHS:quote)";
+        CommandIdentifier = "create:$(OutputPath)";
+        ExecDescription = "Create universal binary $(OutputFile:file)";
+        ProgressDescription = "Creating universal binary";
+        InputFileTypes = (
+            compiled.mach-o.executable,
+            compiled.mach-o.bundle,
+            compiled.mach-o.dylib,
+        );
+        Outputs = (
+            // We're a linker-like task, so we expect to be given an output path in 'OutputPath'.
+            "$(OutputPath)"
+        );
+        CommandOutputParser = (
+            ("^fatal error: (.*lipo): ()(.*)$",  emit-error),
+            ("^error: (.*lipo): ()(.*)$",  emit-error),
+            ("^warning: (.*lipo): ()(.*)$",  emit-warning),
+        );
+        Options = (
+            // None yet
+        );
+    }
+)

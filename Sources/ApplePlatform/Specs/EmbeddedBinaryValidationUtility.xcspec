@@ -1,0 +1,64 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Type = Tool;
+        Identifier = "com.apple.tools.validate-embedded-binary-utility";
+        Name = "Embedded Binary Validation Utility";
+        IsAbstract = Yes;
+        CommandLine = "builtin-embeddedBinaryValidationUtility [input] [options]";
+        RuleName = "ValidateEmbeddedBinary $(InputPath)";
+        ExecDescription = "Validate $(InputFileName)";
+        ProgressDescription = "Validating $(InputFile)";
+        Outputs = (
+            "$(OutputPath)",
+        );
+        Options = (
+            {
+                Name = SigningCert;
+                Type = string;
+                CommandLineFlag = "-signing-cert";
+            },
+            {
+                Name = InfoPlistPath;
+                Type = Path;
+                CommandLineFlag = "-info-plist-path";
+            },
+        );
+        CommandOutputParser = (
+            (
+                "()()(^[^:]+: [^:]+: No such file or directory)",
+                "emit-error",
+            ),
+            (
+                "()()(^[^:]+: [^:]+: Permission denied)",
+                "emit-error",
+            ),
+            (
+                "()()(^[^:]+: [^:]+: Is a directory)",
+                "emit-error",
+            ),
+            (
+                "()()(error: .+)",
+                "emit-error",
+            ),
+            (
+                "()()(warning: .+)",
+                "emit-warning",
+            ),
+        );
+    },
+)

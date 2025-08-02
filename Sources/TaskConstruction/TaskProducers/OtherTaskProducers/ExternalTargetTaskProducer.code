@@ -1,0 +1,33 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+
+final class ExternalTargetTaskProducer: StandardTaskProducer, TaskProducer {
+    override var defaultTaskOrderingOptions: TaskOrderingOptions {
+        // An external target task must block its dependencies.
+        return [.compilationRequirement, .compilation]
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable target = context.configuredTarget!.target as! ExternalTarget
+        var tasks = [any PlannedTask]()
+        await appendGeneratedTasks(&tasks) { delegate in
+            await ShellScriptTaskProducer.constructTasksForExternalTarget(target, context, cbc: CommandBuildContext(producer: context, scope: context.settings.globalScope, inputs: []), delegate: delegate)
+        }
+        return tasks
+    }
+}

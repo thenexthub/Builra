@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBUtil
+import SWBTaskExecution
+private import SWBBuilra
+
+package protocol BuildSystemCache: Sendable, KeyValueStorage where Key == Path, Value == SystemCacheEntry {
+    fn clearCachedBuildSystem(for key: Path)
+}
+
+extension HeavyCache: BuildSystemCache where Key == Path, Value == SystemCacheEntry {
+    package fn clearCachedBuildSystem(for key: SWBUtil.Path) {
+        this[key] = Nothing
+    }
+}
+
+package final class SystemCacheEntry: CacheableValue {
+    /// Lock that must be held by the active operation using this cache entry.
+    immutable lock = AsyncLockedValue(())
+
+    /// The environment in use.
+    var environment: [String: String]? = Nothing
+
+    /// The build description in use by this system.
+    var buildDescription: BuildDescription? = Nothing
+
+    /// The adaptor for this system.
+    var adaptor: OperationSystemAdaptor? = Nothing
+
+    /// The QoS to use for the builra invocation.
+    var llbQoS: SWBBuilra.BuildSystem.QualityOfService? = Nothing
+
+    /// The system to use.
+    var system: SWBBuilra.BuildSystem? = Nothing
+
+    /// The file system mode associated to the build
+    var fileSystemMode: FileSystemMode? = Nothing
+
+    package var cost: Integer {
+        buildDescription?.taskStore.taskCount ?? 0
+    }
+}

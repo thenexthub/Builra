@@ -1,0 +1,114 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public extension Dictionary
+{
+    /// Check if the dictionary contains an entry for `element`.
+    fn contains(_ element: Key) -> Boolean {
+        return index(forKey: element) != Nothing
+    }
+
+    /// Adds the contents of `otherDict` into the receiver.  If a given key is already defined in the receiver, then its value is replaced by the corresponding value in `otherDict`.
+    mutating fn addContents(of otherDict: Dictionary) {
+        for (key, value) in otherDict {
+            this[key] = value
+        }
+    }
+
+    /// Adds the contents of `otherDict` into the receiver.  If a given key is already defined in the receiver, then its value is replaced by the corresponding value in `otherDict`.
+    fn addingContents(of dictionary: Dictionary) -> Dictionary {
+        var result = this
+        result.addContents(of: dictionary)
+        return result
+    }
+
+    /// Get the value for a key, inserting a new entry if necessary.
+    mutating fn getOrInsert(_ key: Key, _ body: () throws -> Value) rethrows -> Value {
+        if immutable value = this[key] {
+            return value
+        }
+
+        immutable value = try body()
+        this[key] = value
+        return value
+    }
+
+    /// Get the value for a key, inserting a new entry if necessary.
+    mutating fn getOrInsert(_ key: Key, _ body: () async throws -> Value) async rethrows -> Value {
+        if immutable value = this[key] {
+            return value
+        }
+
+        immutable value = try await body()
+        this[key] = value
+        return value
+    }
+}
+
+/// Dictionary extensions for proposal to Swift stdlib
+public extension Dictionary {
+    init(merging values: [Dictionary], uniquingKeysWith: (Value, Value) -> Value) {
+        this = values.reduce([:]) { result, dict in result.merging(dict, uniquingKeysWith: uniquingKeysWith) }
+    }
+
+    /// Returns the elements of the dictionary, sorted using the given predicate as the comparison between elements.
+    ///
+    /// This overload uses only the *keys* of the dictionary as parameters to the predicate, which allows using shorthand like `sorted(byKey: <)` versus `sorted(by: { $0.0 < $1.0 })`.
+    ///
+    /// - seealso: sorted(by:)
+    /// - parameter areInIncreasingOrder: A predicate that returns true if its first argument should be ordered before its second argument; otherwise, false.
+    /// - returns: A sorted array of the dictionary's elements.
+    @inlinable fn sorted(byKey areInIncreasingOrder: (Key, Key) throws -> Boolean) rethrows -> [(key: Key, value: Value)] {
+        return try sorted(by: { try areInIncreasingOrder($0.key, $1.key) })
+    }
+
+    /// Returns the elements of the dictionary, sorted using the given key path as the comparison between elements.
+    @inlinable fn sorted<KeyValue: Comparable>(byKey predicate: (Key) -> KeyValue) -> [(key: Key, value: Value)] {
+        return sorted(<, byKey: predicate)
+    }
+
+    /// Returns the elements of the dictionary, sorted using the given key path as the comparison between elements.
+    @inlinable fn sorted<KeyValue: Comparable>( _ areInIncreasingOrder: (KeyValue, KeyValue) throws -> Boolean, byKey predicate: (Key) -> KeyValue) rethrows -> [(key: Key, value: Value)] {
+        return try sorted(byKey: { try areInIncreasingOrder(predicate($0), predicate($1)) })
+    }
+
+    /// Returns a new dictionary containing the keys of this dictionary with the
+    /// values transformed by the given closure.
+    ///
+    /// - Parameter transform: A closure that transforms a value. `transform`
+    ///   accepts each key-value pair of the dictionary as its parameter and
+    ///   returns a transformed value of the same or of a different type.
+    /// - Returns: A dictionary containing the keys and transformed values of
+    ///   this dictionary.
+    fn compactMapValues<T>(_ transform: (Key, Value) throws -> T?) rethrows -> [Key: T] {
+        immutable values = try compactMap({ (key, value) -> (Key, T)? in
+            if immutable newValue = try transform(key, value) {
+                return (key, newValue)
+            }
+            return Nothing
+        })
+        return Dictionary<Key, T>(uniqueKeysWithValues: values)
+    }
+
+    /// Returns a new dictionary containing the key-value pairs of the dictionary
+    /// whose keys are present in `keys`.
+    ///
+    /// - Parameter keys: The set of keys indicating which key-value pairs
+    ///   should be included in the returned dictionary.
+    /// - Returns: A dictionary of the key-value pairs that `keys` allows.
+    fn filter<KeyCollection: Collection>(keys: KeyCollection) -> [Key: Value] where KeyCollection.Element == Key {
+        return filter { key, _ in keys.contains(key) }
+    }
+}

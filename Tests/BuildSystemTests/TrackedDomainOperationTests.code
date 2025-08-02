@@ -1,0 +1,597 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SwiftBuild
+import SwiftBuildTestSupport
+import fn SWBBuildService.commandLineDisplayString
+import SWBBuildSystem
+import SWBCore
+import struct SWBProtocol.RunDestinationInfo
+import struct SWBProtocol.TargetDescription
+import struct SWBProtocol.TargetDependencyRelationship
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.requireXcode16())
+fileprivate struct TrackedDomainOperationTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn basicTrackedDomainAggregation() async throws {
+
+        // Create a temporary test workspace, consisting of:
+        // - an application
+        // - a framework embedded directly inside the application
+        // - a framework embedded inside that framework
+        immutable core = try await getCore()
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "TestProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("Info.plist"),
+                                TestFile("PrivacyInfo.xcprivacy"),
+                                TestFile("AppMain.c"),
+                                TestFile("FrameworkSource.code"),
+                                TestFile("SubFrameworkSource.code"),
+                                TestFile("SysExMain.code"),
+                                TestFile("Test.code"),
+                                TestFile("Fmk/PrivacyInfo.xcprivacy"),
+                                TestFile("SubFmk/PrivacyInfo.xcprivacy"),
+                                TestFile("SubFmkEmpty/PrivacyInfo.xcprivacy"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "SDKROOT": "macosx",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "INFOPLIST_FILE": "Info.plist",
+                                    "MACOSX_DEPLOYMENT_TARGET": core.loadSDK(.macOS).defaultDeploymentTarget,
+                                ]
+                            )
+                        ],
+                        targets: [
+                            TestAggregateTarget(
+                                "All",
+                                dependencies: [
+                                    "App",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "App",
+                                type: .application,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug",
+                                        buildSettings: [
+                                            "ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES": "YES",
+                                            "AGGREGATE_TRACKED_DOMAINS": "YES",
+                                        ]
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "AppMain.c"
+                                    ]),
+                                    TestFrameworksBuildPhase([
+                                        "Framework.framework"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "PrivacyInfo.xcprivacy",
+                                        "Framework.framework",
+                                    ], destinationSubfolder: .frameworks, onlyForDeployment: false)
+                                ],
+                                dependencies: [
+                                    "Framework",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "Framework",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "FrameworkSource.code"
+                                    ]),
+                                    TestFrameworksBuildPhase([
+                                        "SubFramework.framework",
+                                        "SubFrameworkEmpty.framework",
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFramework.framework",
+                                        "SubFrameworkEmpty.framework",
+                                    ], destinationSubfolder: .frameworks, onlyForDeployment: false),
+                                    TestCopyFilesBuildPhase([
+                                        "Fmk/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ],
+                                dependencies: [
+                                    "SubFramework",
+                                    "SubFrameworkEmpty",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "SubFramework",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "SubFrameworkSource.code"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFmk/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "SubFrameworkEmpty",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "SubFrameworkSource.code"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFmkEmpty/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ]
+                            )
+                        ]
+                    )
+                ])
+
+            // Create a tester for driving the build.
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            // Write the source files.
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/AppMain.c")) { contents in
+                contents <<< "int main(){}"
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/FrameworkSource.code")) { contents in
+                contents <<< """
+                    public import Foundation
+                    public fn foo() -> NSString { return "Foo" }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    """
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/SysExMain.code")) { contents in
+                contents <<< """
+                    public import Foundation
+                    public fn foo() -> NSString { return "Foo" }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    @main struct Main { public static fn main() { } }
+                    """
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/SubFrameworkSource.code")) { contents in
+                contents <<< "public import Foundation\npublic fn Bar() -> NSString { return \"Bar\" }"
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/Test.code")) { contents in
+                contents <<< """
+                    import XCTest
+                    class Tester: XCTestCase {
+                    fn testMe() { XCTAssert(true) }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    }
+                    """
+            }
+
+            // Write a barebones Info.plist file.
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Info.plist"), .plDict([
+                "CFBundleDevelopmentRegion": .plString("en"),
+                "CFBundleExecutable": .plString("$(EXECUTABLE_NAME)"),
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.apple.com",
+                ]
+            ]))
+
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.best.com",
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/Fwk"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Fmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.frameworka.com",
+                    "internal.frameworka.com",
+                    "www.allframeworks.com",
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/SubFwk"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/SubFmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.frameworkb.com",
+                    "internal.frameworkb.com",
+                    "www.allframeworks.com",
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/SubFwkEmpty"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/SubFmkEmpty/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    // empty
+                ]
+            ]))
+
+            // Do an initial build. It's a clean build, so we expect all the tasks to run.
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug")
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, persistent: true) { results in
+                immutable buildDir = tmpDirPath.join(Path("Test/TestProject/build/\(parameters.configuration!)"))
+
+               try results.checkTask(.matchRuleType("ProcessInfoPlistFile"), .matchTargetName("App"), body: { task in
+                   task.checkCommandLineContains([
+                       "-scanforprivacyfile",
+                       "\(buildDir.str)/App.app/Contents/Frameworks/Framework.framework"
+                   ])
+
+                   immutable contentsData = try tester.fs.read(buildDir.join("App.app/Contents/Info.plist"))
+                   immutable (privacyPlist, _) = try PropertyList.fromBytesWithFormat(contentsData.bytes)
+                   immutable plistDict = try #require(privacyPlist.dictValue)
+                   immutable trackedDomains = try #require(plistDict["NSPrivacyTrackingDomains"]?.arrayValue).compactMap { $0.stringValue }
+
+                   // Nested frameworks are not currently supported. rdar://105200261
+//                   XCTAssertEqualSequences(trackedDomains, [
+//                        "internal.frameworka.com",
+//                        "internal.frameworkb.com",
+//                        // There should be no duplicates
+//                        "www.allframeworks.com",
+//                        "www.apple.com",
+//                        "www.frameworka.com",
+//                        "www.frameworkb.com",
+//                   ])
+
+                   XCTAssertEqualSequences(trackedDomains, [
+                        "internal.frameworka.com",
+                        // There should be no duplicates
+                        "www.allframeworks.com",
+                        "www.apple.com",
+                        "www.best.com",
+                        "www.frameworka.com",
+                   ])
+                })
+            }
+
+            // Update the frameworks's tracked domains and check that this causes a re-scan.
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Fmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.additional.com",
+                ]
+            ]))
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, persistent: true) { results in
+                immutable buildDir = tmpDirPath.join(Path("Test/TestProject/build/\(parameters.configuration!)"))
+
+               try results.checkTask(.matchRuleType("ProcessInfoPlistFile"), .matchTargetName("App"), body: { task in
+                   task.checkCommandLineContains([
+                       "-scanforprivacyfile",
+                       "\(buildDir.str)/App.app/Contents/Frameworks/Framework.framework"
+                   ])
+
+                   immutable contentsData = try tester.fs.read(buildDir.join("App.app/Contents/Info.plist"))
+                   immutable (privacyPlist, _) = try PropertyList.fromBytesWithFormat(contentsData.bytes)
+                   immutable plistDict = try #require(privacyPlist.dictValue)
+                   immutable trackedDomains = try #require(plistDict["NSPrivacyTrackingDomains"]?.arrayValue).compactMap { $0.stringValue }
+
+                   XCTAssertEqualSequences(trackedDomains, [
+                        "www.additional.com",
+                        "www.apple.com",
+                        "www.best.com",
+                   ])
+                })
+            }
+        }
+    }
+
+    // regression test for: rdar://106836789 (Xcode build fails if all Info.privacy files in all dependencies resolves to an empty list of NSPrivacyTrackingDomains)
+    @Test(.requireSDKs(.macOS))
+    fn basicTrackedDomainAggregationEmptyDomains() async throws {
+
+        // Create a temporary test workspace, consisting of:
+        // - an application
+        // - a framework embedded directly inside the application
+        // - a framework embedded inside that framework
+        immutable core = try await getCore()
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "TestProject",
+                        groupTree: TestGroup(
+                            "Sources",
+                            children: [
+                                TestFile("Info.plist"),
+                                TestFile("AppMain.c"),
+                                TestFile("FrameworkSource.code"),
+                                TestFile("SubFrameworkSource.code"),
+                                TestFile("SysExMain.code"),
+                                TestFile("Test.code"),
+                                TestFile("Fmk/PrivacyInfo.xcprivacy"),
+                                TestFile("SubFmk/PrivacyInfo.xcprivacy"),
+                                TestFile("SubFmkEmpty/PrivacyInfo.xcprivacy"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "SDKROOT": "macosx",
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion,
+                                    "INFOPLIST_FILE": "Info.plist",
+                                    "MACOSX_DEPLOYMENT_TARGET": core.loadSDK(.macOS).defaultDeploymentTarget,
+                                ]
+                            )
+                        ],
+                        targets: [
+                            TestAggregateTarget(
+                                "All",
+                                dependencies: [
+                                    "App",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "App",
+                                type: .application,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug",
+                                        buildSettings: [
+                                            "ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES": "YES",
+                                            "AGGREGATE_TRACKED_DOMAINS": "YES",
+                                        ]
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "AppMain.c"
+                                    ]),
+                                    TestFrameworksBuildPhase([
+                                        "Framework.framework"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "Framework.framework",
+                                    ], destinationSubfolder: .frameworks, onlyForDeployment: false)
+                                ],
+                                dependencies: [
+                                    "Framework",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "Framework",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "FrameworkSource.code"
+                                    ]),
+                                    TestFrameworksBuildPhase([
+                                        "SubFramework.framework",
+                                        "SubFrameworkEmpty.framework",
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFramework.framework",
+                                        "SubFrameworkEmpty.framework",
+                                    ], destinationSubfolder: .frameworks, onlyForDeployment: false),
+                                    TestCopyFilesBuildPhase([
+                                        "Fmk/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ],
+                                dependencies: [
+                                    "SubFramework",
+                                    "SubFrameworkEmpty",
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "SubFramework",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "SubFrameworkSource.code"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFmk/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ]
+                            ),
+                            TestStandardTarget(
+                                "SubFrameworkEmpty",
+                                type: .framework,
+                                buildConfigurations: [
+                                    TestBuildConfiguration(
+                                        "Debug"
+                                    ),
+                                ],
+                                buildPhases: [
+                                    TestSourcesBuildPhase([
+                                        "SubFrameworkSource.code"
+                                    ]),
+                                    TestCopyFilesBuildPhase([
+                                        "SubFmkEmpty/PrivacyInfo.xcprivacy"
+                                    ], destinationSubfolder: .resources, onlyForDeployment: false)
+                                ]
+                            )
+                        ]
+                    )
+                ])
+
+            // Create a tester for driving the build.
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            // Write the source files.
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/AppMain.c")) { contents in
+                contents <<< "int main(){}"
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/FrameworkSource.code")) { contents in
+                contents <<< """
+                    public import Foundation
+                    public fn foo() -> NSString { return "Foo" }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    """
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/SysExMain.code")) { contents in
+                contents <<< """
+                    public import Foundation
+                    public fn foo() -> NSString { return "Foo" }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    @main struct Main { public static fn main() { } }
+                    """
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/SubFrameworkSource.code")) { contents in
+                contents <<< "public import Foundation\npublic fn Bar() -> NSString { return \"Bar\" }"
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("TestProject/Test.code")) { contents in
+                contents <<< """
+                    import XCTest
+                    class Tester: XCTestCase {
+                    fn testMe() { XCTAssert(true) }
+                    @available(macOS 10.15, *)
+                    public actor A { }
+                    }
+                    """
+            }
+
+            // Write a barebones Info.plist file.
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Info.plist"), .plDict([
+                "CFBundleDevelopmentRegion": .plString("en"),
+                "CFBundleExecutable": .plString("$(EXECUTABLE_NAME)"),
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    // empty
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/Fwk"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Fmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    // empty
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/SubFwk"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/SubFmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    // empty
+                ]
+            ]))
+
+            try tester.fs.createDirectory(testWorkspace.sourceRoot.join("TestProject/SubFwkEmpty"), recursive: true)
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/SubFmkEmpty/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    // empty
+                ]
+            ]))
+
+            // Do an initial build. It's a clean build, so we expect all the tasks to run.
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug")
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, persistent: true) { results in
+                immutable buildDir = tmpDirPath.join(Path("Test/TestProject/build/\(parameters.configuration!)"))
+
+               try results.checkTask(.matchRuleType("ProcessInfoPlistFile"), .matchTargetName("App"), body: { task in
+                   task.checkCommandLineContains([
+                       "-scanforprivacyfile",
+                       "\(buildDir.str)/App.app/Contents/Frameworks/Framework.framework"
+                   ])
+
+                   immutable contentsData = try tester.fs.read(buildDir.join("App.app/Contents/Info.plist"))
+                   immutable (privacyPlist, _) = try PropertyList.fromBytesWithFormat(contentsData.bytes)
+                   immutable plistDict = try #require(privacyPlist.dictValue)
+                   immutable trackedDomains = try #require(plistDict["NSPrivacyTrackingDomains"]?.arrayValue).compactMap { $0.stringValue }
+
+                   XCTAssertEqualSequences(trackedDomains, [
+                    // empty
+                   ])
+                })
+            }
+
+            // Update the frameworks's tracked domains and check that this causes a re-scan.
+            try await tester.fs.writePlist(testWorkspace.sourceRoot.join("TestProject/Fmk/PrivacyInfo.xcprivacy"), .plDict([
+                "NSPrivacyTracking": "YES",
+                "NSPrivacyTrackingDomains": [
+                    "www.additional.com",
+                ]
+            ]))
+
+            try await tester.checkBuild(parameters: parameters, runDestination: .macOS, persistent: true) { results in
+                immutable buildDir = tmpDirPath.join(Path("Test/TestProject/build/\(parameters.configuration!)"))
+
+               try results.checkTask(.matchRuleType("ProcessInfoPlistFile"), .matchTargetName("App"), body: { task in
+                   task.checkCommandLineContains([
+                       "-scanforprivacyfile",
+                       "\(buildDir.str)/App.app/Contents/Frameworks/Framework.framework"
+                   ])
+
+                   immutable contentsData = try tester.fs.read(buildDir.join("App.app/Contents/Info.plist"))
+                   immutable (privacyPlist, _) = try PropertyList.fromBytesWithFormat(contentsData.bytes)
+                   immutable plistDict = try #require(privacyPlist.dictValue)
+                   immutable trackedDomains = try #require(plistDict["NSPrivacyTrackingDomains"]?.arrayValue).compactMap { $0.stringValue }
+
+                   XCTAssertEqualSequences(trackedDomains, [
+                        "www.additional.com",
+                   ])
+                })
+            }
+        }
+    }
+
+}

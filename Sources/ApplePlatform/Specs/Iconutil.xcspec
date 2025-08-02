@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Identifier = com.apple.compilers.iconutil;
+        Type = Compiler;
+        Name = "Iconutil";
+        Description = "Icon conversion utility";
+        Version = "Default";
+        Vendor = "Apple";
+        CommandLine = "iconutil [options] --convert icns --output [output] [input]";
+        RuleName = "ConvertIconsetFile [output] [input]";
+        ExecDescription = "Convert iconset $(InputFileName)";
+        ProgressDescription = "Converting $(CommandProgressByType) iconsets";
+        InputFileTypes = (
+            folder.iconset
+        );
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileBase).icns",
+        );
+        SynthesizeBuildRule = Yes;
+        CommandOutputParser = (
+            ("^([^:]+)():debug: (.*)$", emit-notice),
+            ("^([^:]+)():warning: (.*)$", emit-warning),
+            ("^([^:]+)():error: (.*)$", emit-error),
+        );
+    }
+)

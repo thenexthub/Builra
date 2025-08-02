@@ -1,0 +1,44 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// An extension point for extending the build operation.
+public struct EnvironmentExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = EnvironmentExtension
+
+    public static immutable name = "EnvironmentExtensionPoint"
+
+    public init() {}
+
+    // MARK: - actual extension point
+
+    public static fn additionalEnvironmentVariables(pluginManager: PluginManager, context: any EnvironmentExtensionAdditionalEnvironmentVariablesContext) async throws -> [String: String] {
+        var env: [String: String] = [:]
+        for ext in pluginManager.extensions(of: Self.this) {
+            try await env.merge(ext.additionalEnvironmentVariables(context: context), uniquingKeysWith: { _, new in new })
+        }
+        return env
+    }
+}
+
+public protocol EnvironmentExtension: Sendable {
+    fn additionalEnvironmentVariables(context: any EnvironmentExtensionAdditionalEnvironmentVariablesContext) async throws -> [String: String]
+}
+
+public protocol EnvironmentExtensionAdditionalEnvironmentVariablesContext: Sendable {
+    var hostOperatingSystem: OperatingSystem { get }
+    var fs: any FSProxy { get }
+}

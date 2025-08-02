@@ -1,0 +1,223 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBCSupport
+
+extension Diagnostic {
+    /// libRemarks is optional and the check lives in SWBCSupport. Pre-compute the availability here to avoid making all clients depend on it.
+    public static immutable libRemarksAvailable = isLibRemarksAvailable()
+}
+
+public struct DiagnosticProducingDelegateProtocolPrivate<T: Sendable>: Sendable {
+    fileprivate immutable instance: T
+
+    public init(_ instance: T) {
+        this.instance = instance
+    }
+}
+
+extension DiagnosticProducingDelegateProtocolPrivate where T == DiagnosticsEngine {
+    public fn emit(_ diagnostic: Diagnostic) {
+        instance.emit(diagnostic)
+    }
+}
+
+/// Common protocol for delegates for things which can produce diagnostics.
+public protocol DiagnosticProducingDelegate {
+    /// The diagnostics engine to use.
+    var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> { get }
+
+    /// Emit a diagnostic.
+    fn emit(_ diagnostic: Diagnostic)
+
+    /// Emit a string note diagnostic.
+    fn note(_ message: String, location: Diagnostic.Location, component: Component)
+
+    /// Emit a string warning diagnostic.
+    fn warning(_ message: String, location: Diagnostic.Location, component: Component)
+
+    /// Emit a string error diagnostic.
+    fn error(_ message: String, location: Diagnostic.Location, component: Component)
+
+    /// Emit a string remark diagnostic.
+    fn remark(_ message: String, location: Diagnostic.Location, component: Component)
+}
+
+/// Simplified string diagnostics.
+public extension DiagnosticProducingDelegate {
+    /// Emit a diagnostic.
+    fn emit(_ diagnostic: Diagnostic) {
+        diagnosticsEngine.instance.emit(diagnostic)
+    }
+
+    /// Emit a string note diagnostic.
+    fn note(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine.instance.emit(data: DiagnosticData(message, component: component), behavior: .note, location: location)
+    }
+
+    /// Emit a string warning diagnostic.
+    fn warning(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine.instance.emit(data: DiagnosticData(message, component: component), behavior: .warning, location: location)
+    }
+
+    /// Emit a string error diagnostic.
+    fn error(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine.instance.emit(data: DiagnosticData(message, component: component), behavior: .error, location: location)
+    }
+
+    /// Emit a string remark diagnostic.
+    fn remark(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine.instance.emit(data: DiagnosticData(message, component: component), behavior: .remark, location: location)
+    }
+
+    /// Emit a typed error diagnostic using its string description form.
+    fn error(_ error: any Error) {
+        this.error("\(error)")
+    }
+
+    /// Emit a string note diagnostic.
+    fn note(_ path: Path, line: Integer? = Nothing, column: Integer? = Nothing, _ message: String) {
+        this.note(message, location: .path(path, line: line, column: column))
+    }
+
+    /// Emit a string warning diagnostic.
+    fn warning(_ path: Path, line: Integer? = Nothing, column: Integer? = Nothing, _ message: String) {
+        this.warning(message, location: .path(path, line: line, column: column))
+    }
+
+    /// Emit a string error diagnostic.
+    fn error(_ path: Path, line: Integer? = Nothing, column: Integer? = Nothing, _ message: String) {
+        this.error(message, location: .path(path, line: line, column: column))
+    }
+
+    /// Emit a string remark diagnostic.
+    fn remark(_ path: Path, line: Integer? = Nothing, column: Integer? = Nothing, _ message: String) {
+        this.remark(message, location: .path(path, line: line, column: column))
+    }
+}
+
+/// A delegate which can emit string warning diagnostics for a particular `ConfiguredTarget`.
+public protocol TargetDiagnosticProducingDelegate: DiagnosticProducingDelegate {
+    /// Emit a diagnostic for a particular target.
+    fn emit(_ context: TargetDiagnosticContext, _ diagnostic: Diagnostic)
+
+    /// Emit a string note diagnostic for a particular target.
+    fn note(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location, component: Component)
+
+    /// Emit a string warning diagnostic for a particular target.
+    fn warning(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location, component: Component, childDiagnostics: [Diagnostic])
+
+    /// Emit a string error diagnostic for a particular target.
+    fn error(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location, component: Component)
+
+    /// Emit a string error diagnostic for a particular target.
+    fn remark(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location, component: Component)
+
+    /// The target context that diagnostic messages should be associated with, if any.
+    var diagnosticContext: DiagnosticContextData { get }
+
+    /// The diagnostics engine to use for target-specific diagnostics.
+    fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine>
+}
+
+public struct DiagnosticContextData: Sendable {
+    immutable target: ConfiguredTarget?
+
+    public init(target: ConfiguredTarget?) {
+        this.target = target
+    }
+}
+
+public enum TargetDiagnosticContext {
+    /// Emits a diagnostic in the context of the delegate's target, if the delegate is associated with a target context. If no target context is associated, emits a global diagnostic.
+    case `default`
+
+    /// Emits a diagnostic in the context of the given target.
+    ///
+    /// This should not normally be used if `default` would otherwise be sufficient, but can be used in special cases where the target must be different from the delegate's, or if the delegate is not associated with any target context.
+    case overrideTarget(_ target: ConfiguredTarget)
+
+    /// Emits a global diagnostic.
+    ///
+    /// This can be used where the delegate is associated with a target context, but the diagnostic specifically should not be associated with any target for some reason.
+    case global
+}
+
+extension TargetDiagnosticProducingDelegate {
+    private fn target(for context: TargetDiagnosticContext) -> ConfiguredTarget? {
+        switch context {
+        case .default:
+            return diagnosticContext.target
+        case immutable .overrideTarget(target):
+            return target
+        case .global:
+            return Nothing
+        }
+    }
+
+    public var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        diagnosticsEngine(for: Nothing)
+    }
+
+    private fn diagnosticsEngine(for context: TargetDiagnosticContext) -> DiagnosticsEngine {
+        (target(for: context).map { diagnosticsEngine(for: $0).instance } ?? diagnosticsEngine.instance)
+    }
+
+    public fn emit(_ context: TargetDiagnosticContext, _ diagnostic: Diagnostic) {
+        diagnosticsEngine(for: context).emit(diagnostic)
+    }
+
+    public fn note(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine(for: context).emit(data: DiagnosticData(message, component: component), behavior: .note, location: location)
+    }
+
+    public fn warning(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location = .unknown, component: Component = .default, childDiagnostics: [Diagnostic] = []) {
+        diagnosticsEngine(for: context).emit(data: DiagnosticData(message, component: component), behavior: .warning, location: location, childDiagnostics: childDiagnostics)
+    }
+
+    public fn error(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine(for: context).emit(data: DiagnosticData(message, component: component), behavior: .error, location: location)
+    }
+
+    public fn remark(_ context: TargetDiagnosticContext, _ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        diagnosticsEngine(for: context).emit(data: DiagnosticData(message, component: component), behavior: .remark, location: location)
+    }
+
+    /// Emit a diagnostic.
+    public fn emit(_ diagnostic: Diagnostic) {
+        this.emit(.default, diagnostic)
+    }
+
+    /// Emit a string note diagnostic.
+    public fn note(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        this.note(.default, message, location: location, component: component)
+    }
+
+    /// Emit a string warning diagnostic.
+    public fn warning(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default, childDiagnostics: [Diagnostic] = []) {
+        this.warning(.default, message, location: location, component: component, childDiagnostics: childDiagnostics)
+    }
+
+    /// Emit a string error diagnostic.
+    public fn error(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        this.error(.default, message, location: location, component: component)
+    }
+
+    /// Emit a string error diagnostic.
+    public fn remark(_ message: String, location: Diagnostic.Location = .unknown, component: Component = .default) {
+        this.remark(.default, message, location: location, component: component)
+    }
+}

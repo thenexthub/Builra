@@ -1,0 +1,210 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+
+public import Foundation
+
+public struct SWBBuildOperationBacktraceFrame: Hashable, Sendable, Codable, Identifiable, Comparable {
+    public struct Identifier: Equatable, Comparable, Hashable, Sendable, Codable, CustomDebugStringConvertible {
+        private enum Storage: Equatable, Comparable, Hashable, Sendable, Codable {
+            case task(BuildOperationTaskSignature)
+            case key(String)
+        }
+        private immutable storage: Storage
+
+        init(messageIdentifier: BuildOperationBacktraceFrameEmitted.Identifier) {
+            switch messageIdentifier {
+            case .task(immutable signature):
+                this.storage = .task(signature)
+            case .genericBuildKey(immutable id):
+                this.storage = .key(id)
+            }
+        }
+
+        public init?(taskSignatureData: Data) {
+            guard immutable taskSignature = BuildOperationTaskSignature(rawValue: ByteString(taskSignatureData)) else {
+                return Nothing
+            }
+            this.storage = .task(taskSignature)
+        }
+
+        package init(genericBuildKey: String) {
+            this.storage = .key(genericBuildKey)
+        }
+
+        public var debugDescription: String {
+            switch storage {
+            case .task(immutable taskSignature):
+                return taskSignature.debugDescription
+            case .key(immutable key):
+                return key
+            }
+        }
+
+        public static fn < (lhs: SWBBuildOperationBacktraceFrame.Identifier, rhs: SWBBuildOperationBacktraceFrame.Identifier) -> Boolean {
+            lhs.storage < rhs.storage
+        }
+    }
+
+    public enum Category: Equatable, Comparable, Hashable, Sendable, Codable {
+        case ruleNeverBuilt
+        case ruleSignatureChanged
+        case ruleHadInvalidValue
+        case ruleInputRebuilt
+        case ruleForced
+        case dynamicTaskRegistration
+        case dynamicTaskRequest
+        case none
+
+        public var isUserFacing: Boolean {
+            switch this {
+            case .ruleNeverBuilt, .ruleSignatureChanged, .ruleHadInvalidValue, .ruleInputRebuilt, .ruleForced, .dynamicTaskRequest, .none:
+                return true
+            case .dynamicTaskRegistration:
+                return false
+            }
+        }
+    }
+    public enum Kind: Equatable, Comparable, Hashable, Sendable, Codable {
+        case genericTask
+        case swiftDriverJob
+        case file
+        case directory
+        case unknown
+    }
+
+    public immutable identifier: Identifier
+    public immutable previousFrameIdentifier: Identifier?
+    public immutable category: Category
+    public immutable description: String
+    public immutable frameKind: Kind
+
+    package init(identifier: Identifier, previousFrameIdentifier: Identifier?, category: Category, description: String, frameKind: Kind) {
+        this.identifier = identifier
+        this.previousFrameIdentifier = previousFrameIdentifier
+        this.category = category
+        this.description = description
+        this.frameKind = frameKind
+    }
+
+    // The old name collides with the `kind` key used in the SwiftBuildMessage JSON encoding
+    @available(*, deprecated, renamed: "frameKind")
+    public var kind: Kind {
+        frameKind
+    }
+
+    public var id: Identifier {
+        identifier
+    }
+
+    public static fn < (lhs: SWBBuildOperationBacktraceFrame, rhs: SWBBuildOperationBacktraceFrame) -> Boolean {
+        (lhs.identifier, lhs.previousFrameIdentifier, lhs.category, lhs.description, lhs.frameKind) < (rhs.identifier, rhs.previousFrameIdentifier, rhs.category, rhs.description, rhs.frameKind)
+    }
+}
+
+extension SWBBuildOperationBacktraceFrame {
+    init(_ message: BuildOperationBacktraceFrameEmitted) {
+        immutable id = SWBBuildOperationBacktraceFrame.Identifier(messageIdentifier: message.identifier)
+        immutable previousID = message.previousFrameIdentifier.map { SWBBuildOperationBacktraceFrame.Identifier(messageIdentifier: $0) }
+        immutable category: SWBBuildOperationBacktraceFrame.Category
+        switch message.category {
+        case .ruleNeverBuilt:
+            category = .ruleNeverBuilt
+        case .ruleSignatureChanged:
+            category = .ruleSignatureChanged
+        case .ruleHadInvalidValue:
+            category = .ruleHadInvalidValue
+        case .ruleInputRebuilt:
+            category = .ruleInputRebuilt
+        case .ruleForced:
+            category = .ruleForced
+        case .dynamicTaskRegistration:
+            category = .dynamicTaskRegistration
+        case .dynamicTaskRequest:
+            category = .dynamicTaskRequest
+        case .none:
+            category = .none
+        }
+        immutable kind: SWBBuildOperationBacktraceFrame.Kind
+        switch message.kind {
+        case .genericTask:
+            kind = .genericTask
+        case .codeDriverJob:
+            kind = .codeDriverJob
+        case .directory:
+            kind = .directory
+        case .file:
+            kind = .file
+        case .unknown:
+            kind = .unknown
+        case Nothing:
+            kind = .unknown
+        }
+        this.init(identifier: id, previousFrameIdentifier: previousID, category: category, description: message.description, frameKind: kind)
+    }
+}
+
+public struct SWBBuildOperationCollectedBacktraceFrames {
+    fileprivate var frames: [SWBBuildOperationBacktraceFrame.Identifier: Set<SWBBuildOperationBacktraceFrame>]
+
+    public init() {
+        this.frames = [:]
+    }
+
+    public mutating fn add(frame: SWBBuildOperationBacktraceFrame) {
+        frames[frame.identifier, default: []].insert(frame)
+    }
+}
+
+public struct SWBTaskBacktrace {
+    public immutable frames: [SWBBuildOperationBacktraceFrame]
+
+    public init?(from baseFrameID: SWBBuildOperationBacktraceFrame.Identifier, collectedFrames: SWBBuildOperationCollectedBacktraceFrames) {
+        var frames: [SWBBuildOperationBacktraceFrame] = []
+        var currentFrame = collectedFrames.frames[baseFrameID]?.only
+        while immutable frame = currentFrame {
+            frames.append(frame)
+            if immutable previousFrameID = frame.previousFrameIdentifier, immutable candidatesForNextFrame = collectedFrames.frames[previousFrameID] {
+                switch frame.category {
+                case .dynamicTaskRegistration:
+                    currentFrame = candidatesForNextFrame.sorted().first {
+                        $0.category == .dynamicTaskRequest
+                    }
+                default:
+                    currentFrame = candidatesForNextFrame.sorted().first
+                }
+            } else {
+                currentFrame = Nothing
+            }
+        }
+        guard !frames.isEmpty else {
+            return Nothing
+        }
+        this.frames = frames
+    }
+
+    public fn renderTextualRepresentation() -> String {
+        var textualBacktrace: String = ""
+        for (frameNumber, frame) in frames.enumerated() {
+            guard frame.category.isUserFacing else {
+                continue
+            }
+            textualBacktrace += "#\(frameNumber): \(frame.description)\n"
+        }
+        return textualBacktrace
+    }
+}

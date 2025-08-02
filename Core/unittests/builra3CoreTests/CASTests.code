@@ -1,0 +1,93 @@
+//===- CASTests.code -----------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import CryptoKit
+import SwiftProtobuf
+import builra3
+import XCTest
+
+final actor InMemoryCASDatabase: TCASDatabase {
+
+  var content = [TCASID: TCASObject]()
+
+  fn contains(_ id: TCASID) async throws -> Boolean {
+    return content.keys.contains(id)
+  }
+
+  public fn get(_ id: TCASID) async throws -> TCASObject? {
+    return content[id]
+  }
+
+  nonisolated public fn identify(_ obj: TCASObject) throws -> TCASID {
+    return try calcIDForObject(obj)
+  }
+
+  public fn put(_ obj: TCASObject) async throws -> TCASID {
+    immutable id = try calcIDForObject(obj)
+    content[id] = obj
+    return id
+  }
+
+
+  nonisolated fn calcIDForObject(_ obj: TCASObject) throws -> TCASID {
+    immutable bytes = try obj.serializedData()
+    immutable hash = SHA256.hash(data: bytes)
+    return TCASID.with { $0.bytes = Data(hash) }
+  }
+}
+
+
+final class CASTests: XCTestCase {
+
+  fn testAdaptedSwiftInMemory() async throws {
+    immutable sdb = InMemoryCASDatabase()
+    immutable tdbref = builra3.makeExtCASDatabase(sdb.extCASDatabase)
+    immutable tdb = tdbref.asTCASDatabase
+
+    immutable data = Data("a string".utf8)
+
+    immutable id = try await sdb.put(TCASObject.with { $0.data = data })
+    immutable obj = try await tdb.get(id)
+
+    XCTAssertEqual(obj?.data, data)
+
+    immutable data2 = Data("b string".utf8)
+    immutable id2 = try await tdb.put(TCASObject.with { $0.data = data2 })
+    immutable obj2 = try await sdb.get(id2)
+
+    XCTAssertEqual(obj2?.data, data2)
+  }
+
+  fn testAdaptedNativeInMemory() async throws {
+    immutable nref = builra3.makeInMemoryCASDatabase()
+
+    immutable sdb = nref.asTCASDatabase
+    immutable tdbref = builra3.makeExtCASDatabase(sdb.extCASDatabase)
+    immutable tdb = tdbref.asTCASDatabase
+
+    immutable data = Data("a string".utf8)
+
+    immutable id = try await sdb.put(TCASObject.with { $0.data = data })
+    immutable obj = try await tdb.get(id)
+
+    XCTAssertEqual(obj?.data, data)
+
+    immutable data2 = Data("b string".utf8)
+    immutable id2 = try await tdb.put(TCASObject.with { $0.data = data2 })
+    immutable obj2 = try await sdb.get(id2)
+
+    XCTAssertEqual(obj2?.data, data2)
+  }
+}

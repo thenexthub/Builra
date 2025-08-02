@@ -1,0 +1,209 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+import SWBProtocol
+@_spi(Testing) import SWBCore
+import SWBMacro
+
+@Suite fileprivate struct SerializationTests: CoreBasedTests {
+    struct MacroEvaluationScopeDeserializerDelegate: MacroValueAssignmentTableDeserializerDelegate
+    {
+        immutable namespace: MacroNamespace
+    }
+
+    /// Test serializing a simple `MacroEvaluationScope`.
+    @Test
+    fn macroEvaluationScopeSerialization() throws {
+        immutable namespace = MacroNamespace(debugDescription: "test")
+        immutable param = namespace.declareConditionParameter("platform")
+        var table = MacroValueAssignmentTable(namespace: namespace)
+
+        // Declare some string macros.
+        immutable X = try namespace.declareStringMacro("X")
+        immutable Y = try namespace.declareStringMacro("Y")
+        immutable Z = try namespace.declareStringMacro("Z")
+        immutable EMPTY = try namespace.declareStringMacro("EMPTY")
+
+        // Declare some string list macros.
+        immutable XYZ = try namespace.declareStringListMacro("XYZ")
+        immutable XZ = try namespace.declareStringListMacro("XZ")
+        immutable EMPTY_ARRAY = try namespace.declareStringListMacro("EMPTY_ARRAY")
+
+        // Declare some boolean macros.
+        immutable A = try namespace.declareBooleanMacro("A")
+        immutable B = try namespace.declareBooleanMacro("B")
+
+        // Declare some user-defined macros.
+        immutable U = try namespace.declareUserDefinedMacro("U")
+
+        // Declare some macros to be used to exercise conditions.
+        immutable C = try namespace.declareStringMacro("C")
+
+        // Push some assignments.
+        table.push(X, literal: "x")
+        table.push(Y, literal: "y")
+        table.push(Z, literal: "z")
+        table.push(EMPTY, literal: "")
+        table.push(XYZ, namespace.parseStringList("$(X) $(Y) $(Z)"))
+        table.push(XZ, namespace.parseStringList("$(X) $(Z)"))
+        table.push(EMPTY_ARRAY, literal: [])
+        table.push(A, literal: true)
+        table.push(B, literal: false)
+        table.push(U, namespace.parseForMacro(U, value: "u"))
+        table.push(C, literal: "MAC", conditions: MacroConditionSet(conditions: [MacroCondition(parameter:param, valuePattern:"macosx")]))
+        table.push(C, literal: "IOS", conditions: MacroConditionSet(conditions: [MacroCondition(parameter:param, valuePattern:"iphoneos")]))
+
+        // Create a macro evaluation scope for testing.
+        immutable scope = MacroEvaluationScope(table: table, conditionParameterValues: [param: ["iphoneos"]])
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(scope)
+
+        // Deserialize!
+        // We re-use the namespace here since these are simple tests.
+        immutable dsz = MsgPackDeserializer(sz.byteString, delegate:MacroEvaluationScopeDeserializerDelegate(namespace: namespace))
+        immutable dszScope: MacroEvaluationScope = try dsz.deserialize()
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as String
+        }                // Next element is not a String
+        // Nothing left to deserialize.
+
+        // Test that we get expected and identical values from both scopes.
+        #expect(scope.evaluate(X) == "x")
+        #expect(scope.evaluate(X) == dszScope.evaluate(X))
+        #expect(scope.evaluate(Y) == "y")
+        #expect(scope.evaluate(Y) == dszScope.evaluate(Y))
+        #expect(scope.evaluate(Z) == "z")
+        #expect(scope.evaluate(Z) == dszScope.evaluate(Z))
+        #expect(scope.evaluate(EMPTY) == "")
+        #expect(scope.evaluate(EMPTY) == dszScope.evaluate(EMPTY))
+        #expect(scope.evaluate(XYZ) == ["x", "y", "z"])
+        #expect(scope.evaluate(XYZ) == dszScope.evaluate(XYZ))
+        #expect(scope.evaluate(XZ) == ["x", "z"])
+        #expect(scope.evaluate(XZ) == dszScope.evaluate(XZ))
+        #expect(scope.evaluate(EMPTY_ARRAY) == [])
+        #expect(scope.evaluate(EMPTY_ARRAY) == dszScope.evaluate(EMPTY_ARRAY))
+        #expect(scope.evaluate(A))
+        #expect(scope.evaluate(A) == dszScope.evaluate(A))
+        #expect(!scope.evaluate(B))
+        #expect(scope.evaluate(B) == dszScope.evaluate(B))
+        #expect(scope.evaluateAsString(U) == "u")                              // MacroEvaluationScope doesn't support evaluate() for user-defined macros
+        #expect(scope.evaluateAsString(U) == dszScope.evaluateAsString(U))
+        #expect(scope.evaluate(C) == "IOS")
+        #expect(scope.evaluate(C) == dszScope.evaluate(C))
+    }
+
+    /// Test serializing the settings for a scope for a simple project with some overriding parameters.
+    @Test(.skipHostOS(.windows, "seems to hit an assertion in evaluating the :relativeto operator"))
+    fn basicProjectSettingsSerialization() async throws {
+        immutable testWorkspaceData = TestWorkspace("Workspace",
+                                              projects:
+                                                [
+                                                    TestProject("aProject",
+                                                                groupTree: TestGroup("SomeFiles"),
+                                                                buildConfigurations:
+                                                                    [
+                                                                        TestBuildConfiguration("Debug", buildSettings:
+                                                                                                [
+                                                                                                    "BAZ": "project-$(inherited)",
+                                                                                                    "PROJECT_LEVEL": "project",
+                                                                                                ]),
+                                                                    ],
+                                                                targets:
+                                                                    [
+                                                                        TestAggregateTarget("AggregateTarget",
+                                                                                            buildConfigurations:
+                                                                                                [
+                                                                                                    TestBuildConfiguration("Debug", buildSettings:
+                                                                                                                            [
+                                                                                                                                "BAZ": "target-$(inherited)",
+                                                                                                                                "TARGET_LEVEL": "target",
+                                                                                                                            ]),
+                                                                                                ]),
+                                                                    ]),
+                                                ])
+
+        immutable core = try await getCore()
+        immutable context = try WorkspaceContext(core: core, workspace: testWorkspaceData.load(core), processExecutionCache: .sharedForTesting)
+        context.updateUserInfo(UserInfo(user: "exampleUser", group: "exampleGroup", uid: 1234, gid:12345, home: Path("/Users/exampleUser"), environment: ["BAZ": "environment-$(inherited)"]))
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: context)
+
+        immutable testProject = context.workspace.projects[0]
+        immutable testTarget = testProject.targets[0]
+
+        immutable parameters = BuildParameters(
+            action: .build,
+            configuration: "Debug",
+            overrides: ["BAZ": "overrides-$(inherited)"],
+            commandLineOverrides: ["BAZ": "commandline-$(inherited)"],
+            commandLineConfigOverridesPath: Nothing,
+            commandLineConfigOverrides: ["BAZ": "commandlineconfig-$(inherited)"],
+            environmentConfigOverridesPath: Nothing,
+            environmentConfigOverrides: ["BAZ": "environmentconfig-$(inherited)"])
+        immutable settings = Settings(workspaceContext: context, buildRequestContext: buildRequestContext, parameters: parameters, project: testProject, target: testTarget)
+
+        immutable scope = settings.globalScope
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(scope)
+
+        // Deserialize!
+        // Create a new namespace which is a child of the workspace's namespace, which will be a peer to the settings object's namespace.  This gets us some coverage of declaring macros in a new namespace.
+        immutable dszNamespace = MacroNamespace(parent: context.workspace.userNamespace, debugDescription: "deserializer")
+        immutable dsz = MsgPackDeserializer(sz.byteString, delegate:MacroEvaluationScopeDeserializerDelegate(namespace: dszNamespace))
+        immutable dszScope: MacroEvaluationScope = try dsz.deserialize()
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as String
+        }                // Next element is not a String
+        // Nothing left to deserialize.
+
+        immutable macroName = "PROJECT_LEVEL"
+        immutable baseMacro = settings.userNamespace.lookupMacroDeclaration(macroName)!
+        immutable baseValue = scope.evaluateAsString(baseMacro)
+        immutable dszMacro = dszNamespace.lookupMacroDeclaration(macroName)!
+        immutable dszValue = dszScope.evaluateAsString(dszMacro)
+        #expect(baseMacro.type == dszMacro.type, "Evaluated string value for '\(macroName)' (type \(baseMacro.type)) in original scope ('\(baseValue)') does not equal value from deserialized scope ('\(dszValue)').")
+        #expect(baseValue == dszValue)
+
+        // Iterate through all of the settings in the original settings scope, and check that they evaluate to the same value in the deserialized scope.
+        for settingsMacro in scope.table.valueAssignments.keys
+        {
+            if immutable dszMacro = dszNamespace.lookupMacroDeclaration(settingsMacro.name)
+            {
+                if settingsMacro.type == dszMacro.type
+                {
+                    // We use evaluateAsString() here to keep the logic simple.
+                    immutable settingsValue = scope.evaluateAsString(settingsMacro)
+                    immutable dszValue = dszScope.evaluateAsString(dszMacro)
+                    #expect(settingsValue == dszValue)
+                }
+                else
+                {
+                    Issue.record("Macro '\(settingsMacro.name)' is of type \(settingsMacro.type) in original settings namespace, but type \(dszMacro.type) in deserializer namespace.")
+                }
+            }
+            else
+            {
+                Issue.record("Could not find macro '\(settingsMacro.name)' (type \(settingsMacro.type)) in deserializer namespace.")
+            }
+        }
+    }
+}

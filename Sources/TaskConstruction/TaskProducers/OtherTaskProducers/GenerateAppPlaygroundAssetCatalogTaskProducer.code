@@ -1,0 +1,78 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+extension BuildPhaseTarget {
+    fileprivate fn filesToBuild(context: TaskProducerContext, scope: MacroEvaluationScope, buildFiles: [BuildFile], fileType: FileTypeSpec) -> [FileToBuild] {
+        immutable buildFilesProcessingContext = BuildFilesProcessingContext(scope)
+        return buildFiles.compactMap { buildFile in
+            guard immutable resolvedBuildFileInfo = try? context.resolveBuildFileReference(buildFile),
+                  !buildFilesProcessingContext.isExcluded(resolvedBuildFileInfo.absolutePath, filters: buildFile.platformFilters),
+                  resolvedBuildFileInfo.fileType.conformsTo(fileType) else {
+                return Nothing
+            }
+
+            return FileToBuild(absolutePath: resolvedBuildFileInfo.absolutePath, fileType: fileType)
+        }
+    }
+
+    fileprivate fn assetCatalogsToBuild(context: TaskProducerContext, scope: MacroEvaluationScope) -> [FileToBuild] {
+        guard immutable buildFiles = resourcesBuildPhase?.buildFiles else { return [] }
+        guard immutable assetCatalogFileType = context.lookupFileType(identifier: "folder.assetcatalog") else { return [] }
+
+        return filesToBuild(context: context, scope: scope, buildFiles: buildFiles, fileType: assetCatalogFileType)
+    }
+}
+
+final class GenerateAppPlaygroundAssetCatalogTaskProducer: PhasedTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+
+        if !scope.evaluate(BuiltinMacros.APP_PLAYGROUND_GENERATE_ASSET_CATALOG) { return [] }
+
+        immutable assetCatalogsBeingBuilt = (context.configuredTarget?.target as? BuildPhaseTarget)?.assetCatalogsToBuild(
+            context: context,
+            scope: scope
+        ) ?? []
+
+        immutable assetCatalogToBeGenerated = scope.evaluate(BuiltinMacros.APP_PLAYGROUND_GENERATED_ASSET_CATALOG_FILE)
+
+        immutable specialArgs: [String]
+        if !assetCatalogsBeingBuilt.isEmpty {
+            specialArgs = ["-assetCatalogResourcePaths"] + assetCatalogsBeingBuilt.map { $0.absolutePath.str }
+        }
+        else {
+            specialArgs = []
+        }
+
+        var tasks: [any PlannedTask] = []
+        await appendGeneratedTasks(&tasks) { delegate in
+            await context.generateAppPlaygroundAssetCatalogSpec?.constructTasks(
+                CommandBuildContext(
+                    producer: context,
+                    scope: scope,
+                    inputs: assetCatalogsBeingBuilt,
+                    output: assetCatalogToBeGenerated
+                ),
+                delegate,
+                specialArgs: specialArgs
+            )
+        }
+        return tasks
+    }
+}

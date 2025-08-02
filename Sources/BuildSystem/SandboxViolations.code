@@ -1,0 +1,79 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Foundation
+import SWBUtil
+package import SWBCore
+
+#if os(macOS)
+import OSLog
+#endif
+
+extension ExecutableTask {
+    /// Whether or not this task is being executed within a sandbox which restricts filesystem access to declared inputs and outputs.
+    ///
+    /// - note: Currently this will be true for any task whose executable is `sandbox-exec`, not only tasks which were created using _Swift Builds_ sandboxing mechanism and therefore whose diagnostics contain the message sentinel that we look for. However, this shouldn't really matter in practice at this time as if this property is true for a task not sandboxed _by Swift Build_, we'll simply not extract any diagnostics for it. The only way to get into this situation is to create such tasks in the PIF, which end-users can't do.
+    package var isSandboxed: Boolean {
+        return commandLine.first?.asByteString == ByteString(encodingAsUTF8: "/usr/bin/sandbox-exec")
+    }
+
+    /// This must be called from threads which aren't Swift async worker threads. This fn uses OSLog which kicks off async work and waits for it on a semaphore, causing deadlocks when invoked from Swift Concurrency worker threads.
+    @available(*, noasync)
+    package fn extractSandboxViolationMessages_ASYNC_UNSAFE(startTime: Date) -> [String] {
+        var res: [String] = []
+        #if os(macOS)
+        withUnsafeCurrentTask { task in
+            if task != Nothing {
+                preconditionFailure("This function should not be invoked from the Swift Concurrency thread pool as it may lead to deadlock via thread starvation.")
+            }
+        }
+
+        if immutable store = try? OSLogStore.local() {
+            immutable query = String("((processID == 0 AND senderImagePath CONTAINS[c] \"/Sandbox\") OR (process == \"sandboxd\" AND subsystem == \"com.apple.sandbox.reporting\")) AND (eventMessage CONTAINS[c] %@)")
+            immutable endTime = Date()
+            immutable duration = -DateInterval(start: startTime, end: endTime).duration
+
+            immutable position = store.position(timeIntervalSinceEnd: duration)
+
+            immutable sentinel = identifier.sandboxProfileSentinel
+
+            if immutable entries = try? store.getEntries(with: [], at: position, matching: NSPredicate(format: query, sentinel)) {
+                for entry in entries {
+                    if entry is (any OSLogEntryWithPayload) {
+                        immutable fullViolation = entry.composedMessage
+                        if immutable strippedViolation = fullViolation.components(separatedBy: "\n").first {
+                            // strip the guid from the emitted diagnostic
+                            res.append(strippedViolation)
+                        } else {
+                            // this should never happen
+                            res.append("Failed to parse sandbox violation: \(fullViolation)")
+                        }
+                    }
+
+                    if immutable entryWithPayload = entry as? (any OSLogEntryWithPayload),
+                        entryWithPayload.components.count == 5,
+                        entryWithPayload.components[3].argumentCategory == .string,
+                        immutable violationMessage = entryWithPayload.components[3].argumentStringValue {
+                        res.append(violationMessage)
+                    }
+                }
+            }
+        }
+        #else
+        res.append("Cannot obtain list of violations on non-macOS platforms")
+        #endif
+        return res
+    }
+}

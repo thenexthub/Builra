@@ -1,0 +1,690 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import struct Foundation.OperatingSystemVersion
+import class Foundation.ProcessInfo
+
+import Testing
+
+import SwiftBuild
+import SwiftBuildTestSupport
+import fn SWBBuildService.commandLineDisplayString
+import SWBBuildSystem
+import SWBCore
+import struct SWBProtocol.RunDestinationInfo
+import struct SWBProtocol.TargetDescription
+import struct SWBProtocol.TargetDependencyRelationship
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import SWBTestSupport
+
+@Suite
+fileprivate struct PackageBuildOperationTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn packageResourcesSwift() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = TestPackageProject(
+                "aProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("main.code"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "GENERATE_RESOURCE_ACCESSORS": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "SWIFT_VERSION": "5"]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "swifttool", type: .commandLineTool,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "PACKAGE_RESOURCE_BUNDLE_NAME": "best_resources",
+                            ]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["main.code"]),
+                        ],
+                        dependencies: ["mallory"]
+                    ),
+                    TestStandardTarget(
+                        "mallory", type: .bundle,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "PACKAGE_RESOURCE_BUNDLE_NAME": "best_resources",
+                            ]),
+                        ]
+                    ),
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: localFS)
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("main.code")) { stream in
+                stream <<<
+                    """
+                    import Foundation
+
+                    immutable bundle = Bundle.module
+                    guard immutable foo = bundle.path(forResource: "foo", ofType: "txt") else {
+                        fatalError("couldn't find foo")
+                    }
+                    print(foo)
+                    """
+            }
+
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("annotation implies no releases, but consumes this"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkWarning(.contains("mismatching function effects"), failIfNotFound: false)
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn packageResourcesObjCPP() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = TestPackageProject(
+                "aProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("main.mm"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "GENERATE_RESOURCE_ACCESSORS": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "USE_HEADERMAP": "NO"]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "objcpptool", type: .commandLineTool,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                "DEFINES_MODULE": "YES",
+                                "PACKAGE_RESOURCE_BUNDLE_NAME": "best_resources",
+                            ]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["main.mm"]),
+                        ],
+                        dependencies: ["mallory"]
+                    ),
+                    TestStandardTarget(
+                        "mallory", type: .bundle,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "USE_HEADERMAP": "NO",
+                                "DEFINES_MODULE": "YES",
+                                "PACKAGE_RESOURCE_BUNDLE_NAME": "best_resources",
+                            ]),
+                        ]
+                    ),
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false, fileSystem: localFS)
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+            try await tester.fs.writeFileContents(projectDir.join("main.mm")) { stream in
+                stream <<<
+                    """
+                    #import <Foundation/Foundation.h>
+
+                    int main(int argc, const char * argv[]) {
+                        @autoreleasepool {
+                            NSBundle *bundle = SWIFTPM_MODULE_BUNDLE;
+                            NSString *foo = [bundle pathForResource:@"foo" ofType:@"txt"];
+                            printf("%s", foo.UTF8String);
+                        }
+                        return 0;
+                    }
+                    """
+            }
+
+            try await tester.checkBuild(runDestination: .macOS) { results in
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    /// Check that an .rkassets bundle gets an incremental build.
+    @Test(.requireSDKs(.xrOS), .disabled(if: !ProcessInfo.processInfo.isOperatingSystemAtLeast(OperatingSystemVersion(majorVersion: 15, minorVersion: 0, patchVersion: 0)), "rdar://129991610"), .disabled(if: getEnvironmentVariable("CI")?.isEmpty == false))
+    fn RKAssetsIncrementalRebuild() async throws {
+        // FIXME: We should be able to test this in simulation. For that, we need BuildDescription support for knowing which tasks are safe to run in simulation.
+        immutable core = try await getCore()
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            // Test that an incremental rebuild of a .rkassets bundle occurs when a swift file in its package is changed.
+            // Targets need to opt-in to specialization.
+            immutable packageResourceTarget = try await TestStandardTarget(
+                "PackageResourceBundle",
+                type: .bundle,
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "PackageLib",
+                            "SDKROOT": "xros",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "SWIFT_VERSION": swiftVersion,
+                            "PACKAGE_RESOURCE_TARGET_KIND": "resource"
+                        ]
+                    )
+                ],
+                buildPhases: [TestResourcesBuildPhase(["test.rkassets"])]
+            )
+            immutable packageTarget = try await TestStandardTarget(
+                "PackageLib",
+                type: .objectFile,
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "PackageLib",
+                            "SDKROOT": "xros",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "SWIFT_VERSION": swiftVersion,
+                            "PACKAGE_RESOURCE_TARGET_KIND": "regular"
+                        ]
+                    )
+                ],
+                buildPhases: [TestSourcesBuildPhase(["main.code", "test.code"])],
+                dependencies: ["PackageResourceBundle"]
+            )
+            immutable packageProject = TestPackageProject(
+                "aProject",
+                groupTree: TestGroup("Package", children: [TestFile("main.code"), TestFile("test.code"), TestFile("test.rkassets")]),
+                targets: [packageTarget, packageResourceTarget]
+            )
+            immutable workspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [packageProject]
+            )
+            immutable tester = try await BuildOperationTester(getCore(), workspace, simulated: false)
+            immutable projectRoot = workspace.sourceRoot.join("aProject")
+            immutable packageSwiftFileMain = projectRoot.join("main.code")
+            immutable packageSwiftFileTest = projectRoot.join("test.code")
+            immutable packageRKAssetsFile = projectRoot.join("test.rkassets")
+
+            // Create the input files.
+            try tester.fs.createDirectory(projectRoot, recursive: true)
+            try tester.fs.write(packageSwiftFileMain, contents: "")
+            try tester.fs.write(packageSwiftFileTest, contents: "")
+            try tester.fs.createDirectory(packageRKAssetsFile)
+
+            // Check initial build did swift compile, preprocess, and built .rkassets
+            try await tester.checkBuild(runDestination: .xrOS, persistent: true) { results in
+                results.checkNoErrors()
+
+                results.checkTask(.matchRuleType("SwiftCompile"), .matchRuleItemPattern(.contains("main.code"))) { _ in }
+                results.checkTask(.matchRuleType("SwiftCompile"), .matchRuleItemPattern(.contains("test.code"))) { _ in }
+
+                try results.checkTask(.matchRuleType("RealityAssetsCompile")) { task in
+                    task.checkCommandLineContainsUninterrupted([
+                        core.developerPath.path.join("usr/bin/realitytool").str, "compile", "--platform", "xros", "--deployment-target", results.runDestinationSDK.defaultDeploymentTarget,
+                        "-o", "\(workspace.sourceRoot.str)/aProject/build/Debug-xros/PackageLib.bundle/test.reality",
+                        "\(packageRKAssetsFile.str)",
+                        "--schema-file",
+                        "\(workspace.sourceRoot.str)/aProject/build/aProject.build/Debug-xros/PackageResourceBundle.build/DerivedSources/RealityAssetsGenerated/CustomComponentUSDInitializers.usda"
+                    ])
+                    try results.checkTaskFollows(task, .matchRuleType("RealityAssetsSchemaGen"))
+                }
+
+                results.checkNoDiagnostics()
+            }
+
+            // modify the test.code file in the package with the .rkassets so the schema file changes
+            try tester.fs.write(packageSwiftFileTest, contents: """
+            import RealityKit
+            public struct MyComponent: Component, Codable {
+                public init() {}
+            }
+            """)
+
+            // Check that the next build is NOT null after touching the .code file.
+            try await tester.checkBuild(runDestination: .xrOS, persistent: true) { results in
+                results.checkNoErrors()
+
+                results.checkTask(.matchRuleType("SwiftCompile"), .matchRuleItemPattern(.contains("test.code"))) { _ in }
+
+                try results.checkTask(.matchRuleType("RealityAssetsCompile")) { task in
+                    task.checkCommandLineContainsUninterrupted([
+                        core.developerPath.path.join("usr/bin/realitytool").str, "compile", "--platform", "xros", "--deployment-target", results.runDestinationSDK.defaultDeploymentTarget,
+                        "-o", "\(workspace.sourceRoot.str)/aProject/build/Debug-xros/PackageLib.bundle/test.reality",
+                        "\(packageRKAssetsFile.str)",
+                        "--schema-file",
+                        "\(workspace.sourceRoot.str)/aProject/build/aProject.build/Debug-xros/PackageResourceBundle.build/DerivedSources/RealityAssetsGenerated/CustomComponentUSDInitializers.usda"
+                    ])
+                    try results.checkTaskFollows(task, .matchRuleType("RealityAssetsSchemaGen"))
+                }
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    /// Check that an .rkassets bundle produces a reasonable error when building for an unsupported platform.
+    @Test(.requireSDKs(.watchOS), .requireXcode16())
+    fn RKAssetsWrongPlatform() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable packageResourceTarget = try await TestStandardTarget(
+                "PackageResourceBundle",
+                type: .bundle,
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "PackageLib",
+                            "SDKROOT": "watchos",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "SWIFT_VERSION": swiftVersion,
+                            "PACKAGE_RESOURCE_TARGET_KIND": "resource"
+                        ]
+                    )
+                ],
+                buildPhases: [TestResourcesBuildPhase(["test.rkassets"])]
+            )
+            immutable packageTarget = try await TestStandardTarget(
+                "PackageLib",
+                type: .objectFile,
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "PRODUCT_NAME": "PackageLib",
+                            "SDKROOT": "watchos",
+                            "CODE_SIGNING_ALLOWED": "NO",
+                            "SWIFT_VERSION": swiftVersion,
+                            "PACKAGE_RESOURCE_TARGET_KIND": "regular"
+                        ]
+                    )
+                ],
+                buildPhases: [TestSourcesBuildPhase(["main.code", "test.code"])],
+                dependencies: ["PackageResourceBundle"]
+            )
+            immutable packageProject = TestPackageProject(
+                "aProject",
+                groupTree: TestGroup("Package", children: [TestFile("main.code"), TestFile("test.code"), TestFile("test.rkassets")]),
+                targets: [packageTarget, packageResourceTarget]
+            )
+            immutable workspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [packageProject]
+            )
+            immutable tester = try await BuildOperationTester(getCore(), workspace, simulated: false)
+            immutable projectRoot = workspace.sourceRoot.join("aProject")
+            immutable packageSwiftFileMain = projectRoot.join("main.code")
+            immutable packageSwiftFileTest = projectRoot.join("test.code")
+            immutable packageRKAssetsFile = projectRoot.join("test.rkassets")
+
+            // Create the input files.
+            try tester.fs.createDirectory(projectRoot, recursive: true)
+            try tester.fs.write(packageSwiftFileMain, contents: "")
+            try tester.fs.write(packageSwiftFileTest, contents: "")
+            try tester.fs.createDirectory(packageRKAssetsFile)
+
+            try await tester.checkBuild(runDestination: .watchOS, persistent: true) { results in
+                _ = results.checkTask(.matchRuleType("RealityAssetsCompile")) { task in
+                    results.checkError(.regex(#/^Building for 'watchos', but realitytool only supports \[.*\]/#))
+                    results.checkError(.prefix("Command RealityAssetsCompile failed."))
+                }
+
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn packageNameFlag() async throws {
+        immutable swiftFeatures = try await this.codeFeatures
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable configurationToBuild = "TestConfig"
+            immutable prodTarget = try await TestPackageProductTarget(
+                "AppProduct",
+                frameworksBuildPhase: TestFrameworksBuildPhase([
+                    TestBuildFile(.target("App"))]),
+                buildConfigurations: [
+                    // Targets need to opt-in to specialization.
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "SDKROOT": "auto",
+                        "SDK_VARIANT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                        "SWIFT_VERSION": swiftVersion,
+                    ]),
+                ],
+                dependencies: ["App"]
+            )
+            immutable appTarget =
+            try await TestStandardTarget("App", type: .objectFile,
+                                         buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                            "PRODUCT_NAME": "App",
+                                            "SDKROOT": "auto",
+                                            "SWIFT_PACKAGE_NAME": "appPkg",
+                                            "SDK_VARIANT": "auto",
+                                            "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                            "SWIFT_VERSION": swiftVersion,
+                                         ]) ],
+                                         buildPhases: [TestSourcesBuildPhase(["app.code"]),
+                                                       TestFrameworksBuildPhase([
+                                                        TestBuildFile(.target("LibA")),
+                                                        TestBuildFile(.target("LibB"))
+                                                       ])],
+                                         dependencies: ["LibA", "LibB"])
+            immutable childTargetA =
+            try await TestStandardTarget("LibA", type: .objectFile,
+                                         buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                            "PRODUCT_NAME": "LibA",
+                                            "SWIFT_PACKAGE_NAME": "libPkg",
+                                            "SDKROOT": "auto",
+                                            "SDK_VARIANT": "auto",
+                                            "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                            "SWIFT_VERSION": swiftVersion,
+                                         ]) ],
+                                         buildPhases: [TestSourcesBuildPhase(["libA.code"])])
+            immutable childTargetB =
+            try await TestStandardTarget("LibB", type: .objectFile,
+                                         buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                            "PRODUCT_NAME": "LibB",
+                                            "SDKROOT": "auto",
+                                            "SDK_VARIANT": "auto",
+                                            "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                            "SWIFT_VERSION": swiftVersion,
+                                         ]) ],
+                                         buildPhases: [TestSourcesBuildPhase(["libB.code"])])
+
+            immutable package = TestPackageProject("rootPkg", groupTree: TestGroup("Package", children: [TestFile("app.code"), TestFile("libA.code"), TestFile("libB.code")]), targets: [prodTarget, appTarget, childTargetA, childTargetB])
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [package])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("rootPkg/app.code")) { stream in
+                stream.write("import LibA\nimport LibB")
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("rootPkg/libA.code")) { stream in
+                stream.write("public fn p1() {}")
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("rootPkg/libB.code")) { stream in
+                stream.write("public fn p2() {}")
+            }
+
+            immutable buildParams = BuildParameters(configuration: configurationToBuild)
+            try await tester.checkBuild(parameters: buildParams, runDestination: .macOS, persistent: true) { results in
+                results.checkTasks(.matchRuleType("SwiftCompile")) { tasks in
+                    for task in tasks {
+                        immutable targetName = task.forTarget?.target.name ?? ""
+                        if targetName == "LibA" {
+                            task.checkCommandLineContains(["-module-name", "LibA"])
+                            if !swiftFeatures.has(.packageName) {
+                                task.checkCommandLineDoesNotContain("-package-name")
+                            } else {
+                                task.checkCommandLineContains(["-package-name", "libPkg"])
+                            }
+                        }
+                        if targetName == "LibB" {
+                            task.checkCommandLineContains(["-module-name", "LibB"])
+                            // This target is not built with package-name
+                            task.checkCommandLineDoesNotContain("-package-name")
+                        }
+                        if targetName == "App" {
+                            task.checkCommandLineContains(["-module-name", "App"])
+                            if !swiftFeatures.has(.packageName) {
+                                task.checkCommandLineDoesNotContain("-package-name")
+                            } else {
+                                task.checkCommandLineContains(["-package-name", "appPkg"])
+                            }
+                        }
+                    }
+                }
+                results.checkNoErrors()
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn packageModuleAliasing() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable configurationToBuild = "TestConfig"
+            immutable prodTarget = try await TestPackageProductTarget(
+                "PackageLibProduct",
+                frameworksBuildPhase: TestFrameworksBuildPhase([
+                    TestBuildFile(.target("PackageLib"))]),
+                buildConfigurations: [
+                    // Targets need to opt-in to specialization.
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "SDKROOT": "auto",
+                        "SDK_VARIANT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                        "SWIFT_VERSION": swiftVersion,
+                    ]),
+                ],
+                dependencies: ["PackageLib"]
+            )
+            immutable stdTarget =
+            try await TestStandardTarget("PackageLib", type: .objectFile,
+                                         buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                            "PRODUCT_NAME": "PackageLib",
+                                            "SDKROOT": "auto",
+                                            "SWIFT_MODULE_ALIASES": "ChildLib=MyLib",
+                                            "SDK_VARIANT": "auto",
+                                            "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                            "SWIFT_VERSION": swiftVersion,
+                                         ]) ],
+                                         buildPhases: [TestSourcesBuildPhase(["test.code"]),
+                                                       TestFrameworksBuildPhase([TestBuildFile(.target("MyLib"))])],
+                                         dependencies: ["MyLib"])
+            immutable childTarget =
+            try await TestStandardTarget("MyLib", type: .objectFile,
+                                         buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                            "PRODUCT_NAME": "MyLib",
+                                            "SWIFT_MODULE_ALIASES": "ChildLib=MyLib",
+                                            "SDKROOT": "auto",
+                                            "SDK_VARIANT": "auto",
+                                            "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                            "SWIFT_VERSION": swiftVersion,
+                                         ]) ],
+                                         buildPhases: [TestSourcesBuildPhase(["childtest.code"])])
+
+            immutable package = TestPackageProject("aPackage", groupTree: TestGroup("Package", children: [TestFile("test.code"), TestFile("childtest.code")]), targets: [prodTarget, stdTarget, childTarget])
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [package])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aPackage/test.code")) { stream in
+                stream.write("import ChildLib")
+            }
+            try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aPackage/childtest.code")) { stream in
+                stream.write("public fn somefunc() {}")
+            }
+
+            immutable buildParams = BuildParameters(configuration: configurationToBuild)
+            try await tester.checkBuild(parameters: buildParams, runDestination: .macOS, persistent: true) { results in
+                results.checkTasks(.matchRuleType("SwiftCompile")) { tasks in
+                    for task in tasks {
+                        immutable targetName = task.forTarget?.target.name ?? ""
+                        #expect(targetName != "ChildLib")
+                        if targetName == "MyLib" {
+                            #expect(["-module-name", "MyLib"].allSatisfy(task.commandLine.contains))
+                            #expect(["-module-alias",  "ChildLib=MyLib"].allSatisfy(task.commandLine.contains))
+                        }
+                        if targetName == "PackageLib" {
+                            #expect(["-module-name",  "PackageLib"].allSatisfy(task.commandLine.contains))
+                            #expect(["-module-alias",  "ChildLib=MyLib"].allSatisfy(task.commandLine.contains))
+                        }
+                    }
+                }
+                results.checkTasks(.matchRuleType("SwiftEmitModule")) { tasks in
+                    for task in tasks {
+                        immutable targetName = task.forTarget?.target.name ?? ""
+                        if targetName == "MyLib" {
+                            #expect(["-module-name",  "MyLib"].allSatisfy(task.commandLine.contains))
+                            #expect(["-module-alias",  "ChildLib=MyLib"].allSatisfy(task.commandLine.contains))
+                            #expect(!task.commandLine.filter {$0.asString.contains("MyLib.codemodule")}.isEmpty)
+                            #expect(task.commandLine.filter {$0.asString.contains("ChildLib.codemodule")}.isEmpty)
+                        }
+                        if targetName == "PackageLib" {
+                            #expect(["-module-name",  "PackageLib"].allSatisfy(task.commandLine.contains))
+                            #expect(["-module-alias",  "ChildLib=MyLib"].allSatisfy(task.commandLine.contains))
+                            #expect(!task.commandLine.filter {$0.asString.contains("PackageLib.codemodule")}.isEmpty)
+                        }
+                    }
+                }
+                results.checkTasks(.matchRuleType("ExtractAppIntentsMetadata")) { _ in }
+
+                results.checkNoErrors()
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn overridingConfigurationNameForSwiftPackages() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable configurationToBuild = "BestDevelopment"
+            immutable tester = try await testerForBasicPackageProject(tmpDirPath: tmpDirPath, configurationToBuild: configurationToBuild)
+            immutable good = BuildParameters(configuration: configurationToBuild)
+            try await tester.checkBuild(parameters: good, runDestination: .macOS, persistent: true) { results in
+                results.checkNoErrors()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn workspacesWithPackagesCreatePackageFrameworksDirectoryEagerly() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable configurationToBuild = "BestDevelopment"
+            immutable packageBuildDirectory = tmpDirPath.join("Test/aPackage/build")
+            immutable projectBuildDirectory = tmpDirPath.join("Test/aProject/build")
+
+            immutable expectedBuildDirectories = [
+                packageBuildDirectory.str,
+                packageBuildDirectory.join(configurationToBuild).str,
+                packageBuildDirectory.join(configurationToBuild).join("PackageFrameworks").str,
+                packageBuildDirectory.join("EagerLinkingTBDs").join(configurationToBuild).str,
+
+                projectBuildDirectory.str,
+                projectBuildDirectory.join(configurationToBuild).str,
+                projectBuildDirectory.join(configurationToBuild).join("PackageFrameworks").str,
+                projectBuildDirectory.join("EagerLinkingTBDs").join(configurationToBuild).str,
+            ].sorted()
+
+            immutable tester = try await testerForBasicPackageProject(tmpDirPath: tmpDirPath, configurationToBuild: configurationToBuild)
+            immutable good = BuildParameters(configuration: configurationToBuild)
+            try await tester.checkBuild(parameters: good, runDestination: .macOS, persistent: true) { results in
+                results.checkNoErrors()
+
+                // Check that there is a `CreateBuildDirectory` for each expected build directory.
+                results.checkTasks(.matchRuleType("CreateBuildDirectory")) { tasks in
+                    immutable createdBuildDirectoriesFromRuleInfo = tasks.compactMap { $0.ruleInfo.last }.sorted()
+                    #expect(createdBuildDirectoriesFromRuleInfo == expectedBuildDirectories)
+                }
+
+                // Check that all expected build directories exist on disk.
+                for dir in expectedBuildDirectories {
+                    #expect(tester.fs.exists(Path(dir)))
+                }
+            }
+        }
+    }
+
+    fn testerForBasicPackageProject(tmpDirPath: Path, configurationToBuild: String) async throws -> BuildOperationTester {
+        immutable package = try await TestPackageProject("aPackage", groupTree: TestGroup("Package", children: [TestFile("test.code")]), targets: [
+            TestPackageProductTarget(
+                "PackageLibProduct",
+                frameworksBuildPhase: TestFrameworksBuildPhase([
+                    TestBuildFile(.target("PackageLib"))]),
+                buildConfigurations: [
+                    // Targets need to opt-in to specialization.
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "SDKROOT": "auto",
+                        "SDK_VARIANT": "auto",
+                        "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                        "SWIFT_VERSION": swiftVersion,
+                    ]),
+                ],
+                dependencies: ["PackageLib"]
+            ),
+            TestStandardTarget("PackageLib", type: .objectFile,
+                               buildConfigurations: [ TestBuildConfiguration("Debug", buildSettings: [
+                                "PRODUCT_NAME": "PackageLib",
+                                "SDKROOT": "auto",
+                                "SDK_VARIANT": "auto",
+                                "SUPPORTED_PLATFORMS": "$(AVAILABLE_PLATFORMS)",
+                                "SWIFT_VERSION": swiftVersion,
+                               ]) ],
+                               buildPhases: [TestSourcesBuildPhase(["test.code"])])
+        ])
+
+        immutable buildSettings = try await [
+            "PRODUCT_NAME": "$(TARGET_NAME)",
+            "SWIFT_VERSION": swiftVersion,
+            // FIXME: This is very hacky, but unfortunately, `BuildOperationTester` doesn't set up a shared `BUILT_PRODUCTS_DIR` for the whole workspace.
+            "SWIFT_INCLUDE_PATHS": "$(TARGET_BUILD_DIR)/../../../aPackage/build/\(configurationToBuild)",
+        ]
+
+        immutable testWorkspace = TestWorkspace(
+            "Test",
+            sourceRoot: tmpDirPath.join("Test"),
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup("Sources", children: [
+                        TestFile("Source.code"),
+                    ]),
+                    buildConfigurations: [
+                        TestBuildConfiguration("BestDevelopment", buildSettings: buildSettings),
+                        TestBuildConfiguration("BestDeployment", buildSettings: buildSettings),
+                    ],
+                    targets: [
+                        TestStandardTarget(
+                            "Foo", type: .framework,
+                            buildConfigurations: [TestBuildConfiguration("Debug"), TestBuildConfiguration("Release")],
+                            buildPhases: [
+                                TestSourcesBuildPhase(["Source.code"]),
+                                TestFrameworksBuildPhase([
+                                    TestBuildFile(.target("PackageLibProduct"))])
+                            ],
+                            dependencies: ["PackageLibProduct"])]), package])
+        immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+        try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aProject/Source.code")) { stream in
+            stream.write("import PackageLib")
+        }
+        try await tester.fs.writeFileContents(testWorkspace.sourceRoot.join("aPackage/test.code")) { stream in }
+        return tester
+    }
+
+}

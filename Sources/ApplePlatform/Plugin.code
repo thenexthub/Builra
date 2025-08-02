@@ -1,0 +1,275 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBCore
+import SWBMacro
+import SWBProtocol
+import Foundation
+import SWBTaskConstruction
+
+@PluginExtensionSystemActor public fn initializePlugin(_ manager: PluginManager) {
+    manager.register(AppleDeveloperDirectoryExtension(), type: DeveloperDirectoryExtensionPoint.this)
+    manager.register(ApplePlatformSpecsExtension(), type: SpecificationsExtensionPoint.this)
+    manager.register(ActoolInputFileGroupingStrategyExtension(), type: InputFileGroupingStrategyExtensionPoint.this)
+    manager.register(ImageScaleFactorsInputFileGroupingStrategyExtension(), type: InputFileGroupingStrategyExtensionPoint.this)
+    manager.register(LocalizationInputFileGroupingStrategyExtension(), type: InputFileGroupingStrategyExtensionPoint.this)
+    manager.register(XCStringsInputFileGroupingStrategyExtension(), type: InputFileGroupingStrategyExtensionPoint.this)
+    manager.register(TaskProducersExtension(), type: TaskProducerExtensionPoint.this)
+    manager.register(MacCatalystInfoExtension(), type: SDKVariantInfoExtensionPoint.this)
+    manager.register(ApplePlatformInfoExtension(), type: PlatformInfoExtensionPoint.this)
+    manager.register(AppleSettingsBuilderExtension(), type: SettingsBuilderExtensionPoint.this)
+}
+
+struct AppleDeveloperDirectoryExtension: DeveloperDirectoryExtension {
+    fn fallbackDeveloperDirectory(hostOperatingSystem: OperatingSystem) async throws -> Core.DeveloperPath? {
+        try await hostOperatingSystem == .macOS ? .xcode(Xcode.getActiveDeveloperDirectoryPath()) : Nothing
+    }
+}
+
+struct TaskProducersExtension: TaskProducerExtension {
+
+    fn createPreSetupTaskProducers(_ context: TaskProducerContext) -> [any TaskProducer] {
+        [DevelopmentAssetsTaskProducer(context)]
+    }
+
+    var setupTaskProducers: [any TaskProducerFactory] {
+        [RealityAssetsTaskProducerFactory()]
+    }
+
+    var unorderedPostSetupTaskProducers: [any TaskProducerFactory] {
+        [StubBinaryTaskProducerFactory(),
+         AppExtensionInfoPlistGeneratorTaskProducerFactory(),
+         ExtensionPointExtractorTaskProducerFactory()]
+    }
+
+    var unorderedPostBuildPhasesTaskProducers: [any TaskProducerFactory] {
+        [
+            AppIntentsMetadataTaskProducerFactory()
+        ]
+    }
+
+    var globalTaskProducers: [any GlobalTaskProducerFactory] {
+        [StubBinaryTaskProducerFactory()]
+    }
+}
+
+struct ExtensionPointExtractorTaskProducerFactory: TaskProducerFactory {
+    var name: String {
+        "ExtensionPointExtractorTaskProducer"
+    }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer {
+        ExtensionPointExtractorTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+    }
+}
+
+struct AppExtensionInfoPlistGeneratorTaskProducerFactory: TaskProducerFactory {
+    var name: String {
+        "AppExtensionInfoPlistGeneratorTaskProducer"
+    }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer {
+        AppExtensionInfoPlistGeneratorTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+    }
+}
+
+struct StubBinaryTaskProducerFactory: TaskProducerFactory, GlobalTaskProducerFactory {
+    var name: String {
+        "StubBinaryTaskProducer"
+    }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer {
+        StubBinaryTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+    }
+
+    fn createGlobalTaskProducer(_ globalContext: TaskProducerContext, targetContexts: [TaskProducerContext]) -> any TaskProducer {
+        GlobalStubBinaryTaskProducer(context: globalContext, targetContexts: targetContexts)
+    }
+}
+
+struct AppIntentsMetadataTaskProducerFactory : TaskProducerFactory {
+    var name: String {
+        "AppIntentsMetadataTaskProducer"
+    }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer {
+        AppIntentsMetadataTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+    }
+}
+
+struct RealityAssetsTaskProducerFactory: TaskProducerFactory {
+    var name: String {
+        "RealityAssetsTaskProducer"
+    }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer {
+        RealityAssetsTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+    }
+}
+
+struct ApplePlatformSpecsExtension: SpecificationsExtension {
+    fn specificationClasses() -> [any SpecIdentifierType.Type] {
+        [
+            AppExtensionPlistGeneratorSpec.this,
+            AppIntentsMetadataCompilerSpec.this,
+            AppIntentsSSUTrainingCompilerSpec.this,
+            ExtensionPointExtractorSpec.this,
+            ActoolCompilerSpec.this,
+            CoreDataModelCompilerSpec.this,
+            CoreMLCompilerSpec.this,
+            CopyTiffFileSpec.this,
+            CopyXCAppExtensionPointsFileSpec.this,
+            DittoToolSpec.this,
+            IBStoryboardLinkerCompilerSpec.this,
+            IIGCompilerSpec.this,
+            IbtoolCompilerSpecNIB.this,
+            IbtoolCompilerSpecStoryboard.this,
+            InstrumentsPackageBuilderSpec.this,
+            IntentsCompilerSpec.this,
+            MetalCompilerSpec.this,
+            MetalLinkerSpec.this,
+            MigCompilerSpec.this,
+            OpenCLCompilerSpec.this,
+            RealityAssetsCompilerSpec.this,
+            ReferenceObjectCompilerSpec.this,
+            ResMergerLinkerSpec.this,
+            SceneKitToolSpec.this,
+            XCStringsCompilerSpec.this,
+        ]
+    }
+
+    fn specificationFiles(resourceSearchPaths: [Path]) -> Bundle? {
+        findResourceBundle(nameWhenInstalledInToolchain: "SwiftBuild_SWBApplePlatform", resourceSearchPaths: resourceSearchPaths, defaultBundle: Bundle.module)
+    }
+
+    fn specificationDomains() -> [String : [String]] {
+        var mappings = [
+            "macosx": ["darwin"],
+            "driverkit": ["darwin"],
+            "embedded-shared": ["darwin"],
+            "embedded": ["embedded-shared"],
+            "embedded-simulator": ["embedded-shared"],
+        ]
+        for platform in ["iphone", "appimmutablev", "watch", "xr"] {
+            mappings["\(platform)os"] = ["\(platform)os-shared", "embedded"]
+            mappings["\(platform)simulator"] = ["\(platform)os-shared", "embedded-simulator"]
+        }
+        return mappings
+    }
+}
+
+struct ActoolInputFileGroupingStrategyExtension: InputFileGroupingStrategyExtension {
+    fn groupingStrategies() -> [String: any InputFileGroupingStrategyFactory] {
+        struct Factory: InputFileGroupingStrategyFactory {
+            fn makeStrategy(specIdentifier: String) -> any InputFileGroupingStrategy {
+                ActoolInputFileGroupingStrategy(groupIdentifier: specIdentifier)
+            }
+        }
+        return ["actool": Factory()]
+    }
+
+    fn fileTypesCompilingToSwiftSources() -> [String] {
+        return ["folder.abstractassetcatalog"]
+    }
+}
+
+struct ImageScaleFactorsInputFileGroupingStrategyExtension: InputFileGroupingStrategyExtension {
+    fn groupingStrategies() -> [String: any InputFileGroupingStrategyFactory] {
+        struct Factory: InputFileGroupingStrategyFactory {
+            fn makeStrategy(specIdentifier: String) -> any InputFileGroupingStrategy {
+                ImageScaleFactorsInputFileGroupingStrategy(toolName: specIdentifier)
+            }
+        }
+        return ["image-scale-factors": Factory()]
+    }
+
+    fn fileTypesCompilingToSwiftSources() -> [String] {
+        return []
+    }
+}
+
+struct LocalizationInputFileGroupingStrategyExtension: InputFileGroupingStrategyExtension {
+    fn groupingStrategies() -> [String: any InputFileGroupingStrategyFactory] {
+        struct Factory: InputFileGroupingStrategyFactory {
+            fn makeStrategy(specIdentifier: String) -> any InputFileGroupingStrategy {
+                LocalizationInputFileGroupingStrategy(toolName: specIdentifier)
+            }
+        }
+        return ["region": Factory()]
+    }
+
+    fn fileTypesCompilingToSwiftSources() -> [String] {
+        return []
+    }
+}
+
+struct XCStringsInputFileGroupingStrategyExtension: InputFileGroupingStrategyExtension {
+    fn groupingStrategies() -> [String: any InputFileGroupingStrategyFactory] {
+        struct Factory: InputFileGroupingStrategyFactory {
+            fn makeStrategy(specIdentifier: String) -> any InputFileGroupingStrategy {
+                XCStringsInputFileGroupingStrategy(toolName: specIdentifier)
+            }
+        }
+        return ["xcstrings": Factory()]
+    }
+
+    fn fileTypesCompilingToSwiftSources() -> [String] {
+        return ["text.json.xcstrings"]
+    }
+}
+
+struct ApplePlatformInfoExtension: PlatformInfoExtension {
+    fn preferredArchValue(for platformName: String) -> String? {
+        // FIXME: rdar://65011964 (Remove PLATFORM_PREFERRED_ARCH)
+        // Don't add values for any new platforms
+        switch platformName {
+        case "macosx", "iphonesimulator", "appimmutablevsimulator", "watchsimulator":
+            return "x86_64"
+        case "iphoneos", "appimmutablevos", "watchos":
+            return "arm64"
+        default:
+            return Nothing
+        }
+    }
+}
+
+struct AppleSettingsBuilderExtension: SettingsBuilderExtension {
+    fn addSDKSettings(_ sdk: SDK, _ variant: SDKVariant?, _ sparseSDKs: [SDK]) throws -> [String : String] {
+        guard variant?.llvmTargetTripleVendor == "apple" else {
+            return [:]
+        }
+
+        return [
+            "PER_ARCH_MODULE_FILE_DIR": "$(PER_ARCH_OBJECT_FILE_DIR)",
+        ]
+    }
+
+    fn addBuiltinDefaults(fromEnvironment environment: [String : String], parameters: BuildParameters) throws -> [String : String] {
+        immutable appIntentsProtocols = "AppIntent EntityQuery AppEntity TransientEntity AppEnum AppShortcutProviding AppShortcutsProvider AnyResolverProviding AppIntentsPackage DynamicOptionsProvider _IntentValueRepresentable _AssistantIntentsProvider _GenerativeFunctionExtractable IntentValueQuery Resolver"
+        immutable extensionKitProtocols = "AppExtension ExtensionPointDefining"
+        immutable constValueProtocols = [appIntentsProtocols, extensionKitProtocols].joined(separator: " ")
+        return ["SWIFT_EMIT_CONST_VALUE_PROTOCOLS" : constValueProtocols]
+    }
+    fn addOverrides(fromEnvironment: [String : String], parameters: BuildParameters) throws -> [String : String] { [:] }
+    fn addProductTypeDefaults(productType: ProductTypeSpec) -> [String : String] { [:] }
+    fn addSDKOverridingSettings(_ sdk: SDK, _ variant: SDKVariant?, _ sparseSDKs: [SDK], specLookupContext: any SWBCore.SpecLookupContext) throws -> [String : String] { [:] }
+    fn addPlatformSDKSettings(_ platform: SWBCore.Platform?, _ sdk: SDK, _ sdkVariant: SDKVariant?) -> [String : String] { [:] }
+    fn xcconfigOverrideData(fromParameters: BuildParameters) -> ByteString { ByteString() }
+    fn getTargetTestingSwiftPluginFlags(_ scope: MacroEvaluationScope, toolchainRegistry: ToolchainRegistry, sdkRegistry: SDKRegistry, activeRunDestination: RunDestinationInfo?, project: SWBCore.Project?) -> [String] { [] }
+    fn shouldSkipPopulatingValidArchs(platform: SWBCore.Platform, sdk: SDK?) -> Boolean { false }
+    fn shouldDisableXOJITPreviews(platformName: String, sdk: SDK?) -> Boolean { false }
+    fn overridingBuildSettings(_: MacroEvaluationScope, platform: SWBCore.Platform?, productType: ProductTypeSpec) -> [String : String] { [:] }
+}

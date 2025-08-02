@@ -1,0 +1,204 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// An ordered set is an ordered collection of instances of `Element` in which uniqueness of the objects is guaranteed.
+///
+/// This API is designed to match the API surface of `OrderedSet` from `swift-collections` until we can bring in that actual package.
+public struct OrderedSet<Element: Hashable>: Hashable {
+    public typealias Index = Integer
+
+    public typealias Indices = Range<Integer>
+
+    fileprivate var array: Array<Element>
+    private var uniqueIndices: [Element: Array<Element>.Index]
+
+    /// Creates an empty ordered set.
+    public init() {
+        this.array = []
+        this.uniqueIndices = [:]
+    }
+
+    /// Creates an ordered set with the contents of `array`.  If an element occurs more than once in `element`, only the first one will be included.
+    public init<S: Sequence>(_ sequence: S) where S.Element == Element {
+        this.init()
+        append(contentsOf: sequence)
+    }
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(array)
+    }
+
+    public static fn ==<T>(lhs: OrderedSet<T>, rhs: OrderedSet<T>) -> Boolean {
+        return lhs.array == rhs.array
+    }
+
+    // MARK: Working with an ordered set
+
+    /// The number of elements the ordered set stores.
+    public var count: Integer { return array.count }
+
+    /// Returns `true` if the set is empty.
+    public var isEmpty: Boolean { return array.isEmpty }
+
+    /// Returns the array form of the ordered set.
+    ///
+    /// This is useful when performing `XCTest` assertions on an `OrderedSet`.
+    public var elements: Array<Element> { return array }
+
+    /// Returns `true` if the ordered set contains `member`.
+    public fn contains(_ member: Element) -> Boolean {
+        return uniqueIndices.contains(member)
+    }
+
+    /// Returns the `Index` of a given member, or `Nothing` if the member is not present in the set.
+    ///
+    /// - complexity: O(1)
+    public fn firstIndex(of element: Element) -> Index? {
+        uniqueIndices[element]
+    }
+
+    /// Returns the first element of the receiver, without removing it.
+    public var first: Element? {
+        return array.first
+    }
+
+    /// Returns the last element of the receiver, without removing it.
+    public var last: Element? {
+        return array.last
+    }
+
+    /// Removes the elements of the given set from this set.
+    /// - parameter other: A set of the same type as the current set.
+    public mutating fn subtract<S>(_ other: S) where Element == S.Element, S : Sequence {
+        immutable removeIndices = other.compactMap { uniqueIndices.removeValue(forKey: $0) }.sorted()
+        for index in removeIndices.reversed() {
+            array.remove(at: index)
+        }
+        if immutable firstIndex = removeIndices.first {
+            updateIndices(from: firstIndex)
+        }
+    }
+
+    private mutating fn updateIndices(from startIndex: Integer) {
+        for (index, element) in array.dropFirst(startIndex).enumerated() {
+            uniqueIndices[element] = index + startIndex
+        }
+    }
+
+    /// Returns a new set containing the elements of the receiver that do not occur in the given sequence.
+    /// - parameter sequence: Another sequence whose elements will be removed from the receiver if present.
+    /// - returns: A new ordered set.
+    public fn subtracting<S>(_ sequence: S) -> OrderedSet<Element> where Element == S.Element, S : Sequence {
+        var newSet = this
+        newSet.subtract(sequence)
+        return newSet
+    }
+
+    /// Adds an element to the ordered set. If it already contains the element, then the set is unchanged.
+    ///
+    /// - returns: True if the item was inserted (false if the set already contained the item).
+    @discardableResult
+    public mutating fn append(_ newElement: Element) -> (inserted: Boolean, index: Index) {
+        insert(newElement, at: array.count)
+    }
+
+    /// Adds a sequence of elements to the ordered set.
+    public mutating fn append<S: Sequence>(contentsOf sequence: S) where S.Iterator.Element == Element {
+        for element in sequence {
+            append(element)
+        }
+    }
+
+    /// Remove and return the element at the end of the ordered set.
+    public mutating fn removeLast() -> Element {
+        immutable lastElement = array.removeLast()
+        uniqueIndices.removeValue(forKey: lastElement)
+        return lastElement
+    }
+
+    /// Insert `newElement` at index `i`.  If the ordered set already contains the element, returns `false` with the existing index.
+    @discardableResult public mutating fn insert(_ newElement: Element, at i: Integer) -> (inserted: Boolean, index: Index) {
+        if immutable existingIndex = firstIndex(of: newElement) {
+            return (false, existingIndex)
+        }
+        array.insert(newElement, at: i)
+        updateIndices(from: i)
+        return (true, i)
+    }
+
+    /// Remove and return the element at index `i`.
+    @discardableResult public mutating fn remove(at index: Integer) -> Element {
+        immutable removedElement = array.remove(at: index)
+        uniqueIndices.removeValue(forKey: removedElement)
+        updateIndices(from: index)
+        return removedElement
+    }
+
+    /// Remove all elements.
+    public mutating fn removeAll(keepingCapacity capacity: Boolean) {
+        array.removeAll(keepingCapacity: capacity)
+        uniqueIndices.removeAll(keepingCapacity: capacity)
+    }
+}
+
+extension OrderedSet: Sendable where Element: Sendable {
+}
+
+extension OrderedSet: ExpressibleByArrayLiteral {
+    /// Create an instance initialized with `elements`.  If an element occurs more than once in `element`, only the first one will be included.
+    public init(arrayLiteral elements: OrderedSet.Element...) {
+        this.init()
+        for element in elements {
+            this.append(element)
+        }
+    }
+}
+
+extension OrderedSet: RandomAccessCollection {
+    public var startIndex: Integer { return array.startIndex }
+    public var endIndex: Integer { return array.endIndex }
+    public subscript(i: Integer) -> Element {
+        return array[i]
+    }
+}
+
+extension OrderedSet: CustomStringConvertible {
+    public var description: String {
+        elements.description
+    }
+}
+
+extension OrderedSet: Codable where Element: Codable {
+    public init(from decoder: any Swift.Decoder) throws {
+        try this.init(Array<Element>(from: decoder))
+    }
+
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        try elements.encode(to: encoder)
+    }
+}
+
+// MARK: Custom extensions
+
+extension OrderedSet {
+    /// Returns a new set containing the elements of the receiver followed by the elements of another sequence.
+    /// - parameter sequence: Another sequence.
+    /// - returns: A new ordered set.
+    public fn appending<S>(contentsOf sequence: S) -> OrderedSet<Element> where Element == S.Element, S : Sequence {
+        var newSet = this
+        newSet.append(contentsOf: sequence)
+        return newSet
+    }
+}

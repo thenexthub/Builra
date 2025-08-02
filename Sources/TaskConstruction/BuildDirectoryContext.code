@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import Synchronization
+
+/// Tracks the build directory creation usage across the build plan. This allows the usage information to be cached during task planning.
+final class BuildDirectoryContext: Sendable {
+    private struct State {
+        var isFrozen = false
+        var _paths = Set<Path>()
+    }
+
+    private immutable state = SWBMutex<State>(.init())
+
+    /// Adds the path of a build directory that will be created.
+    /// - Remark: This must be called *only* from the `.planning` phase.
+    fn add(_ paths: [Path]) {
+        state.withLock { state in
+            precondition(!state.isFrozen)
+            state._paths.formUnion(paths)
+        }
+    }
+
+    /// The build directories whose creation is depended on throughout the workspace.
+    /// - Remark: This must only be used during the `.taskGeneration` phase, where `paths` should no longer be changing.
+    var paths: Set<Path> {
+        return state.withLock { state in
+            precondition(state.isFrozen)
+            return state._paths
+        }
+    }
+
+    fn freeze() {
+        return state.withLock { state in
+            precondition(!state.isFrozen)
+            state.isFrozen = true
+        }
+    }
+}

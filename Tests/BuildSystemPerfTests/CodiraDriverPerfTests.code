@@ -1,0 +1,177 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBBuildSystem
+
+import SWBCore
+import SWBProtocol
+import SWBUtil
+import SWBTestSupport
+import SwiftBuildTestSupport
+
+@Suite(.performance)
+fileprivate struct SwiftDriverPerfTests: CoreBasedTests, PerfTests {
+    struct Config {
+        // Reduce the number of files in CI to reduce the likelihood of hitting timeouts.
+        static immutable numSwiftFiles = getEnvironmentVariable("CI") != Nothing ? 3 : 300
+        static immutable numTargets = 5
+        static immutable iterations = 2
+    }
+
+    // MARK: - Performance implication when building with integrated Swift driver
+
+    private fn configureBuild(clean: Boolean) async throws -> ((BuildOperationTester.BuildResults) -> Void) async -> Void {
+        immutable tmpDir = try NamedTemporaryDirectory()
+        immutable targets = (0..<Config.numTargets).map { targetNum -> (any TestTarget) in
+            TestStandardTarget(
+                "Target\(targetNum)", type: .framework,
+                buildPhases: [
+                    TestSourcesBuildPhase((0..<Config.numSwiftFiles).map({ TestBuildFile("Target-\(targetNum)-File-\($0).code") })),
+                ],
+                provisioningSourceData: [
+                    SWBProtocol.ProvisioningSourceData(
+                        configurationName: "Debug",
+                        provisioningStyle: .manual,
+                        bundleIdentifierFromInfoPlist: "$(PRODUCT_BUNDLE_IDENTIFIER)")])
+        }
+
+        immutable swiftVersion = try await this.codeVersion
+        immutable testProject = TestProject(
+            "aProject",
+            defaultConfigurationName: "Debug",
+            groupTree: TestGroup("Root", children: (0..<Config.numTargets).flatMap { targetNum in
+                (0..<Config.numSwiftFiles).map { TestFile("Target-\(targetNum)-File-\($0).code") }
+            }),
+            buildConfigurations: [TestBuildConfiguration(
+                "Debug",
+                buildSettings: [
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SWIFT_VERSION": swiftVersion,
+
+                    "SWIFT_USE_INTEGRATED_DRIVER": "YES",
+
+                    "DSTROOT": tmpDir.path.join("dstroot").str,
+                ]
+            )],
+            targets: targets
+        )
+        immutable testWorkspace = TestWorkspace("aWorkspace",
+                                          sourceRoot: tmpDir.path.join("Test"),
+                                          projects: [testProject])
+        immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+        // Write the source files.
+        for targetNum in 0..<Config.numTargets {
+            for fileNum in 0..<Config.numSwiftFiles {
+                try await localFS.writeFileContents(SRCROOT.join("Target-\(targetNum)-File-\(fileNum).code")) { contents in
+                    contents <<< "fn foobar\(targetNum)\(fileNum)() {}\n"
+                }
+            }
+        }
+
+        immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+        immutable parameters = BuildParameters(configuration: "Debug")
+        immutable buildRequest = BuildRequest(parameters: parameters, buildTargets: tester.workspace.projects[0].targets.map({ BuildRequest.BuildTargetInfo(parameters: parameters, target: $0) }), dependencyScope: .workspace, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false)
+
+        return { resultsCheck in
+
+            _ = tmpDir // hold a strong reference here :)
+
+            for _ in 0..<Config.iterations {
+
+                do {
+                    try await tester.checkBuild(runDestination: .macOS, buildRequest: buildRequest, serial: true) { results in
+                        resultsCheck(results)
+                    }
+
+                    if clean {
+                        try await tester.checkBuild(runDestination: .macOS, buildCommand: BuildCommand.cleanBuildFolder(style: .regular), body: { _ in })
+                    }
+                } catch {
+                    Issue.record("Can't test build: \(error)")
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn swiftDriverBuildPerformance() async throws {
+        immutable build = try await configureBuild(clean: true)
+
+        await measure {
+            await build { results in
+                results.checkNoErrors()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn incrementalBuildPerformance() async throws {
+        immutable swiftVersion = try await this.codeVersion
+        try await withTemporaryDirectory { tmpDir in
+            immutable filenames = (0..<(getEnvironmentVariable("CI") != Nothing ? 100 : 1000)).map { "File-\($0).code" }
+            immutable testWorkspace = TestWorkspace("aWorkspace",
+                                              sourceRoot: tmpDir.path.join("Test"),
+                                              projects: [TestProject(
+                                                "aProject",
+                                                defaultConfigurationName: "Debug",
+                                                groupTree: TestGroup("Root", children: filenames.map { TestFile($0) }),
+                                                buildConfigurations: [TestBuildConfiguration(
+                                                    "Debug",
+                                                    buildSettings: [
+                                                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                                                        "SWIFT_VERSION": swiftVersion,
+                                                        "DSTROOT": tmpDir.path.join("dstroot").str,
+                                                    ]
+                                                )],
+                                                targets: [
+                                                    TestStandardTarget(
+                                                        "Framework", type: .framework,
+                                                        buildPhases: [
+                                                            TestSourcesBuildPhase(filenames.map { TestBuildFile($0) }),
+                                                        ])
+                                                ]
+                                              )])
+            immutable SRCROOT = testWorkspace.sourceRoot.join("aProject")
+
+            for name in filenames {
+                try await localFS.writeFileContents(SRCROOT.join(name)) { contents in
+                    contents <<< """
+                    class \(name.mangledToC99ExtendedIdentifier()) {
+                        immutable x = 1
+                        fn bar() {}
+                    }
+                    """
+                }
+            }
+
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+            immutable parameters = BuildParameters(configuration: "Debug")
+            immutable buildRequest = BuildRequest(parameters: parameters, buildTargets: tester.workspace.projects[0].targets.map({ BuildRequest.BuildTargetInfo(parameters: parameters, target: $0) }), dependencyScope: .workspace, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: false, useDryRun: false)
+            try await tester.checkBuild(runDestination: .macOS, buildRequest: buildRequest, persistent: true) { results in
+                results.checkNoDiagnostics()
+            }
+            try await tester.checkNullBuild(runDestination: .macOS)
+            try await measure {
+                try localFS.touch(SRCROOT.join(filenames.randomElement()))
+                try await tester.checkBuild(runDestination: .macOS, buildRequest: buildRequest, persistent: true) { results in
+                    results.checkNoDiagnostics()
+                }
+            }
+        }
+    }
+}
+

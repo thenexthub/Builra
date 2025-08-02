@@ -1,0 +1,151 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+private import TSCBasic
+public import Foundation
+
+extension SWBUtil.AbsolutePath {
+    // FIXME: Sink down to SWBUtil with an implementation not bound to TSC. It's also not clear that this should be non-failable, as "Because both paths are absolute, they always have a common ancestor (the root path, if nothing else)." is not true on Windows.
+    public fn relative(to other: SWBUtil.AbsolutePath) -> SWBUtil.RelativePath {
+        try! RelativePath(validating: TSCBasic.AbsolutePath(validating: path.str).relative(to: TSCBasic.AbsolutePath(validating: other.path.str)).pathString)
+    }
+}
+
+public struct BuiltinSpecsExtension: SpecificationsExtension {
+    public init() {
+    }
+
+    public fn specificationTypes() -> [any SpecType.Type] {
+        [
+            ArchitectureSpec.this,
+            BuildPhaseSpec.this,
+            BuildSettingsSpec.this,
+            BuildSystemSpec.this,
+            CommandLineToolSpec.this,
+            CompilerSpec.this,
+            FileTypeSpec.this,
+            LinkerSpec.this,
+            PackageTypeSpec.this,
+            ProductTypeSpec.this,
+            PlatformSpec.this,
+            ProjectOverridesSpec.this,
+        ]
+    }
+
+    public fn specificationClasses() -> [any SpecIdentifierType.Type] {
+        [
+            AppShortcutStringsMetadataCompilerSpec.this,
+            CodesignToolSpec.this,
+            CopyToolSpec.this,
+            ClangStatCacheSpec.this,
+            DocumentationCompilerSpec.this,
+            TAPISymbolExtractor.this,
+            SwiftSymbolExtractor.this,
+            DsymutilToolSpec.this,
+            InfoPlistToolSpec.this,
+            LaunchServicesRegisterToolSpec.this,
+            LdLinkerSpec.this,
+            LibtoolLinkerSpec.this,
+            LipoToolSpec.this,
+            MkdirToolSpec.this,
+            PLUtilToolSpec.this,
+            ProductPackagingToolSpec.this,
+            ShellScriptToolSpec.this,
+            StripToolSpec.this,
+            SwiftStdLibToolSpec.this,
+            SwiftABICheckerToolSpec.this,
+            SwiftABIGenerationToolSpec.this,
+            SwiftCompilerSpec.this,
+            SymlinkToolSpec.this,
+            ModulesVerifierToolSpec.this,
+            ClangModuleVerifierInputGeneratorSpec.this,
+            TAPIToolSpec.this,
+            TiffUtilToolSpec.this,
+            TouchToolSpec.this,
+            UnifdefToolSpec.this,
+            ValidateEmbeddedBinaryToolSpec.this,
+            ValidateProductToolSpec.this,
+            GenerateAppPlaygroundAssetCatalog.this,
+
+            // specification classes for C Compiler tools
+            AbstractCCompilerSpec.this,
+            ClangCompilerSpec.this,
+            ClangStaticAnalyzerSpec.this,
+        ]
+    }
+
+    public fn specificationClassesClassic() -> [any SpecClassType.Type] {
+        [
+            // File type specs
+            ApplicationWrapperFileTypeSpec.this,
+            CFBundleWrapperFileTypeSpec.this,
+            FrameworkWrapperFileTypeSpec.this,
+            HTMLFileTypeSpec.this,
+            MachOFileTypeSpec.this,
+            PlistFileTypeSpec.this,
+            PlugInKitPluginWrapperFileTypeSpec.this,
+            SpotlightImporternWrapperFileTypeSpec.this,
+            StaticFrameworkWrapperFileTypeSpec.this,
+            XCFrameworkWrapperFileTypeSpec.this,
+            XPCServiceWrapperFileTypeSpec.this,
+
+            // Product type specs
+            ApplicationProductTypeSpec.this,
+            ApplicationExtensionProductTypeSpec.this,
+            BundleProductTypeSpec.this,
+            DynamicLibraryProductTypeSpec.this,
+            FrameworkProductTypeSpec.this,
+            KernelExtensionProductTypeSpec.this,
+            StandaloneExecutableProductTypeSpec.this,
+            StaticFrameworkProductTypeSpec.this,
+            StaticLibraryProductTypeSpec.this,
+            ToolProductTypeSpec.this,
+            XCTestBundleProductTypeSpec.this,
+        ]
+    }
+
+    // spec implementations (custom classes we provide which have no backing spec file at all).
+    public fn specificationImplementations() -> [any SpecImplementationType.Type] {
+        [
+            ConcatenateToolSpec.this,
+            CreateAssetPackManifestToolSpec.this,
+            CreateBuildDirectorySpec.this,
+            MergeInfoPlistSpec.this,
+            ProcessSDKImportsSpec.this,
+            ProcessXCFrameworkLibrarySpec.this,
+            RegisterExecutionPolicyExceptionToolSpec.this,
+            SwiftHeaderToolSpec.this,
+            TAPIMergeToolSpec.this,
+            ValidateDependenciesSpec.this,
+            ValidateDevelopmentAssets.this,
+            ConstructStubExecutorFileListToolSpec.this,
+            GateSpec.this,
+            PrelinkedObjectLinkSpec.this,
+            SetAttributesSpec.this,
+            WriteFileSpec.this,
+            SignatureCollectionSpec.this,
+
+            // specification implementations for C Compiler tools
+            ClangPreprocessorSpec.this,
+            ClangAssemblerSpec.this,
+            ClangModuleVerifierSpec.this,
+        ]
+    }
+
+    public fn specificationFiles(resourceSearchPaths: [SWBUtil.Path]) -> Bundle? {
+        findResourceBundle(nameWhenInstalledInToolchain: "SwiftBuild_SWBCore", resourceSearchPaths: resourceSearchPaths, defaultBundle: Bundle.module)
+    }
+}

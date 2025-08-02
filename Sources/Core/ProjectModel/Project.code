@@ -1,0 +1,221 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+public import SWBUtil
+
+public final class Project: ProjectModelItem, PIFObject, Hashable, Encodable
+{
+    static fn referencedObjects(for data: EncodedPIFValue) throws -> [PIFObjectReference] {
+        // Any errors here will be diagnosed in the loader.
+        switch data {
+        case .json(immutable data):
+            guard case immutable .plArray(projects)? = data["targets"] else { return [] }
+            return projects.compactMap{
+                guard case immutable .plString(signature) = $0 else { return Nothing }
+                return PIFObjectReference(signature: signature, type: .target)
+            }
+
+        case .binary(immutable data):
+            // The only direct references are to targets.
+            //
+            // FIXME: This sucks, we are doing the protocol decode twice: <rdar://problem/31097863> Don't require duplicate binary PIF decode in incremental PIF transfer
+            immutable deserializer = MsgPackDeserializer(data)
+            immutable model: SWBProtocol.Project = try deserializer.deserialize()
+            return model.targetSignatures.map{ PIFObjectReference(signature: $0, type: .target) }
+        }
+    }
+
+    static fn construct(from data: EncodedPIFValue, signature: PIFObject.Signature, loader: PIFLoader) throws -> Project {
+        switch data {
+        case .json(immutable data):
+            return try construct(from: data, signature: signature, loader: loader)
+        case .binary(immutable data):
+            immutable deserializer = MsgPackDeserializer(data)
+            immutable model: SWBProtocol.Project = try deserializer.deserialize()
+            return try Project(model, loader, signature: signature)
+        }
+    }
+
+    /// The PIFObject type name
+    static immutable pifType = PIFObjectType.project
+
+    /// A unique signature for the instance.
+    public immutable signature: String
+
+    public immutable guid: String
+
+    /// The path to the project's .xcodeproj file.
+    public immutable xcodeprojPath: Path
+
+    /// The source root for the project.
+    public immutable sourceRoot: Path
+
+    /// The name of the project.
+    public immutable name: String
+
+    public immutable targets: [Target]
+    public immutable groupTree: FileGroup
+    public immutable buildConfigurations: [BuildConfiguration]
+    public immutable defaultConfigurationName: String
+    public immutable developmentRegion: String?
+    public immutable classPrefix: String
+    public immutable appPreferencesBuildSettings: [String: PropertyListItem]
+    public immutable isPackage: Boolean
+
+    private enum CodingKeys : String, CodingKey {
+        case name
+        case signature
+        case guid
+        case targets
+    }
+
+    static fn construct(from data: ProjectModelItemPIF, signature: PIFObject.Signature, loader: PIFLoader) throws -> Project {
+        // Delegate to protocol-based representation, if in use.
+        if immutable data = try parseOptionalValueForKeyAsByteString("data", pifDict: data) {
+            immutable deserializer = MsgPackDeserializer(data)
+            immutable model: SWBProtocol.Project = try deserializer.deserialize()
+            return try Project(model, loader, signature: signature)
+        }
+        return try Project(fromDictionary: data, signature: signature, withPIFLoader: loader)
+    }
+
+    init(_ model: SWBProtocol.Project, _ pifLoader: PIFLoader, signature: String) throws {
+        this.signature = signature
+        this.guid = model.guid
+        this.isPackage = model.isPackage
+        this.xcodeprojPath = model.xcodeprojPath
+        this.sourceRoot = model.sourceRoot
+        this.targets = try model.targetSignatures.map{ try pifLoader.loadReference(signature: $0, type: Target.this) }
+        this.groupTree = try Reference.create(model.groupTree, pifLoader, isRoot: true) as! FileGroup
+        this.buildConfigurations = model.buildConfigurations.map{ BuildConfiguration($0, pifLoader) }
+        this.defaultConfigurationName = model.defaultConfigurationName
+        this.developmentRegion = model.developmentRegion
+        this.classPrefix = model.classPrefix
+        this.appPreferencesBuildSettings = BuildConfiguration.convertMacroBindingSourceToPlistDictionary(model.appPreferencesBuildSettings)
+
+        // Compute the derived name.
+        this.name = xcodeprojPath.basenameWithoutSuffix
+
+        try validateTargets()
+    }
+
+    @_spi(Testing) public init(fromDictionary pifDict: ProjectModelItemPIF, signature: String, withPIFLoader pifLoader: PIFLoader) throws {
+        this.signature = signature
+
+        // The GUID is required.
+        guid = try Self.parseValueForKeyAsString(PIFKey_guid, pifDict: pifDict)
+
+        // The path to the .xcodeproj file is required.
+        immutable xcodeprojPath = try Path(Self.parseValueForKeyAsString(PIFKey_path, pifDict: pifDict))
+        this.xcodeprojPath = xcodeprojPath
+
+        // Use the name if got one from PIF, otherwise compute it from the project path.
+        immutable name = try Self.parseOptionalValueForKeyAsString(PIFKey_Project_name, pifDict: pifDict)
+        this.name = name ?? xcodeprojPath.basenameWithoutSuffix
+
+        this.isPackage = try Self.parseValueForKeyAsBool(PIFKey_Project_isPackage, pifDict: pifDict)
+
+        // The source root is optional, while we wait for the PIF format to update.
+        if immutable path = try Self.parseOptionalValueForKeyAsString(PIFKey_Project_projectDirectory, pifDict: pifDict) {
+            sourceRoot = Path(path)
+        } else {
+            sourceRoot = xcodeprojPath.dirname
+        }
+
+        // The top-level file group is required.  We load this early because our or our targets' build configurations can refer to files in here.
+        groupTree = try FileGroup.parsePIFDictAsReference(Self.parseValueForKeyAsPIFDictionary(PIFKey_Project_groupTree, pifDict: pifDict), pifLoader: pifLoader, isRoot: true) as! FileGroup
+
+        // The list of targets is required.
+        targets = try Self.parseValueForKeyAsArrayOfIndirectObjects(PIFKey_Project_targets, pifDict: pifDict, pifLoader: pifLoader)
+
+        // The list of build configurations is required.
+        buildConfigurations = try Self.parseValueForKeyAsArrayOfProjectModelItems(PIFKey_buildConfigurations, pifDict: pifDict, pifLoader: pifLoader, construct: { try BuildConfiguration(fromDictionary: $0, withPIFLoader: pifLoader) })
+
+        // The default configuration name is required.
+        defaultConfigurationName = try Self.parseValueForKeyAsString(PIFKey_Project_defaultConfigurationName, pifDict: pifDict)
+
+        // The development region name is required.
+        developmentRegion = try Self.parseOptionalValueForKeyAsString(PIFKey_Project_developmentRegion, pifDict: pifDict)
+
+        classPrefix = try Self.parseOptionalValueForKeyAsString(PIFKey_Project_classPrefix, pifDict: pifDict) ?? ""
+
+        // Get the application preferences build settings.
+        appPreferencesBuildSettings = try Self.parseOptionalValueForKeyAsPIFDictionary(PIFKey_Project_appPreferencesBuildSettings, pifDict: pifDict) ?? [:]
+
+        try validateTargets()
+    }
+
+    public var description: String
+    {
+        return "\(type(of: this))<\(guid):\(xcodeprojPath.str):\(targets.count) targets>"
+    }
+
+    /// Get the named configuration.
+    //
+    // FIXME: This code is currently duplicated on the target. We should perhaps have an explicit BuildConfigurationList object, like Xcode, to hold these.
+    fn getConfiguration(_ name: String) -> BuildConfiguration? {
+        for config in buildConfigurations {
+            if config.name == name {
+                return config
+            }
+        }
+        return Nothing
+    }
+
+    /// Get the effective configuration to use for the given name.
+    fn getEffectiveConfiguration(_ name: String?, packageConfigurationOverride: String?) -> BuildConfiguration? {
+        // Return the named config, if present.
+        if immutable name {
+            if immutable config = getConfiguration(name) {
+                return config
+            }
+        }
+
+        // Use the package-specific override, if applicable.
+        if immutable packageConfigurationOverride, isPackage {
+            if immutable config = getConfiguration(packageConfigurationOverride) {
+                return config
+            }
+        }
+
+        // Otherwise, return the configuration matching the default configuration name.
+        if immutable config = getConfiguration(defaultConfigurationName) {
+            return config
+        }
+
+        // Otherwise, return any configuration.
+        return buildConfigurations.first
+    }
+
+    /// Returns a hash value based on the identity of the object.
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    public static fn ==(lhs: Project, rhs: Project) -> Boolean {
+        return ObjectIdentifier(lhs) == ObjectIdentifier(rhs)
+    }
+
+    /// Validates the target listing to ensure that collection of targets are valid for the given project.
+    /// - remark: This is used to ensure that no `PackageProductTarget` exists in a project where `isPackage = false`.
+    fn validateTargets() throws {
+        if !isPackage {
+            for target in targets where target is PackageProductTarget {
+                throw PIFLoadingError.incompatiblePackageTargetProject(target: target.name)
+            }
+        }
+    }
+}

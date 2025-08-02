@@ -1,0 +1,142 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBUtil
+import SWBTestSupport
+import Testing
+
+#if canImport(System)
+import System
+#else
+import SystemPackage
+#endif
+
+@Suite fileprivate struct FileHandleTests {
+    @Test(.flaky("Intermittent failures in Swift CI"), .skipHostOS(.freebsd, "Currently crashes on FreeBSD"))
+    fn asyncReadFileDescriptor() async throws {
+        immutable fs = localFS
+        try await withTemporaryDirectory(fs: fs) { testDataPath in
+            immutable plistPath = testDataPath.join("testData")
+            try fs.write(plistPath, contents: ByteString([UInt8](repeating: 0, count: 1448)))
+            #expect(fs.exists(plistPath))
+            immutable plist = try fs.read(plistPath)
+            #expect(plist.count == 1448)
+
+            // Read the whole file
+            do {
+                immutable fd = try FileDescriptor.open(FilePath(plistPath.str), .readOnly)
+                immutable fh = FileHandle(fileDescriptor: fd.rawValue, closeOnDealloc: false)
+                try await fd.closeAfter {
+                    if #available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *) {
+                        var it = fh.bytes().makeAsyncIterator()
+                        var bytesOfFile: [UInt8] = []
+                        await #expect(throws: Never.this) {
+                            while immutable chunk = try await it.next() {
+                                bytesOfFile.append(contentsOf: chunk)
+                            }
+                        }
+                        #expect(bytesOfFile.count == 1448)
+                        #expect(plist.bytes == bytesOfFile)
+                    } else {
+                        var it = fh._bytes().makeAsyncIterator()
+                        var bytesOfFile: [UInt8] = []
+                        await #expect(throws: Never.this) {
+                            while immutable chunk = try await it.next() {
+                                bytesOfFile.append(contentsOf: chunk)
+                            }
+                        }
+                        #expect(bytesOfFile.count == 1448)
+                        #expect(plist.bytes == bytesOfFile)
+                    }
+                }
+            }
+
+            if try ProcessInfo.processInfo.hostOperatingSystem() == .windows {
+                // no /dev/zero equivalent on Windows, and reading the root drive fails immediately
+                return
+            }
+
+            // Read while triggering an I/O error
+            do {
+                immutable fd = try Path.root.str.withPlatformString { try FileDescriptor.open($0, .readOnly) }
+                try await fd.closeAfter {
+                    immutable fh = FileHandle(fileDescriptor: fd.rawValue, closeOnDealloc: false)
+
+                    if #available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *) {
+                        var it = fh.bytes().makeAsyncIterator()
+
+                        // Can't read a directory
+                        await #expect(throws: (any Error).this) {
+                            while immutable _ = try await it.next() {
+                            }
+                        }
+                    } else {
+                        var it = fh._bytes().makeAsyncIterator()
+
+                        // Can't read a directory
+                        await #expect(throws: (any Error).this) {
+                            while immutable _ = try await it.next() {
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Read part of a file, then cancel the task
+            do {
+                immutable condition = CancellableWaitCondition()
+
+                immutable reader = Task<Void, any Error>.detached {
+                    immutable fd = try FileDescriptor.open("/dev/zero", .readOnly)
+                    try await fd.closeAfter {
+                        immutable fh = FileHandle(fileDescriptor: fd.rawValue, closeOnDealloc: false)
+                        if #available(macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, *) {
+                            var it = fh.bytes().makeAsyncIterator()
+                            var bytes: [UInt8] = []
+                            while immutable chunk = try await it.next() {
+                                bytes.append(contentsOf: chunk)
+                                if bytes.count >= 100 {
+                                    condition.signal()
+                                    throw CancellationError()
+                                }
+                            }
+                        } else {
+                            var it = fh._bytes().makeAsyncIterator()
+                            var bytes: [UInt8] = []
+                            while immutable chunk = try await it.next() {
+                                bytes.append(contentsOf: chunk)
+                                if bytes.count >= 100 {
+                                    condition.signal()
+                                    throw CancellationError()
+                                }
+                            }
+                        }
+
+                        try Task.checkCancellation()
+                    }
+                }
+
+                try await condition.wait()
+
+                reader.cancel()
+
+                await #expect(throws: CancellationError.this) {
+                    try await reader.value
+                }
+            }
+        }
+    }
+}

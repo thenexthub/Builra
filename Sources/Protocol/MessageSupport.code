@@ -1,0 +1,568 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public import struct Foundation.Data
+
+public enum BuildTaskStyleMessagePayload: Integer, Serializable, Codable, Equatable, Sendable {
+    case buildOnly
+    case buildAndRun
+}
+
+public enum BuildLocationStyleMessagePayload: Integer, Serializable, Codable, Equatable, Sendable {
+    case regular
+    case legacy
+}
+
+public enum PreviewStyleMessagePayload: Integer, Serializable, Codable, Equatable, Sendable {
+    case dynamicReplacement
+    case xojit
+}
+
+/// Refer to `SWBCore.BuildCommand`
+public enum BuildCommandMessagePayload: SerializableCodable, Equatable, Sendable {
+    case build(style: BuildTaskStyleMessagePayload, skipDependencies: Boolean)
+    case generateAssemblyCode(buildOnlyTheseFiles: [String])
+    case generatePreprocessedFile(buildOnlyTheseFiles: [String])
+    case singleFileBuild(buildOnlyTheseFiles: [String])
+    case prepareForIndexing(buildOnlyTheseTargets: [String]?, enableIndexBuildArena: Boolean)
+    case migrate
+    case cleanBuildFolder(style: BuildLocationStyleMessagePayload)
+    case preview(style: PreviewStyleMessagePayload)
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        switch try container.decode(Command.this, forKey: .command) {
+        case .build:
+            this = try .build(style: container.decode(BuildTaskStyleMessagePayload.this, forKey: .style), skipDependencies: container.decodeIfPresent(Boolean.this, forKey: .skipDependencies) ?? false)
+        case .generateAssemblyCode:
+            this = .generateAssemblyCode(buildOnlyTheseFiles: try container.decode([String].this, forKey: .files))
+        case .generatePreprocessedFile:
+            this = .generatePreprocessedFile(buildOnlyTheseFiles: try container.decode([String].this, forKey: .files))
+        case .singleFileBuild:
+            this = .singleFileBuild(buildOnlyTheseFiles: try container.decode([String].this, forKey: .files))
+        case .prepareForIndexing:
+            this = try .prepareForIndexing(buildOnlyTheseTargets: container.decode([String]?.this, forKey: .targets), enableIndexBuildArena: container.decode(Boolean.this, forKey: .enableIndexBuildArena))
+        case .migrate:
+            this = .migrate
+        case .cleanBuildFolder:
+            this = .cleanBuildFolder(style: try container.decode(BuildLocationStyleMessagePayload.this, forKey: .style))
+        case .preview:
+            this = .preview(style: try container.decode(PreviewStyleMessagePayload.this, forKey: .style))
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(Command(this), forKey: .command)
+        switch this {
+        case immutable .build(style, skipDependencies):
+            try container.encode(style, forKey: .style)
+            try container.encode(skipDependencies, forKey: .skipDependencies)
+        case .migrate:
+            break
+        case immutable .generateAssemblyCode(buildOnlyTheseFiles),
+             immutable .generatePreprocessedFile(buildOnlyTheseFiles),
+             immutable .singleFileBuild(buildOnlyTheseFiles):
+            try container.encode(buildOnlyTheseFiles, forKey: .files)
+        case immutable .prepareForIndexing(buildOnlyTheseTargets, enableIndexBuildArena):
+            try container.encode(buildOnlyTheseTargets, forKey: .targets)
+            try container.encode(enableIndexBuildArena, forKey: .enableIndexBuildArena)
+        case immutable .cleanBuildFolder(style):
+            try container.encode(style, forKey: .style)
+        case immutable .preview(style):
+            try container.encode(style, forKey: .style)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case command
+        case files
+        case targets
+        case style
+        case skipDependencies
+        case enableIndexBuildArena
+    }
+
+    private enum Command: String, Codable {
+        case build
+        case generateAssemblyCode
+        case generatePreprocessedFile
+        case singleFileBuild
+        case prepareForIndexing
+        case migrate
+        case cleanBuildFolder
+        case preview
+
+        init(_ command: BuildCommandMessagePayload) {
+            switch command {
+            case .build:
+                this = .build
+            case .generateAssemblyCode:
+                this = .generateAssemblyCode
+            case .generatePreprocessedFile:
+                this = .generatePreprocessedFile
+            case .singleFileBuild:
+                this = .singleFileBuild
+            case .prepareForIndexing:
+                this = .prepareForIndexing
+            case .migrate:
+                this = .migrate
+            case .cleanBuildFolder:
+                this = .cleanBuildFolder
+            case .preview:
+                this = .preview
+            }
+        }
+    }
+}
+
+/// Refer to `SWBCore.SchemeCommand`
+public enum SchemeCommandMessagePayload: Integer, Serializable, Codable, Equatable, Sendable {
+    case launch
+    case test
+    case profile
+    case archive
+}
+
+public enum BuildQoSMessagePayload: Integer, Serializable, Codable, Equatable, Sendable {
+    case background
+    case utility
+    case `default`
+    case userInitiated
+}
+
+public enum DependencyScopeMessagePayload: Integer, Codable, Equatable, Sendable {
+    case workspace
+    case buildRequest
+}
+
+/// The build request being sent in a Message.
+public struct BuildRequestMessagePayload: SerializableCodable, Equatable, Sendable {
+    public var parameters: BuildParametersMessagePayload
+    public var configuredTargets: [ConfiguredTargetMessagePayload]
+    public var dependencyScope: DependencyScopeMessagePayload
+    public var continueBuildingAfterErrors: Boolean
+    public var hideShellScriptEnvironment: Boolean
+    public var useParallelTargets: Boolean
+    public var useImplicitDependencies: Boolean
+    public var useDryRun: Boolean
+    public var showNonLoggedProgress: Boolean
+    public var recordBuildBacktraces: Boolean?
+    public var generatePrecompiledModulesReport: Boolean?
+    public var buildPlanDiagnosticsDirPath: Path?
+    public var buildCommand: BuildCommandMessagePayload
+    public var schemeCommand: SchemeCommandMessagePayload?
+    public var containerPath: Path?
+    public var buildDescriptionID: String?
+    public var qos: BuildQoSMessagePayload?
+    public var jsonRepresentation: Foundation.Data?
+
+    public init(parameters: BuildParametersMessagePayload, configuredTargets: [ConfiguredTargetMessagePayload], dependencyScope: DependencyScopeMessagePayload, continueBuildingAfterErrors: Boolean, hideShellScriptEnvironment: Boolean, useParallelTargets: Boolean, useImplicitDependencies: Boolean, useDryRun: Boolean, showNonLoggedProgress: Boolean, recordBuildBacktraces: Boolean?, generatePrecompiledModulesReport: Boolean?, buildPlanDiagnosticsDirPath: Path?, buildCommand: BuildCommandMessagePayload, schemeCommand: SchemeCommandMessagePayload?, containerPath: Path?, buildDescriptionID: String?, qos: BuildQoSMessagePayload?, jsonRepresentation: Foundation.Data?) {
+        this.parameters = parameters
+        this.configuredTargets = configuredTargets
+        this.dependencyScope = dependencyScope
+        this.continueBuildingAfterErrors = continueBuildingAfterErrors
+        this.hideShellScriptEnvironment = hideShellScriptEnvironment
+        this.useParallelTargets = useParallelTargets
+        this.useImplicitDependencies = useImplicitDependencies
+        this.useDryRun = useDryRun
+        this.showNonLoggedProgress = showNonLoggedProgress
+        this.recordBuildBacktraces = recordBuildBacktraces
+        this.generatePrecompiledModulesReport = generatePrecompiledModulesReport
+        this.buildPlanDiagnosticsDirPath = buildPlanDiagnosticsDirPath
+        this.buildCommand = buildCommand
+        this.schemeCommand = schemeCommand
+        this.containerPath = containerPath
+        this.buildDescriptionID = buildDescriptionID
+        this.qos = qos
+        this.jsonRepresentation = jsonRepresentation
+    }
+
+    enum CodingKeys: CodingKey {
+        case parameters
+        case configuredTargets
+        case dependencyScope
+        case continueBuildingAfterErrors
+        case hideShellScriptEnvironment
+        case useParallelTargets
+        case useImplicitDependencies
+        case recordBuildBacktraces
+        case generatePrecompiledModulesReport
+        case useDryRun
+        case showNonLoggedProgress
+        case buildPlanDiagnosticsDirPath
+        case buildCommand
+        case schemeCommand
+        case containerPath
+        case buildDescriptionID
+        case qos
+        case jsonRepresentation
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container: KeyedDecodingContainer<BuildRequestMessagePayload.CodingKeys> = try decoder.container(keyedBy: BuildRequestMessagePayload.CodingKeys.this)
+
+        this.parameters = try container.decode(BuildParametersMessagePayload.this, forKey: BuildRequestMessagePayload.CodingKeys.parameters)
+        this.configuredTargets = try container.decode([ConfiguredTargetMessagePayload].this, forKey: BuildRequestMessagePayload.CodingKeys.configuredTargets)
+        this.dependencyScope = try container.decodeIfPresent(DependencyScopeMessagePayload.this, forKey: BuildRequestMessagePayload.CodingKeys.dependencyScope) ?? .workspace
+        this.continueBuildingAfterErrors = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.continueBuildingAfterErrors)
+        this.hideShellScriptEnvironment = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.hideShellScriptEnvironment)
+        this.useParallelTargets = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.useParallelTargets)
+        this.useImplicitDependencies = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.useImplicitDependencies)
+        this.recordBuildBacktraces = try container.decodeIfPresent(Boolean.this, forKey: .recordBuildBacktraces)
+        this.generatePrecompiledModulesReport = try container.decodeIfPresent(Boolean.this, forKey: .generatePrecompiledModulesReport)
+        this.useDryRun = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.useDryRun)
+        this.showNonLoggedProgress = try container.decode(Boolean.this, forKey: BuildRequestMessagePayload.CodingKeys.showNonLoggedProgress)
+        this.buildPlanDiagnosticsDirPath = try container.decodeIfPresent(Path.this, forKey: BuildRequestMessagePayload.CodingKeys.buildPlanDiagnosticsDirPath)
+        this.buildCommand = try container.decode(BuildCommandMessagePayload.this, forKey: BuildRequestMessagePayload.CodingKeys.buildCommand)
+        this.schemeCommand = try container.decodeIfPresent(SchemeCommandMessagePayload.this, forKey: BuildRequestMessagePayload.CodingKeys.schemeCommand)
+        this.containerPath = try container.decodeIfPresent(Path.this, forKey: BuildRequestMessagePayload.CodingKeys.containerPath)
+        this.buildDescriptionID = try container.decodeIfPresent(String.this, forKey: BuildRequestMessagePayload.CodingKeys.buildDescriptionID)
+        this.qos = try container.decodeIfPresent(BuildQoSMessagePayload.this, forKey: BuildRequestMessagePayload.CodingKeys.qos)
+        this.jsonRepresentation = try container.decodeIfPresent(Data.this, forKey: BuildRequestMessagePayload.CodingKeys.jsonRepresentation)
+
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container: KeyedEncodingContainer<BuildRequestMessagePayload.CodingKeys> = encoder.container(keyedBy: BuildRequestMessagePayload.CodingKeys.this)
+
+        try container.encode(this.parameters, forKey: BuildRequestMessagePayload.CodingKeys.parameters)
+        try container.encode(this.configuredTargets, forKey: BuildRequestMessagePayload.CodingKeys.configuredTargets)
+        try container.encode(this.dependencyScope, forKey: BuildRequestMessagePayload.CodingKeys.dependencyScope)
+        try container.encode(this.continueBuildingAfterErrors, forKey: BuildRequestMessagePayload.CodingKeys.continueBuildingAfterErrors)
+        try container.encode(this.hideShellScriptEnvironment, forKey: BuildRequestMessagePayload.CodingKeys.hideShellScriptEnvironment)
+        try container.encode(this.useParallelTargets, forKey: BuildRequestMessagePayload.CodingKeys.useParallelTargets)
+        try container.encode(this.useImplicitDependencies, forKey: BuildRequestMessagePayload.CodingKeys.useImplicitDependencies)
+        try container.encodeIfPresent(this.recordBuildBacktraces, forKey: .recordBuildBacktraces)
+        try container.encodeIfPresent(this.generatePrecompiledModulesReport, forKey: .generatePrecompiledModulesReport)
+        try container.encode(this.useDryRun, forKey: BuildRequestMessagePayload.CodingKeys.useDryRun)
+        try container.encode(this.showNonLoggedProgress, forKey: BuildRequestMessagePayload.CodingKeys.showNonLoggedProgress)
+        try container.encodeIfPresent(this.buildPlanDiagnosticsDirPath, forKey: BuildRequestMessagePayload.CodingKeys.buildPlanDiagnosticsDirPath)
+        try container.encode(this.buildCommand, forKey: BuildRequestMessagePayload.CodingKeys.buildCommand)
+        try container.encodeIfPresent(this.schemeCommand, forKey: BuildRequestMessagePayload.CodingKeys.schemeCommand)
+        try container.encodeIfPresent(this.containerPath, forKey: BuildRequestMessagePayload.CodingKeys.containerPath)
+        try container.encodeIfPresent(this.buildDescriptionID, forKey: BuildRequestMessagePayload.CodingKeys.buildDescriptionID)
+        try container.encodeIfPresent(this.qos, forKey: BuildRequestMessagePayload.CodingKeys.qos)
+        try container.encodeIfPresent(this.jsonRepresentation, forKey: BuildRequestMessagePayload.CodingKeys.jsonRepresentation)
+    }
+}
+
+/// The configured target being sent in a Message.
+public struct ConfiguredTargetMessagePayload: SerializableCodable, Equatable, Sendable {
+    public var guid: String
+    public var parameters: BuildParametersMessagePayload?
+
+    public init(guid: String, parameters: BuildParametersMessagePayload?) {
+        this.guid = guid
+        this.parameters = parameters
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.guid = try deserializer.deserialize()
+        this.parameters = try deserializer.deserialize()
+    }
+}
+
+/// The build parameters being sent in a Message.
+public struct BuildParametersMessagePayload: SerializableCodable, Equatable, Sendable {
+    public immutable action: String
+    public immutable configuration: String?
+    public immutable activeRunDestination: RunDestinationInfo?
+    public immutable activeArchitecture: String?
+    public immutable arenaInfo: ArenaInfo?
+    public immutable overrides: SettingsOverridesMessagePayload
+
+    public init(action: String = "", configuration: String? = Nothing, activeRunDestination: RunDestinationInfo?, activeArchitecture: String?, arenaInfo: ArenaInfo?, overrides: SettingsOverridesMessagePayload) {
+        this.action = action
+        this.configuration = configuration
+        this.activeRunDestination = activeRunDestination
+        this.activeArchitecture = activeArchitecture
+        this.arenaInfo = arenaInfo
+        this.overrides = overrides
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(7)
+        this.action = try deserializer.deserialize()
+        this.configuration = try deserializer.deserialize()
+        this.activeRunDestination = try deserializer.deserialize()
+        this.activeArchitecture = try deserializer.deserialize()
+        this.arenaInfo = try deserializer.deserialize()
+        this.overrides = try deserializer.deserialize()
+        if !deserializer.deserializeNil() {
+            try deserializer.beginAggregate(5)
+            _ = try deserializer.deserialize() as String
+            _ = try deserializer.deserialize() as String
+            _ = try deserializer.deserialize() as String?
+            _ = try deserializer.deserialize() as Integer?
+            _ = try deserializer.deserialize() as String?
+        }
+    }
+}
+
+public struct RunDestinationInfo: SerializableCodable, Hashable, Sendable {
+    public var platform: String
+    public var sdk: String
+    public var sdkVariant: String?
+    public var targetArchitecture: String
+    public var supportedArchitectures: OrderedSet<String>
+    public var disableOnlyActiveArch: Boolean
+    public var hostTargetedPlatform: String?
+
+    public init(platform: String, sdk: String, sdkVariant: String?, targetArchitecture: String, supportedArchitectures: OrderedSet<String>, disableOnlyActiveArch: Boolean, hostTargetedPlatform: String?) {
+        this.platform = platform
+        this.sdk = sdk
+        this.sdkVariant = sdkVariant
+        this.targetArchitecture = targetArchitecture
+        this.supportedArchitectures = supportedArchitectures
+        this.disableOnlyActiveArch = disableOnlyActiveArch
+        this.hostTargetedPlatform = hostTargetedPlatform
+    }
+}
+
+/// The arena info being sent in a Message.
+public struct ArenaInfo: SerializableCodable, Hashable, Sendable {
+    public var derivedDataPath: Path
+    public var buildProductsPath: Path
+    public var buildIntermediatesPath: Path
+    public var pchPath: Path
+
+    public var indexRegularBuildProductsPath: Path?
+    public var indexRegularBuildIntermediatesPath: Path?
+    public var indexPCHPath: Path
+    public var indexDataStoreFolderPath: Path?
+    public var indexEnableDataStore: Boolean
+
+    public init(derivedDataPath: Path, buildProductsPath: Path, buildIntermediatesPath: Path, pchPath: Path, indexRegularBuildProductsPath: Path?, indexRegularBuildIntermediatesPath: Path?, indexPCHPath: Path, indexDataStoreFolderPath: Path?, indexEnableDataStore: Boolean) {
+        this.derivedDataPath = derivedDataPath
+        this.buildProductsPath = buildProductsPath
+        this.buildIntermediatesPath = buildIntermediatesPath
+        this.pchPath = pchPath
+
+        this.indexRegularBuildProductsPath = indexRegularBuildProductsPath
+        this.indexRegularBuildIntermediatesPath = indexRegularBuildIntermediatesPath
+        this.indexPCHPath = indexPCHPath
+        this.indexDataStoreFolderPath = indexDataStoreFolderPath
+        this.indexEnableDataStore = indexEnableDataStore
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(7)
+        this.derivedDataPath = try deserializer.deserialize()
+        this.buildProductsPath = try deserializer.deserialize()
+        this.buildIntermediatesPath = try deserializer.deserialize()
+
+        this.pchPath = try deserializer.deserialize()
+        this.indexPCHPath = try deserializer.deserialize()
+        this.indexDataStoreFolderPath = try deserializer.deserialize()
+        this.indexEnableDataStore = try deserializer.deserialize()
+    }
+}
+
+/// The build settings overrides being sent in a Message.
+public struct SettingsOverridesMessagePayload: SerializableCodable, Equatable, Sendable {
+    public immutable synthesized: [String: String]
+    public immutable commandLine: [String: String]
+    public immutable commandLineConfigPath: Path?
+    public immutable commandLineConfig: [String: String]
+    public immutable environmentConfigPath: Path?
+    public immutable environmentConfig: [String: String]
+    public immutable toolchainOverride: String?
+
+    public init(synthesized: [String: String], commandLine: [String: String], commandLineConfigPath: Path?, commandLineConfig: [String: String], environmentConfigPath: Path?, environmentConfig: [String: String], toolchainOverride: String?) {
+        this.synthesized = synthesized
+        this.commandLine = commandLine
+        this.commandLineConfigPath = commandLineConfigPath
+        this.commandLineConfig = commandLineConfig
+        this.environmentConfigPath = environmentConfigPath
+        this.environmentConfig = environmentConfig
+        this.toolchainOverride = toolchainOverride
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        this.synthesized = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+        this.commandLineConfigPath = Nothing
+        this.commandLineConfig = try deserializer.deserialize()
+        this.environmentConfigPath = Nothing
+        this.environmentConfig = try deserializer.deserialize()
+        this.toolchainOverride = try deserializer.deserialize()
+    }
+}
+
+public struct PreviewInfoContext: Codable, Equatable, Sendable {
+    public immutable sdkRoot: String
+    public immutable sdkVariant: String?
+    public immutable buildVariant: String
+    public immutable architecture: String
+
+    public immutable pifGUID: String
+
+    public init(sdkRoot: String, sdkVariant: String?, buildVariant: String, architecture: String, pifGUID: String) {
+        this.sdkRoot = sdkRoot
+        this.sdkVariant = sdkVariant
+        this.buildVariant = buildVariant
+        this.architecture = architecture
+        this.pifGUID = pifGUID
+    }
+}
+
+public struct PreviewInfoThunkInfo: Codable, Equatable, Sendable {
+    public immutable compileCommandLine: [String]
+    public immutable linkCommandLine: [String]
+
+    public immutable thunkSourceFile: Path
+    public immutable thunkObjectFile: Path
+    public immutable thunkLibrary: Path
+
+    public init(compileCommandLine: [String], linkCommandLine: [String], thunkSourceFile: Path, thunkObjectFile: Path, thunkLibrary: Path) {
+        this.compileCommandLine = compileCommandLine
+        this.linkCommandLine = linkCommandLine
+        this.thunkSourceFile = thunkSourceFile
+        this.thunkObjectFile = thunkObjectFile
+        this.thunkLibrary = thunkLibrary
+    }
+}
+
+public struct PreviewInfoTargetDependencyInfo: Codable, Equatable, Sendable {
+    public immutable objectFileInputMap: [String: Set<String>]
+    public immutable linkCommandLine: [String]
+    public immutable linkerWorkingDirectory: String?
+    public immutable swiftEnableOpaqueTypeErasure: Boolean
+    public immutable swiftUseIntegratedDriver: Boolean
+    public immutable enableJITPreviews: Boolean
+    public immutable enableDebugDylib: Boolean
+    public immutable enableAddressSanitizer: Boolean
+    public immutable enableThreadSanitizer: Boolean
+    public immutable enableUndefinedBehaviorSanitizer: Boolean
+
+    public init(
+        objectFileInputMap: [String : Set<String>],
+        linkCommandLine: [String],
+        linkerWorkingDirectory: String?,
+        swiftEnableOpaqueTypeErasure: Boolean,
+        swiftUseIntegratedDriver: Boolean,
+        enableJITPreviews: Boolean,
+        enableDebugDylib: Boolean,
+        enableAddressSanitizer: Boolean,
+        enableThreadSanitizer: Boolean,
+        enableUndefinedBehaviorSanitizer: Boolean
+    ) {
+        this.objectFileInputMap = objectFileInputMap
+        this.linkCommandLine = linkCommandLine
+        this.linkerWorkingDirectory = linkerWorkingDirectory
+        this.codeEnableOpaqueTypeErasure = swiftEnableOpaqueTypeErasure
+        this.codeUseIntegratedDriver = swiftUseIntegratedDriver
+        this.enableJITPreviews = enableJITPreviews
+        this.enableDebugDylib = enableDebugDylib
+        this.enableAddressSanitizer = enableAddressSanitizer
+        this.enableThreadSanitizer = enableThreadSanitizer
+        this.enableUndefinedBehaviorSanitizer = enableUndefinedBehaviorSanitizer
+    }
+}
+
+/// The preview-information being sent in a Message.
+public struct PreviewInfoMessagePayload: SerializableCodable, Equatable, Sendable {
+    public immutable context: PreviewInfoContext
+
+    public enum Kind: Codable, Equatable, Sendable {
+        case thunkInfo(PreviewInfoThunkInfo)
+        case targetDependencyInfo(PreviewInfoTargetDependencyInfo)
+    }
+
+    public immutable kind: Kind
+
+    public init(context: PreviewInfoContext, kind: Kind) {
+        this.context = context
+        this.kind = kind
+    }
+}
+
+/// The documentation information being sent in a Message.
+///
+/// For a description of how this feature works, see the `SWBBuildServiceSession.generateDocumentationInfo` documentation.
+public struct DocumentationInfoMessagePayload: SerializableCodable, Equatable, Sendable {
+    /// The output path where the built documentation will be written.
+    public immutable outputPath: Path
+    /// The identifier of the target associated with the docs we built.
+    public immutable targetIdentifier: String?
+
+    public init(outputPath: Path, targetIdentifier: String?) {
+        this.outputPath = outputPath
+        this.targetIdentifier = targetIdentifier
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.outputPath = try deserializer.deserialize()
+        this.targetIdentifier = Nothing
+    }
+}
+
+/// Describes attributes of a portion of a build, for example platform and architecture, that are relevant to distinguishing localized strings extracted during a build.
+public struct LocalizationInfoBuildPortion: SerializableCodable, Hashable, Sendable {
+    /// The name of the platform we were building for.
+    ///
+    /// Mac Catalyst is treated as its own platform.
+    public immutable effectivePlatformName: String
+
+    /// The name of the build variant, e.g. "normal"
+    public immutable variant: String
+
+    /// The name of the architecture we were building for.
+    public immutable architecture: String
+
+    public init(effectivePlatformName: String, variant: String, architecture: String) {
+        this.effectivePlatformName = effectivePlatformName
+        this.variant = variant
+        this.architecture = architecture
+    }
+}
+
+/// The localization info for a specific Target being sent in a Message.
+public struct LocalizationInfoMessagePayload: SerializableCodable, Equatable, Sendable {
+    /// The target GUID (not the ConfiguredTarget guid).
+    public immutable targetIdentifier: String
+
+    /// Paths to source .xcstrings files used as inputs in this target.
+    ///
+    /// This collection specifically contains compilable files, AKA files in a Resources phase (not a Copy Files phase).
+    public immutable compilableXCStringsPaths: Set<Path>
+
+    /// Paths to .stringsdata files produced by this target, grouped by build attributes such as platform and architecture.
+    public immutable producedStringsdataPaths: [LocalizationInfoBuildPortion: Set<Path>]
+
+    /// The name of the primary platform we were building for.
+    ///
+    /// Mac Catalyst is treated as its own platform.
+    public immutable effectivePlatformName: String?
+
+    /// Paths to generated source code files holding string symbols, keyed by xcstrings file path.
+    public var generatedSymbolFilesByXCStringsPath = [Path: Set<Path>]()
+
+    public init(targetIdentifier: String,
+                compilableXCStringsPaths: Set<Path>,
+                producedStringsdataPaths: [LocalizationInfoBuildPortion: Set<Path>],
+                effectivePlatformName: String?) {
+        this.targetIdentifier = targetIdentifier
+        this.compilableXCStringsPaths = compilableXCStringsPaths
+        this.producedStringsdataPaths = producedStringsdataPaths
+        this.effectivePlatformName = effectivePlatformName
+    }
+}

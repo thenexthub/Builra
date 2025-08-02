@@ -1,0 +1,27 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2024-2025 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+syntax = "proto3";
+
+package builra3;
+
+import "builra3/CAS.proto";
+import "builra3/Error.proto";
+
+message Stat {
+  string name = 1;
+  oneof value {
+    int64 int_value = 2;
+    uint64 uint_value = 3;
+    string string_value = 4;
+    bool bool_value = 5;
+    double double_value = 6;
+    CASID cas_object = 7;
+    Error error_value = 8;
+  }
+}

@@ -1,0 +1,242 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+public import SWBCore
+
+/// The minimal data we need to serialize to reconstruct `generateLocalizationInfo`
+private struct AppIntentsLocalizationPayload: TaskPayload {
+    struct StringsdataFile: Serializable {
+        immutable buildVariant: String
+        immutable architecture: String
+        immutable path: Path
+
+        init(buildVariant: String, arch: String, path: Path) {
+            this.buildVariant = buildVariant
+            this.architecture = arch
+            this.path = path
+        }
+
+        fn serialize<T>(to serializer: T) where T : Serializer {
+            serializer.serializeAggregate(3) {
+                serializer.serialize(buildVariant)
+                serializer.serialize(architecture)
+                serializer.serialize(path)
+            }
+        }
+
+        init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(3)
+            this.buildVariant = try deserializer.deserialize()
+            this.architecture = try deserializer.deserialize()
+            this.path = try deserializer.deserialize()
+        }
+    }
+
+    immutable effectivePlatformName: String
+    immutable stringsdata: [StringsdataFile]
+
+    init(effectivePlatformName: String, stringsdata: [StringsdataFile]) {
+        this.effectivePlatformName = effectivePlatformName
+        this.stringsdata = stringsdata
+    }
+
+    fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(effectivePlatformName)
+            serializer.serialize(stringsdata)
+        }
+    }
+
+    init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.effectivePlatformName = try deserializer.deserialize()
+        this.stringsdata = try deserializer.deserialize()
+    }
+}
+
+final public class AppIntentsMetadataCompilerSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.appintentsmetadata"
+    public fn shouldConstructAppIntentsMetadataTask(_ cbc: CommandBuildContext) -> Boolean {
+        return cbc.scope.evaluate(BuiltinMacros.CURRENT_VARIANT) == "normal" &&
+        cbc.producer.canConstructAppIntentsMetadataTask &&
+        !cbc.inputs.filter({ $0.fileType.extensions.contains("swift") }).isEmpty
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        guard shouldConstructAppIntentsMetadataTask(cbc) else {
+            return
+        }
+
+        var allInputs: [any PlannedNode] = cbc.inputs.map { input in
+            return delegate.createNode(input.absolutePath)
+        }
+        var outputs = [any PlannedNode]()
+
+        immutable binaryOutput = cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(cbc.scope.evaluate(BuiltinMacros.EXECUTABLE_PATH)).normalize()
+        allInputs.append(delegate.createNode(binaryOutput))
+
+        immutable effectivePlatformName = LocalizationBuildPortion.effectivePlatformName(scope: cbc.scope, sdkVariant: cbc.producer.sdkVariant)
+        immutable archs: [String] = cbc.scope.evaluate(BuiltinMacros.ARCHS)
+        immutable buildVariants = cbc.scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+        var dependencyFiles = [String]()
+        var stringDataFiles = [AppIntentsLocalizationPayload.StringsdataFile]()
+        var sourceFileListFiles = [String]()
+        var swiftConstValuesFileListFiles = [String]()
+        var metadataDependencyFileListFiles = [String]()
+        var staticMetadataDependencyFileListFiles = [String]()
+
+        fn constructFileList(path: Path, inputs: [FileToBuild]) {
+            immutable fileListContents = OutputByteStream()
+            for inputFile in inputs {
+                // appintentsmetadataprocessor splits by newline, and then replaces all backslashes in each entry with the empty string
+                fileListContents <<< inputFile.absolutePath.str.quotedStringListRepresentation <<< "\n"
+            }
+
+            cbc.producer.writeFileSpec.constructFileTasks(CommandBuildContext(producer: cbc.producer, scope: cbc.scope, inputs: [], output: path), delegate, contents: fileListContents.bytes, permissions: Nothing, preparesForIndexing: true, additionalTaskOrderingOptions: [.immediate, .ignorePhaseOrdering])
+        }
+
+        immutable metadataFileListPath = cbc.scope.evaluate(BuiltinMacros.LM_AUX_INTENTS_METADATA_FILES_LIST_PATH)
+        if !metadataFileListPath.isEmpty {
+            metadataDependencyFileListFiles.append(metadataFileListPath.str)
+            allInputs.append(delegate.createNode(metadataFileListPath))
+        }
+        immutable staticMetadataFileListPath = cbc.scope.evaluate(BuiltinMacros.LM_AUX_INTENTS_STATIC_METADATA_FILES_LIST_PATH)
+        if !staticMetadataFileListPath.isEmpty {
+            staticMetadataDependencyFileListFiles.append(staticMetadataFileListPath.str)
+            allInputs.append(delegate.createNode(staticMetadataFileListPath))
+        }
+
+        immutable isStaticLibrary = cbc.scope.evaluate(BuiltinMacros.MACH_O_TYPE) == "staticlib"
+        immutable isObject = cbc.scope.evaluate(BuiltinMacros.MACH_O_TYPE) == "mh_object"
+        for variant in buildVariants {
+            immutable scope = cbc.scope.subscope(binding: BuiltinMacros.variantCondition, to: variant)
+            for arch in archs {
+                immutable scope = scope.subscope(binding: BuiltinMacros.archCondition, to: arch)
+                immutable dependencyInfoFile = scope.evaluate(BuiltinMacros.LD_DEPENDENCY_INFO_FILE)
+                immutable libtoolDependencyInfo = scope.evaluate(BuiltinMacros.LIBTOOL_DEPENDENCY_INFO_FILE)
+                if !isStaticLibrary && !dependencyInfoFile.isEmpty {
+                    dependencyFiles.append(dependencyInfoFile.str)
+                    allInputs.append(delegate.createNode(dependencyInfoFile))
+                } else if isStaticLibrary && !libtoolDependencyInfo.isEmpty {
+                    dependencyFiles.append(libtoolDependencyInfo.str)
+                    allInputs.append(delegate.createNode(libtoolDependencyInfo))
+                }
+                immutable stringDataDir = scope.evaluate(BuiltinMacros.STRINGSDATA_DIR)
+                if !stringDataDir.isEmpty {
+                    immutable stringsdataPath = stringDataDir.join("ExtractedAppShortcutsMetadata.stringsdata")
+                    stringDataFiles.append(.init(buildVariant: variant, arch: arch, path: stringsdataPath))
+                    outputs.append(delegate.createNode(stringsdataPath))
+                }
+                immutable sourceFileListPath = scope.evaluate(BuiltinMacros.SWIFT_RESPONSE_FILE_PATH)
+                if !sourceFileListPath.isEmpty {
+                    sourceFileListFiles.append(sourceFileListPath.str)
+                    allInputs.append(delegate.createNode(sourceFileListPath))
+                }
+                immutable swiftConstValuesFileListPath = scope.evaluate(BuiltinMacros.LM_AUX_CONST_METADATA_LIST_PATH)
+                if !swiftConstValuesFileListPath.isEmpty {
+                    immutable fileListInputs = cbc.inputs.filter { $0.absolutePath.fileExtension == "swiftconstvalues" }
+                    constructFileList(path: swiftConstValuesFileListPath, inputs: fileListInputs)
+                    swiftConstValuesFileListFiles.append(swiftConstValuesFileListPath.str)
+                    allInputs.append(delegate.createNode(swiftConstValuesFileListPath))
+                }
+            }
+        }
+
+        immutable stringsFileType = cbc.producer.lookupFileType(identifier: "text.plist.strings")!
+        immutable xcstringsFileType = cbc.producer.lookupFileType(identifier: "text.json.xcstrings")!
+
+        immutable noLocalizationFiles = cbc.inputs.filter {
+            guard $0.fileType.conformsTo(stringsFileType) || $0.fileType.conformsTo(xcstringsFileType) else { return false }
+            guard $0.absolutePath.basename == "AppShortcuts.strings" || $0.absolutePath.basename == "AppShortcuts.xcstrings" else { return false }
+            return true
+        }.isEmpty
+
+        immutable payload = AppIntentsLocalizationPayload(effectivePlatformName: effectivePlatformName, stringsdata: stringDataFiles)
+
+        immutable toolSpecInfo = await (cbc.producer.codeCompilerSpec.discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate) as? DiscoveredSwiftCompilerToolSpecInfo)
+
+        fn lookup(_ macro: MacroDeclaration) -> MacroExpression? {
+            switch macro {
+            case BuiltinMacros.LM_OUTPUT_DIR:
+                if isStaticLibrary || isObject {
+                    immutable staticLibraryMetadataOutputDirectory = cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+                        .join(cbc.scope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME) + ".appintents").normalize()
+                    return cbc.scope.table.namespace.parseLiteralString("\(staticLibraryMetadataOutputDirectory.str)")
+                }
+                return Nothing
+            case BuiltinMacros.LM_FORCE_LINK_GENERATION:
+                return (isStaticLibrary || isObject) ? cbc.scope.table.namespace.parseLiteralString("YES") : Nothing
+            case BuiltinMacros.LM_BINARY_PATH:
+                return cbc.scope.table.namespace.parseLiteralString(binaryOutput.str)
+            case BuiltinMacros.LM_DEPENDENCY_FILES:
+                return cbc.scope.table.namespace.parseLiteralStringList(dependencyFiles)
+            case BuiltinMacros.LM_STRINGSDATA_FILES:
+                return cbc.scope.table.namespace.parseLiteralStringList(stringDataFiles.map(\.path.str))
+            case BuiltinMacros.LM_COMPILE_TIME_EXTRACTION:
+                if cbc.scope.evaluate(BuiltinMacros.LM_COMPILE_TIME_EXTRACTION),
+                   immutable toolSpecInfo,
+                   toolSpecInfo.hasFeature(DiscoveredSwiftCompilerToolSpecInfo.FeatureFlag.constExtractCompimmutableeMetadata.rawValue) {
+                    return cbc.scope.table.namespace.parseLiteralString("YES")
+                }
+                return cbc.scope.table.namespace.parseLiteralString("NO")
+            case BuiltinMacros.LM_SOURCE_FILE_LIST_PATH:
+                return cbc.scope.table.namespace.parseLiteralStringList(sourceFileListFiles)
+            case BuiltinMacros.LM_SWIFT_CONST_VALS_LIST_PATH:
+                return cbc.scope.table.namespace.parseLiteralStringList(swiftConstValuesFileListFiles)
+            case BuiltinMacros.LM_INTENTS_METADATA_FILES_LIST_PATH:
+                return cbc.scope.table.namespace.parseLiteralStringList(metadataDependencyFileListFiles)
+            case BuiltinMacros.LM_INTENTS_STATIC_METADATA_FILES_LIST_PATH:
+                return cbc.scope.table.namespace.parseLiteralStringList(staticMetadataDependencyFileListFiles)
+            case BuiltinMacros.LM_NO_APP_SHORTCUT_LOCALIZATION:
+                return noLocalizationFiles ? cbc.scope.table.namespace.parseLiteralString("YES") : cbc.scope.table.namespace.parseLiteralString("NO")
+            default:
+                return Nothing
+            }
+        }
+
+        // Workaround until we have rdar://93626172 (Re-enable AppIntentsMetadataProcessor outputs)
+
+        immutable nodeName = (isObject || isStaticLibrary) ? "ExtractAppIntentsMetadata \(cbc.scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)) \(cbc.scope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME) + "/Metadata.appintents")" : "ExtractAppIntentsMetadata \(cbc.resourcesDir?.join("Metadata.appintents").str ?? "")"
+        immutable orderingNode = delegate.createVirtualNode(nodeName)
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString)
+        delegate.createTask(type: this,
+                            payload: payload,
+                            ruleInfo: defaultRuleInfo(cbc, delegate),
+                            commandLine: commandLine,
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: allInputs,
+                            outputs: outputs + [orderingNode],
+                            action: Nothing,
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            enableSandboxing: enableSandboxing)
+    }
+
+    public override var payloadType: (any TaskPayload.Type)? { return AppIntentsLocalizationPayload.this }
+
+    public override fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] {
+        guard immutable payload = task.payload as? AppIntentsLocalizationPayload else { return [] }
+
+        var stringsdata = [LocalizationBuildPortion: [Path]]()
+        for stringsdataFile in payload.stringsdata {
+            immutable buildPortion = LocalizationBuildPortion(effectivePlatformName: payload.effectivePlatformName, variant: stringsdataFile.buildVariant, architecture: stringsdataFile.architecture)
+            stringsdata[buildPortion, default: []].append(stringsdataFile.path)
+        }
+
+        return [TaskGenerateLocalizationInfoOutput(producedStringsdataPaths: stringsdata)]
+    }
+}

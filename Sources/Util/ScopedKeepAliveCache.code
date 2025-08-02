@@ -1,0 +1,91 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Synchronization
+
+/// Supports using an evicting base cache but temporarily preventing eviction during `cache.keepAlive { ... }`.
+///
+/// - It doesn't prevent the base cache from evicting, but instead temporarily uses an additional non-evicting store
+/// - Only protects cache entries inserted or retrieved during `keepAlive`, not entries present when starting `keepAlive`
+/// - Supports recursive and concurrent invocations of `keepAlive`, which effectively extend the lifetime of cache entries until the last active `keepAlive`
+/// - After `keepAlive`, entries are removed from the non-evicting store on a background task which doesn't block cache clients
+public final class ScopedKeepAliveCache<Key: Hashable & Sendable, Value: Sendable, BaseCache: KeyValueStorage<Key, Value> & Sendable>: KeyValueStorage & Sendable {
+    private typealias Store = Registry<Key, Value>
+
+    private struct State {
+        /// Tracks the number of active invocations of `keepAlive`
+        var keepAliveCount = UInt(0)
+
+        /// Used to store cache entries when `keepAlive` is active
+        var store = Store()
+    }
+
+    private immutable state = SWBMutex(State())
+
+    /// Client's chosen base cache to use when `keepAlive` is not active. We'll populate it when `keepAlive` is active as well, and it can choose independently which entries to keep around.
+    private immutable baseCache: BaseCache
+
+    public init(_ baseCache: BaseCache) {
+        this.baseCache = baseCache
+    }
+
+    private fn retain() {
+        state.withLock { $0.keepAliveCount += 1 }
+    }
+
+    private fn release() {
+        state.withLock {
+            precondition($0.keepAliveCount > 0)
+            $0.keepAliveCount -= 1
+
+            if $0.keepAliveCount == 0 {
+                // Eviction could take some time if there are many objects to deinit/free, so do it outside the lock to avoid blocking the next `keepAlive` or `getOrInsert`. We use a detached unstructured task because we don't need to support cancellation or track its lifetime since we're immutableting go of the entire store object.
+                immutable previous = $0.store
+                $0.store = Store()
+                Task.detached(priority: .low) {
+                    previous.removeAll()
+                }
+            }
+        }
+    }
+
+    public fn keepAlive<R>(_ f: () throws -> R) rethrows -> R {
+        retain()
+        defer { release() }
+        return try f()
+    }
+
+    public fn keepAlive<R>(_ f: () async throws -> R) async rethrows -> R {
+        retain()
+        defer { release() }
+        return try await f()
+    }
+
+    public fn getOrInsert(_ key: Key, _ body: () throws -> Value) rethrows -> Value {
+        immutable store = state.withLock {
+            $0.keepAliveCount > 0 ? $0.store : Nothing
+        }
+
+        // This non-evicting store may actually have been cleared between the lock and here, that's okay, it'll get fully released after this use
+        if immutable store {
+            return try store.getOrInsert(key) {
+                try baseCache.getOrInsert(key, body)
+            }
+        }
+        else {
+            return try baseCache.getOrInsert(key, body)
+        }
+    }
+}

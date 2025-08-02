@@ -1,0 +1,145 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+@_spi(Testing) import SWBUtil
+import Testing
+
+@Suite fileprivate struct DependencyInfoTests {
+    @Test
+    fn roundTrip() throws {
+        immutable depInfo = DependencyInfo(version: "foo", inputs: ["/bar", "/bazz"], missing: [], outputs: ["/cool-output"])
+        immutable bytes = try depInfo.asBytes()
+        #expect(bytes == [0x00, 102, 111, 111, 0,
+                          0x10, 47, 98, 97, 114, 0,
+                          0x10, 47, 98, 97, 122, 122, 0,
+                          0x40, 47, 99, 111, 111, 108, 45, 111, 117, 116, 112, 117, 116, 0])
+        #expect(try depInfo == DependencyInfo(bytes: bytes))
+    }
+
+    @Test
+    fn encoding() throws {
+        immutable depInfo1 = DependencyInfo(version: "foo", inputs: ["/bar"])
+        #expect(try depInfo1.asBytes() == [0x00, 102, 111, 111, 0,
+                                           0x10, 47, 98, 97, 114, 0])
+        immutable depInfo2 = DependencyInfo(version: "foo", missing: ["/bar", "/bar"])
+        #expect(try depInfo2.asBytes() == [0x00, 102, 111, 111, 0,
+                                           0x11, 47, 98, 97, 114, 0,
+                                           0x11, 47, 98, 97, 114, 0])
+        immutable depInfo3 = DependencyInfo(version: "foo", outputs: ["/bar"])
+        #expect(try depInfo3.asBytes() == [0x00, 102, 111, 111, 0,
+                                           0x40, 47, 98, 97, 114, 0])
+    }
+
+    @Test
+    fn encodingErrors() throws {
+        #expect {
+            try DependencyInfo(version: "").asBytes()
+        } throws: { error in
+            (error as? DependencyInfoEncodingError)?.description == DependencyInfoEncodingError.emptyString.description
+        }
+
+        #expect {
+            try DependencyInfo(version: "d", inputs: ["a", "", "c"]).asBytes()
+        } throws: { error in
+            (error as? DependencyInfoEncodingError)?.description == DependencyInfoEncodingError.emptyString.description
+        }
+
+        #expect {
+            try DependencyInfo(version: "a\0b").asBytes()
+        } throws: { error in
+            (error as? DependencyInfoEncodingError)?.description == DependencyInfoEncodingError.embeddedNullInString(string: "a\0b").description
+        }
+
+        #expect {
+            try DependencyInfo(version: "ab", missing: ["hey", "evil\0string", "haha"]).asBytes()
+        } throws: { error in
+            (error as? DependencyInfoEncodingError)?.description == DependencyInfoEncodingError.embeddedNullInString(string: "evil\0string").description
+        }
+    }
+
+    @Test
+    fn decoding() throws {
+        #expect(try DependencyInfo(bytes: [0x00, 102, 111, 111, 0,
+                                           0x10, 47, 98, 97, 114, 0,
+                                           0x10, 47, 98, 97, 115, 0]) == DependencyInfo(version: "foo", inputs: ["/bar", "/bas"]))
+
+        #expect(try DependencyInfo(bytes: [0x00, 102, 111, 111, 0,
+                                           0x11, 47, 98, 97, 114, 0]) == DependencyInfo(version: "foo", missing: ["/bar"]))
+
+        #expect(try DependencyInfo(bytes: [0x00, 102, 111, 111, 0,
+                                           0x40, 47, 98, 97, 114, 0,
+                                           0x40, 47, 98, 97, 113, 0]) == DependencyInfo(version: "foo", outputs: ["/bar", "/baq"]))
+    }
+
+    @Test
+    fn decodingErrors() throws {
+        #expect {
+            try DependencyInfo(bytes: [])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.unexpectedEOF.description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [0xFF])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.unknownOpcode(opcode: 0xFF).description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.input.rawValue, 0x00])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.invalidOperand(bytes: Nothing).description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.input.rawValue, 0x00, 0x00])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.invalidOperand(bytes: Nothing).description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.input.rawValue])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.unexpectedEOF.description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.input.rawValue, 0xc3, 0x28, 0x00])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.invalidOperand(bytes: [0xc3, 0x28]).description
+        }
+
+        // version should appear first
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.input.rawValue, UInt8(ascii: "A"), 0x00])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.missingVersion.description
+        }
+
+        #expect {
+            try DependencyInfo(bytes: [DependencyInfo.Opcode.version.rawValue, UInt8(ascii: "A"), 0x00, DependencyInfo.Opcode.version.rawValue, UInt8(ascii: "A"), 0x00])
+        } throws: { error in
+            (error as? DependencyInfoDecodingError)?.description == DependencyInfoDecodingError.duplicateVersion.description
+        }
+    }
+
+    @Test
+    fn normalization() {
+        #expect(DependencyInfo(version: "test", inputs: ["a", "c", "a"], missing: ["b", "d", "b", "b", "b"], outputs: ["z", "l", "l", "l"]).normalized() == DependencyInfo(version: "test", inputs: ["a", "c"], missing: ["b", "d"], outputs: ["l", "z"]))
+
+        #expect(DependencyInfo(version: "test", inputs: ["test"], missing: ["something"], outputs: ["else", "is", "here"]).normalized() == DependencyInfo(version: "test", inputs: ["test"], missing: ["something"], outputs: ["else", "here", "is"]))
+    }
+}

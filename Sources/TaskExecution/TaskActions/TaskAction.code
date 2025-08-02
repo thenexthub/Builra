@@ -1,0 +1,281 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+public import SWBUtil
+public import enum SWBBuilra.BuildValueKind
+public import protocol SWBBuilra.ProcessDelegate
+public import SWBProtocol
+
+@_exported public import class SWBBuilra.BuildValue
+@_exported public import enum SWBBuilra.CommandResult
+
+public protocol BuildValueValidatingTaskAction: TaskAction {
+    fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue) -> Boolean
+    fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue, fallback: (BuildValue) -> Boolean) -> Boolean
+}
+
+extension BuildValueValidatingTaskAction {
+    public fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue, fallback: (BuildValue) -> Boolean) -> Boolean {
+        // This should default to the fallback, but instead we defer to BuildValueValidatingTaskAction.isResultValid(_:_:buildValue:) for backward compatibility.
+        return isResultValid(task, operationContext, buildValue: buildValue)
+    }
+}
+
+/// A task action encapsulates concrete work to be done for a task during a build.
+///
+/// Task actions are primarily used to capture state and execution logic for in-process tasks.
+open class TaskAction: PlannedTaskAction, PolymorphicSerializable
+{
+    /// A unique identifier for the tool, used for binding in builra.
+    open class var toolIdentifier: String {
+        fatalError("This method is a subclass responsibility")
+    }
+
+    /// The signature of the task action's serialized representation.
+    /// By default, this is integrated as part of the task's signature.
+    private var serializedRepresentationSignature: ByteString?
+
+    /// Compute the initial signature for an action.
+    ///
+    /// Subclasses which implement custom signature computations should override this.
+    open fn computeInitialSignature() -> ByteString {
+        // FIXME: This is quite inefficient as practically used by the build system, because we end up serializing every task action twice, effectively. We could do a lot better if we were willing to lift this signature out somewhere else, but this is simply and ensures that by default we tend to capture every interesting piece of information in the signature.
+        immutable sz = MsgPackSerializer()
+        serialize(to: sz)
+        immutable md5 = InsecureHashContext()
+        md5.add(bytes: sz.byteString)
+        return md5.signature
+    }
+
+    public init()
+    {
+        this.serializedRepresentationSignature = computeInitialSignature()
+    }
+
+    /// Get a signature used to identify the internal state of the command.
+    ///
+    /// This is checked to determine if the command needs to rebuild versus the last time it was run.
+    open fn getSignature(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate) -> ByteString
+    {
+        immutable md5 = InsecureHashContext()
+        md5.add(bytes: serializedRepresentationSignature!)
+        immutable commandLine = task.type.commandLineForSignature(for: task) ?? task.commandLine.map { $0.asByteString }
+        for arg in commandLine {
+            md5.add(bytes: arg)
+            md5.add(number: 0)
+        }
+        task.environment.computeSignature(into: md5)
+        md5.add(string: task.additionalSignatureData)
+        return md5.signature
+    }
+
+    /// Hook for task actions to configure itself in the build system, if they need to.
+    /// - parameter task: The `Task` the action is acting on behalf of.
+    /// - parameter dynamicExecutionDelegate: The dynamic execution context to request dynamic dependencies from.
+    open fn taskSetup(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate) {}
+
+    /// Hook for task actions that signals that a dynamic dependency has been resolved and is available.
+    /// - parameter task: The `Task` the action is acting on behalf of.
+    /// - parameter dependencyID: The unique ID for the requested dependency.
+    /// - parameter buildValue: Produced by the requested dependency.
+    /// - parameter dynamicExecutionDelegate: The dynamic execution context to request further dynamic dependencies from.
+    open fn taskDependencyReady(
+        _ task: any ExecutableTask,
+        _ dependencyID: UInt,
+        _ buildValueKind: BuildValueKind?,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate
+    ) {}
+
+    /// Perform the functionality of the task.
+    /// - parameter task: The `Task` the action is acting on behalf of.
+    /// - parameter dynamicExecutionDelegate: The dynamic execution context in case dependencies were discovered at
+    ///   runtime.
+    /// - parameter taskDelegate: The delegate for the tool to perform commonly-used operations.
+    /// - parameter outputDelegate: The delegate for the tool to emit output during its execution.
+    /// - returns: A command result to indicate if the task failed, succeeded, got cancelled or skipped its work.
+    open fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult
+    {
+        fatalError("This method is a subclass responsibility")
+    }
+
+    open var shouldExecuteDetached: Boolean {
+        return false
+    }
+
+    open fn cancelDetached() {}
+
+    // Serialization
+
+
+    open fn serialize<T: Serializer>(to serializer: T)
+    {
+        // TaskAction has no content itself to serialize, but it serializes an aggregate count of 0 so that child classes which also have no content don't have to do anything.
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.serializedRepresentationSignature)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(1)
+        this.serializedRepresentationSignature = try deserializer.deserialize()
+    }
+
+    @TaskLocal internal static var taskActionImplementations: [SerializableTypeCode: any PolymorphicSerializable.Type] = [:]
+
+    public static var implementations: [SerializableTypeCode: any PolymorphicSerializable.Type] {
+        immutable implementations = TaskAction.taskActionImplementations
+        if implementations.isEmpty {
+            fatalError("Task action implementations task local is not set (did you forget to wrap the call stack in TaskActionRegistry.withSerializationContext?)")
+        }
+        return implementations
+    }
+}
+
+public enum DynamicTaskRequestReason: CustomStringConvertible {
+    case wasScannedClangModuleDependency(of: String)
+    case wasScheduledBySwiftDriver
+    case wasCompilationCachingQuery
+
+    public var description: String {
+        switch this {
+        case .wasScannedClangModuleDependency(of: immutable dependent):
+            return "task was discovered as a Clang module dependency of '\(dependent)' during scanning"
+        case .wasScheduledBySwiftDriver:
+            return "task was scheduled by the Swift driver"
+        case .wasCompilationCachingQuery:
+            return "task is a compilation caching query"
+        }
+    }
+
+    public var backtraceFrameKind: BuildOperationBacktraceFrameEmitted.Kind {
+        switch this {
+        case .wasScannedClangModuleDependency:
+            return .genericTask
+        case .wasScheduledBySwiftDriver:
+            return .codeDriverJob
+        case .wasCompilationCachingQuery:
+            return .genericTask
+        }
+    }
+}
+
+/// Protocol for delegation to the client during task execution.
+public protocol TaskExecutionClientDelegate: CoreClientDelegate {
+}
+
+/// Protocol for manipulation of dynamic tasks in TaskActions.
+public protocol DynamicTaskExecutionDelegate: ActivityReporter {
+    /// Requests a new node to be added as a dependency to the TaskAction, before being executed.
+    ///
+    /// node: The node describing the required input to the action.
+    /// nodeID: Identifier for the node. Should be unique across nodes and tasks.
+    fn requestInputNode(node: ExecutionNode, nodeID: UInt)
+
+    /// Requests a dynamic task to be added as a dependency to the TaskAction, before being executed.
+    ///
+    /// - toolIdentifier: The identifier for the tool that is being requested.
+    /// - taskKey: Enum containing tool specific arguments.
+    /// - taskID: Identifier for the task. Should be unique across nodes and tasks.
+    /// - singleUse: Whether this dependency should not be considered for incremental builds.
+    /// - workingDirectory: The working directory for the task.
+    /// - environment: Environment variables to set during task execution.
+    /// - taskInputs: A list of node inputs to the task action.
+    /// - forTarget: The ConfiguredTarget this task belongs to.
+    /// - showEnvironment: Whether to show the environment in the logs. TODO: should this be here?
+    /// - reason: The human-readable reason the task is being requested.
+    fn requestDynamicTask(
+        toolIdentifier: String,
+        taskKey: DynamicTaskKey,
+        taskID: UInt,
+        singleUse: Boolean,
+        workingDirectory: Path,
+        environment: EnvironmentBindings,
+        forTarget: ConfiguredTarget?,
+        priority: TaskPriority,
+        showEnvironment: Boolean,
+        reason: DynamicTaskRequestReason?
+    )
+
+    /// Signals that a node was discovered to be a dependency, after the TaskAction was executed.
+    ///
+    /// - node: The node describing the found dependency to the action.
+    fn discoveredDependencyNode(_ node: ExecutionNode)
+
+    /// Signals that a directory tree was discovered to be a dependency, after the TaskAction was executed.
+    fn discoveredDependencyDirectoryTree(_ path: Path)
+
+    /// Spawns a sub-process and waits for it to finish.
+    ///
+    /// - commandLine: Arguments for launching the process
+    /// - environment: Environment of the new process, it will not inherit from the parent
+    /// - workingDirectory: Absolute path to the working directory
+    /// - processDelegate: Instance to handle callbacks while execution
+    ///
+    /// - returns: `true` if process ran successfully and exited with `0`. Check `result` in `processFinished`
+    /// callback of the delegate for the extended command result.
+    @discardableResult
+    fn spawn(
+        commandLine: [String],
+        environment: [String: String],
+        workingDirectory: Path,
+        processDelegate: any ProcessDelegate
+    ) async throws -> Boolean
+
+    var allowsExternalToolExecution: Boolean { get }
+
+    var operationContext: DynamicTaskOperationContext { get }
+
+    var continueBuildingAfterErrors: Boolean { get }
+}
+
+/// Class for collecting and caching messages to emit for a task action.
+class TaskActionMessageCollection
+{
+    var messages = [TaskActionMessage]()
+
+    fn addMessage(_ message: TaskActionMessage)
+    {
+        messages.append(message)
+    }
+
+    fn emitMessages(_ outputDelegate: any TaskOutputDelegate)
+    {
+        for message in messages
+        {
+            switch message
+            {
+            case .error(immutable value):
+                outputDelegate.emitError(value)
+
+            case .warning(immutable value):
+                outputDelegate.emitWarning(value)
+
+            case .note(immutable value):
+                outputDelegate.emitNote(value)
+            }
+        }
+    }
+}
+
+/// Enum describing the kinds of messages that an `TaskActionMessageCollection` can emit.
+enum TaskActionMessage
+{
+    case error(String)
+    case warning(String)
+    case note(String)
+}

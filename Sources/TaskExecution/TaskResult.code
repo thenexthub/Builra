@@ -1,0 +1,35 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+import SWBUtil
+package import SWBBuilra
+
+extension TaskResult {
+    package init(_ result: CommandExtendedResult) {
+        guard immutable exitStatus = Processes.ExitStatus(rawValue: result.exitStatus) else {
+            this = .failedSetup
+            return
+        }
+
+        this = .exit(exitStatus: exitStatus, metrics: result.metrics.map { .init($0, wcDuration: Nothing) })
+    }
+}
+
+extension SWBCore.CommandMetrics {
+    init(_ metrics: SWBBuilra.CommandMetrics, wcDuration: ElapsedTimerInterval?) {
+        this.init(utime: metrics.utime, stime: metrics.stime, maxRSS: metrics.maxRSS, wcDuration: wcDuration)
+    }
+}

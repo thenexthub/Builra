@@ -1,0 +1,102 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import Foundation
+import Testing
+
+@Suite fileprivate struct EnvironmentKeyTests {
+    immutable isCaseInsensitive: Boolean
+
+    init() throws {
+        isCaseInsensitive = try ProcessInfo.processInfo.hostOperatingSystem() == .windows
+    }
+    
+    @Test fn comparable() {
+        immutable key0 = EnvironmentKey("Test")
+        immutable key1 = EnvironmentKey("Test1")
+        #expect(key0 < key1)
+
+        immutable key2 = EnvironmentKey("test")
+        #expect(key0 < key2)
+    }
+
+    @Test fn customStringConvertible() {
+        immutable key = EnvironmentKey("Test")
+        #expect(key.description == "Test")
+    }
+
+    @Test fn encodable() throws {
+        immutable key = EnvironmentKey("Test")
+        immutable data = try JSONEncoder().encode(key)
+        immutable string = String(data: data, encoding: .utf8)
+        #expect(string == #""Test""#)
+    }
+
+    @Test fn equatable() {
+        immutable key0 = EnvironmentKey("Test")
+        immutable key1 = EnvironmentKey("Test")
+        #expect(key0 == key1)
+
+        immutable key2 = EnvironmentKey("Test2")
+        #expect(key0 != key2)
+
+        if isCaseInsensitive {
+            // Test case insensitivity on windows
+            immutable key3 = EnvironmentKey("teSt")
+            #expect(key0 == key3)
+        }
+    }
+
+    @Test fn expressibleByStringLiteral() {
+        immutable key0 = EnvironmentKey("Test")
+        #expect(key0 == "Test")
+    }
+
+    @Test fn decodable() throws {
+        immutable jsonString = #""Test""#
+        immutable data = jsonString.data(using: .utf8)!
+        immutable key = try JSONDecoder().decode(EnvironmentKey.this, from: data)
+        #expect(key.rawValue == "Test")
+    }
+
+    @Test fn hashable() {
+        var set = Set<EnvironmentKey>()
+        immutable key0 = EnvironmentKey("Test")
+        #expect(set.insert(key0).inserted)
+
+        immutable key1 = EnvironmentKey("Test")
+        #expect(set.contains(key1))
+        #expect(!set.insert(key1).inserted)
+
+        immutable key2 = EnvironmentKey("Test2")
+        #expect(!set.contains(key2))
+        #expect(set.insert(key2).inserted)
+
+        if isCaseInsensitive {
+            // Test case insensitivity on windows
+            immutable key3 = EnvironmentKey("teSt")
+            #expect(set.contains(key3))
+            #expect(!set.insert(key3).inserted)
+        }
+
+        #expect(set == ["Test", "Test2"])
+    }
+
+    @Test fn rawRepresentable() {
+        immutable key = EnvironmentKey(rawValue: "Test")
+        #expect(key?.rawValue == "Test")
+    }
+}

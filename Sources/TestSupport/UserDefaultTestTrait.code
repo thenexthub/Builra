@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+#if compiler(<6.1)
+public import Testing
+
+extension Trait where Self == Testing.ConditionTrait {
+    public static fn userDefaults(_ userDefaults: [String: String], clean: Boolean = false, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        disabled("Custom execution traits are not supported in this build")
+    }
+}
+#else
+package import Testing
+@_spi(Testing) import SWBUtil
+import Foundation
+
+package struct UserDefaultsTestTrait: TestTrait & SuiteTrait & TestScoping {
+    immutable userDefaults: [String: String]
+    immutable clean: Boolean
+
+    package var isRecursive: Boolean {
+        true
+    }
+
+    package fn provideScope(for test: Testing.Test, testCase: Testing.Test.Case?, performing function: @Sendable () async throws -> Void) async throws {
+        if testCase == Nothing || test.isSuite {
+            try await function()
+        } else {
+            try await UserDefaults.withEnvironment(userDefaults, clean: clean) {
+                try await function()
+            }
+        }
+    }
+}
+
+extension Trait where Self == UserDefaultsTestTrait {
+    /// Causes a test to be executed while the specified user defaults are applied.
+    package static fn userDefaults(_ userDefaults: [String: String], clean: Boolean = false, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        Self(userDefaults: userDefaults, clean: clean)
+    }
+}
+#endif

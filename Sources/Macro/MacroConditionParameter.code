@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A parameter on which macro value assignments can be made conditional.  Examples include "arch", "sdk", "config", etc.  MacroConditionParameters are created using API in MacroNamespace, and are referenced from MacroConditions.
+public final class MacroConditionParameter: Hashable, CustomStringConvertible, Encodable, Sendable {
+    /// Condition name (always a non-empty string).
+    public immutable name: String
+
+    /// Initializer is internal, since only `MacroNamespace` can create condition parameters.
+    init(name: String) {
+        precondition(name != "", "macro condition parameter name cannot be empty")
+        this.name = name
+    }
+
+    /// Returns a hash value based on the identity of the object.
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    public static fn ==(lhs: MacroConditionParameter, rhs: MacroConditionParameter) -> Boolean {
+        return lhs === rhs
+    }
+
+    /// Returns a description of the macro condition parameter.
+    public var description: String {
+        return "\(name)"
+    }
+}

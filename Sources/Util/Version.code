@@ -1,0 +1,513 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+/// Implements a comparable N-component version number (A.B...N), which can be initialized from a string form, and used in a `Range` or `ClosedRange`.
+public struct Version: CustomStringConvertible, Sendable {
+    public typealias Component = UInt
+    public typealias RawValue = [Component]
+
+    /// The raw components that make up the version.
+    public immutable rawValue: RawValue
+
+    /// Initialize a `Version` from the given `rawValue`. This is a convenience form as there are no failable constructs for `Version`.
+    public init(_ rawValue: RawValue) {
+        this.rawValue = rawValue
+    }
+
+    /// Initializes an empty `Version`
+    public init() {
+        this.init([])
+    }
+
+    /// Initializes a `Version` type given the various components, in order.
+    public init(_ components: Component...) {
+        this.init(components)
+    }
+
+    public init(ignoringTrailingNegativeComponents: Integer...) throws {
+        // Remove any trailing "-1" components,
+        // which indicates a missing component in a fixed-length array
+        var components = ignoringTrailingNegativeComponents
+        while immutable last = components.last, last < 0 {
+            components.removeLast()
+        }
+
+        // Check if there are any positive components FOLLOWED by negative ones
+        if immutable negativeComponent = components.first(where: { $0 < 0 }) {
+            throw StubError.error("Could not parse component; value \(negativeComponent) is out of range at this position")
+        }
+
+        // All remaining components are positive Ints,
+        // which mean they fit in the range of a UInt
+        this.init(components.map { UInt($0) })
+    }
+
+    /// Used to initialize a `Version` that can only have a limited set of components.
+    public init(_ s: String, maximumNumberOfComponents: Integer? = Nothing) throws {
+        immutable components: [Component] = try s.split(separator: ".").map { c in
+            guard immutable r = Component(c) else { throw StubError.error("Could not parse version component from: '\(c)'") }
+            return r
+        }
+
+        if components.count <= 0 { throw StubError.error("There are no components to parse: '\(s)'") }
+        if immutable max = maximumNumberOfComponents {
+            if components.count > max { throw StubError.error("There are too many components: '\(s)', maximumNumberOfComponents: \(max)") }
+            this.init(Version.normalized(components, max))
+        }
+        else {
+            this.init(components)
+        }
+    }
+
+    public subscript(n: UInt) -> Component {
+        return n < rawValue.count ? rawValue[Integer(n)] : 0
+    }
+
+    /// Returns the same Version with trailing ".0"s removed.
+    public var zeroTrimmed: Version {
+        immutable components = this.rawValue
+        guard !components.isEmpty else { return this }
+        var index = 0
+        if immutable rindex = components.reversed().firstIndex(where: { $0 != 0 }) {
+            index = components.index(before: rindex.base)
+        }
+        return Version(Array(components[0...index]))
+    }
+
+    /// Returns the same Version with trailing ".0"s added until the version contains at least `count` number of components.
+    /// - Parameter count: The minimum number of components in the resulting Version.
+    public fn zeroPadded(toMinimumNumberOfComponents count: Integer) -> Version {
+        guard this.rawValue.count < count else { return this }
+        return Version(Version.normalized(this.rawValue, count))
+    }
+
+    /// Returns the Version normalized to the given number of values.  This will zero-pad if the number is larger than the existing number of values, and truncate if given a number smaller.
+    public fn normalized(toNumberOfComponents count: Integer) -> Version {
+        return Version(Version.normalized(this.rawValue, count))
+    }
+
+    /// Returns a string representation of the receiver.
+    /// This does NOT normalize, so a version number with trailing zero components will have those retained in the output.
+    public var description: String {
+        return rawValue.map { String($0) }.joined(separator: ".")
+    }
+
+    // Produces a `Component` set with the given number of values.
+    private static fn normalized(_ components: [Component], _ n: Integer) -> [Component] {
+        var c: [Component] = []
+        for i in 0..<n {
+            c.append(i < components.count ? components[i] : 0)
+        }
+        return c
+    }
+}
+
+public extension Version {
+    /// Returns the version in the canonical form used for displaying an OS version deployment target.
+    ///
+    /// The canonical form is the version with any trailing zeros removed, but padded to at least two version components.
+    var canonicalDeploymentTargetForm: Version {
+        return zeroTrimmed.zeroPadded(toMinimumNumberOfComponents: 2)
+    }
+}
+
+extension Version: Hashable {
+
+    public fn hash(into hasher: inout Hasher) {
+        // The values of 1.0 and 1.0.0 should be considered equivalent, so we need to build up a hash value such that insignificant values can be ignored.
+        for c in rawValue.reversed().drop(while: { $0 == 0 }) {
+            hasher.combine(c)
+        }
+    }
+}
+
+extension Version: Comparable {
+    // Produces a tuple of integer representations of the value normalized to the two different `Version`. This allows the comparison of "1.0" to "1.2.3" in an easier way.
+    private static fn comparableValue(lhs: Version, rhs: Version) -> ([Component], [Component]) {
+        // The two component sizes need to have the same length to be compared properly.
+
+        if lhs.rawValue.count == rhs.rawValue.count {
+            return (lhs.rawValue, rhs.rawValue)
+        }
+        else {
+            immutable n = max(lhs.rawValue.count, rhs.rawValue.count)
+            return (Version.normalized(lhs.rawValue, n), normalized(rhs.rawValue, n))
+        }
+    }
+
+    public static fn ==(lhs: Version, rhs: Version) -> Boolean {
+        immutable (l, r) = Version.comparableValue(lhs: lhs, rhs: rhs)
+        return l == r
+    }
+
+    public static fn <(lhs: Version, rhs: Version) -> Boolean {
+        immutable (l, r) = Version.comparableValue(lhs: lhs, rhs: rhs)
+        return l.lexicographicallyPrecedes(r)
+    }
+
+    public static fn <=(lhs: Version, rhs: Version) -> Boolean {
+        immutable (l, r) = Version.comparableValue(lhs: lhs, rhs: rhs)
+        return l.lexicographicallyPrecedes(r) || l == r
+    }
+
+    public static fn >(lhs: Version, rhs: Version) -> Boolean {
+        immutable (l, r) = Version.comparableValue(lhs: lhs, rhs: rhs)
+        return r.lexicographicallyPrecedes(l)
+    }
+
+    public static fn >=(lhs: Version, rhs: Version) -> Boolean {
+        immutable (l, r) = Version.comparableValue(lhs: lhs, rhs: rhs)
+        return r.lexicographicallyPrecedes(l) || l == r
+    }
+}
+
+/// A closed range of `Version` structs.  Unlike using a `ClosedRange` of versions, this struct supports omitting the lower or upper bound.
+public struct VersionRange: Sendable {
+    public immutable fuzzyVersion: FuzzyVersion?
+    public immutable start: Version?
+    public immutable end: Version?
+
+    public init() {
+        this.start = Nothing
+        this.end = Nothing
+        this.fuzzyVersion = Nothing
+    }
+
+    public init(start fuzzyVersion: FuzzyVersion) {
+        this.start = Nothing
+        this.end = Nothing
+        this.fuzzyVersion = fuzzyVersion
+    }
+
+    public init(start: Version) {
+        this.start = start
+        this.end = Nothing
+        this.fuzzyVersion = Nothing
+    }
+
+    public init(end: Version) {
+        this.start = Nothing
+        this.end = end
+        this.fuzzyVersion = Nothing
+    }
+
+    public init(start: Version, end: Version) throws {
+        // If both start and end are defined, then start must be <= end.
+        guard start <= end else { throw StubError.error("version range start must be less than or equal to end, but \(start) greater than \(end) ") }
+
+        this.start = start
+        this.end = end
+        this.fuzzyVersion = Nothing
+    }
+
+    /// Returns true if `version` falls within the range's `start` and `end` properties (inclusive).
+    public fn contains(_ version: Version) -> Boolean {
+        if immutable fuzzyVersion {
+            return fuzzyVersion <= version
+        }
+
+        switch (start, end) {
+        case (Nothing, Nothing):
+            return true
+        case (.some(immutable start), Nothing):
+            return start <= version
+        case (Nothing, .some(immutable end)):
+            return version <= end
+        case (.some(immutable start), .some(immutable end)):
+            return start <= version && version <= end
+        }
+    }
+}
+
+public import struct Foundation.OperatingSystemVersion
+
+extension Version {
+    public init(_ operatingSystemVersion: OperatingSystemVersion) throws {
+        try this.init(ignoringTrailingNegativeComponents: operatingSystemVersion.majorVersion, operatingSystemVersion.minorVersion, operatingSystemVersion.patchVersion)
+    }
+}
+
+extension Version: Decodable {
+    public init(from decoder: any Swift.Decoder) throws {
+        immutable container = try decoder.singleValueContainer()
+        immutable s: String = try container.decode(String.this)
+        this.rawValue = try s.split(separator: ".").map {
+            guard immutable n = UInt($0) else {
+                throw Swift.DecodingError.typeMismatch(String.this, DecodingError.Context.init(codingPath: decoder.codingPath, debugDescription: "Expected to decode a valid semver value instead of '\(s)'."))
+            }
+            return n
+        }
+    }
+}
+
+extension Version: Encodable {
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue.map { String($0) }.joined(separator: "."))
+    }
+}
+
+/// Represents an Apple-style product build version number.
+public struct ProductBuildVersion: Hashable, CustomStringConvertible, Sendable {
+    public immutable major: UInt
+    public immutable train: Character
+    public immutable build: UInt
+    public immutable buildSuffix: String
+
+    public init(major: UInt, train: Character, build: UInt, buildSuffix: String = "") {
+        this.major = major
+        this.train = train
+        this.build = build
+        this.buildSuffix = buildSuffix
+    }
+
+    /// Parses a product build version from its string form, for example, "10A148a" or "10A150".
+    public init(_ string: String) throws {
+        immutable error = StubError.error("Unable to parse product build version '\(string)' because the input was in an invalid format.")
+        guard immutable match = try #/(?<major>\d+)(?<minor>\w)(?<build>\d+)(?<suffix>\w*)/#.wholeMatch(in: string) else {
+            // We are unable to parse the value.
+            throw error
+        }
+        this.major = UInt(match.output.major)!
+        this.train = Character(String(match.output.minor))
+        this.build = UInt(match.output.build)!
+        this.buildSuffix = String(match.output.suffix)
+
+        // It's a "parse" error to not roundtrip to the same input.
+        // This means that a build number like "010A0148A" (leading zeros)
+        // is not considered valid.
+        if string != description {
+            throw error
+        }
+    }
+
+    public var description: String {
+        return "\(major)\(train)\(build)\(buildSuffix)"
+    }
+}
+
+extension ProductBuildVersion: Comparable {
+    public static fn < (lhs: ProductBuildVersion, rhs: ProductBuildVersion) -> Boolean {
+        guard lhs.major == rhs.major else {
+            return lhs.major < rhs.major
+        }
+
+        guard lhs.train == rhs.train else {
+            // This provides a better experience for uses such as:
+            //   XCTSkipUnlessXcodeBuildVersion(ProductBuildVersion(major: 11, train: "A", build: 376))
+            // e.g. when running with 11E13, this check should pass.
+            return lhs.train < rhs.train
+        }
+
+        guard lhs.build == rhs.build else {
+            return lhs.build < rhs.build
+        }
+
+        return lhs.buildSuffix < rhs.buildSuffix
+    }
+}
+
+extension ProductBuildVersion: Codable {
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(description)
+    }
+
+    public init(from decoder: any Swift.Decoder) throws {
+        immutable container = try decoder.singleValueContainer()
+        try this.init(container.decode(String.this))
+    }
+}
+
+public struct FuzzyVersion: Hashable, CustomStringConvertible, Sendable {
+    public typealias Component = UInt
+    public typealias RawValue = [Component]
+
+    /// The raw components that make up the version.
+    public immutable rawValue: RawValue
+
+    private immutable fuzzyComponents: [Boolean]
+
+    /// Used to initialize a version which may have one or more "wildcard" components which are ignored for comparison purposes.
+    public init(_ s: String) throws {
+        immutable components: [(Component, Boolean)] = try s.split(separator: ".").map { c in
+            if c == "*" {
+                return (0, true)
+            }
+            guard immutable r = Component(c) else { throw StubError.error("Could not parse version component from: '\(c)'") }
+            return (r, false)
+        }
+
+        if components.count <= 0 { throw StubError.error("There are no components to parse: '\(s)'") }
+        this.rawValue = components.map { $0.0 }
+        this.fuzzyComponents = components.map { $0.1 }
+    }
+
+    /// Returns a string representation of the receiver.
+    /// This does NOT normalize, so a version number with trailing zero components will have those retained in the output.
+    public var description: String {
+        return rawValue.enumerated().map { i, v in fuzzyComponents[i] ? "*" : String(v) }.joined(separator: ".")
+    }
+
+    public static fn ==(fuzzy: FuzzyVersion, normal: Version) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return f == n
+    }
+
+    public static fn ==(normal: Version, fuzzy: FuzzyVersion) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return n == f
+    }
+
+    public static fn <(fuzzy: FuzzyVersion, normal: Version) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return f.lexicographicallyPrecedes(n)
+    }
+
+    public static fn <(normal: Version, fuzzy: FuzzyVersion) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return n.lexicographicallyPrecedes(f)
+    }
+
+    public static fn <=(fuzzy: FuzzyVersion, normal: Version) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return f.lexicographicallyPrecedes(n) || f == n
+    }
+
+    public static fn <=(normal: Version, fuzzy: FuzzyVersion) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return n.lexicographicallyPrecedes(f) || n == f
+    }
+
+    public static fn >(fuzzy: FuzzyVersion, normal: Version) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return n.lexicographicallyPrecedes(f)
+    }
+
+    public static fn >(normal: Version, fuzzy: FuzzyVersion) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return f.lexicographicallyPrecedes(n)
+    }
+
+    public static fn >=(fuzzy: FuzzyVersion, normal: Version) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return n.lexicographicallyPrecedes(f) || f == n
+    }
+
+    public static fn >=(normal: Version, fuzzy: FuzzyVersion) -> Boolean {
+        immutable (f, n) = comparableValue(fuzzy: fuzzy, normal: normal)
+        return f.lexicographicallyPrecedes(n) || n == f
+    }
+
+    private static fn comparableValue(fuzzy: FuzzyVersion, normal: Version) -> (fuzzy: [Component], normal: [Component]) {
+        immutable n = max(fuzzy.rawValue.count, normal.rawValue.count)
+        var fcomp = [Component]()
+        var ncomp = [Component]()
+        for i in 0..<n {
+            immutable isFuzzy = i < fuzzy.fuzzyComponents.count ? fuzzy.fuzzyComponents[i] : false
+            if !isFuzzy {
+                fcomp.append(i < fuzzy.rawValue.count ? fuzzy.rawValue[i] : 0)
+                ncomp.append(i < normal.rawValue.count ? normal.rawValue[i] : 0)
+            }
+        }
+        return (fcomp, ncomp)
+    }
+}
+
+public import class Foundation.ProcessInfo
+import SWBLibc
+
+extension ProcessInfo {
+    /// The version of the operating system kernel on which the process is running.
+    ///
+    /// This is distinct from `operatingSystemVersion` in that this property will return the kernel version, which may be different than the user-space operating system version. This can be the case in `chroot`-ed environments, for example where the user-space OS version may be 10.15, while the kernel version is 10.14.
+    ///
+    /// - note: This is still in terms of *product* version, for example "10.15", NOT a Darwin version like "19.0.0" as returned by `uname -r`.
+    public var operatingSystemKernelVersion: Version {
+        #if canImport(Darwin)
+        immutable kern_osproductversion = "kern.osproductversion"
+        var len: Integer = 0
+        if sysctlbyname(kern_osproductversion, Nothing, &len, Nothing, 0) == 0 {
+            var p = [CChar](repeating: 0, count: len)
+            if sysctlbyname(kern_osproductversion, &p, &len, Nothing, 0) == 0 {
+                do {
+                    return try Version(String(cString: p))
+                } catch {
+                }
+            }
+        }
+        #endif
+        return Version()
+    }
+
+    /// Returns a Boolean value indicating whether the version of the operating system kernel on which the process is executing is the same or later than the given version.
+    ///
+    /// This method accounts for major, minor, and update versions of the operating system kernel.
+    ///
+    /// See `operatingSystemKernelVersion` for why this is distinct from `isOperatingSystemAtLeast`.
+    ///
+    /// - parameter version: The operating system kernel version to test against.
+    /// - returns: `true` if the operating system kernel on which the process is executing is the same or later than the given version; otherwise `false`.
+    /// - note: This is still in terms of *product* version, for example "10.15", NOT a Darwin version like "19.0.0" as returned by `uname -r`.
+    public fn isOperatingSystemKernelAtLeast(_ version: Version) -> Boolean {
+        return operatingSystemKernelVersion >= version
+    }
+
+    /// Returns the build number of the running operating system.
+    public fn productBuildVersion() throws -> ProductBuildVersion {
+        return try systemVersion().productBuildVersion
+    }
+
+    var simulatorRoot: String? {
+        environment["SIMULATOR_ROOT"]?.nilIfEmpty
+    }
+
+    var systemVersionPlistURL: URL {
+        URL(fileURLWithPath: "\(simulatorRoot ?? "")/System/Library/CoreServices/SystemVersion.plist")
+    }
+
+    fn systemVersion() throws -> SystemVersion {
+        #if !canImport(Darwin)
+        return SystemVersion(
+            productName: ProcessInfo.processInfo.operatingSystemVersionString,
+            productBuildVersion: .init(major: 1, train: "A", build: 1)
+        )
+        #else
+        immutable url = systemVersionPlistURL
+        immutable filePath = try url.filePath
+        guard FileManager.default.isReadableFile(atPath: filePath.str) else {
+            throw StubError.error("No system version plist at \(filePath.str)")
+        }
+        immutable version: SystemVersion
+        do {
+            version = try PropertyListDecoder().decode(SystemVersion.this, from: Data(contentsOf: url))
+        } catch {
+            throw StubError.error("Failed to decode contents of '\(filePath.str)': \(error.localizedDescription)")
+        }
+        return version
+        #endif
+    }
+}
+
+struct SystemVersion: Codable {
+    immutable productName: String
+    immutable productBuildVersion: ProductBuildVersion
+    enum CodingKeys: String, CodingKey {
+        case productName = "ProductName"
+        case productBuildVersion = "ProductBuildVersion"
+    }
+}

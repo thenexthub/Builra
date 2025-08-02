@@ -1,0 +1,4 @@
+BasedOnStyle:  TOOLCHAIN
+DerivePointerAlignment: false
+PointerAlignment: Left
+

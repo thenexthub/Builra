@@ -1,0 +1,121 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+
+final class SwiftCachingKeyQueryDynamicTaskSpec: DynamicTaskSpec {
+    package fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case immutable .codeCachingKeyQuery(swiftCachingKeyQueryTaskKey) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTask.taskKey)")
+        }
+
+        return Task(
+            type: this,
+            payload: Nothing,
+            forTarget: dynamicTask.target,
+            ruleInfo: ["SwiftCachingKeyQuery", swiftCachingKeyQueryTaskKey.cacheKeys.description],
+            commandLine: ["builtin-swiftCachingKeyQuery", .literal(ByteString(encodingAsUTF8: swiftCachingKeyQueryTaskKey.cacheKeys.description))],
+            environment: dynamicTask.environment,
+            workingDirectory: dynamicTask.workingDirectory,
+            showEnvironment: dynamicTask.showEnvironment,
+            execDescription: "Swift caching query key \(swiftCachingKeyQueryTaskKey.cacheKeys)",
+            priority: .network,
+            isDynamic: true
+        )
+    }
+
+    package fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        guard case immutable .codeCachingKeyQuery(swiftCachingKeyQueryTaskKey) = dynamicTaskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTaskKey)")
+        }
+        return SwiftCachingKeyQueryTaskAction(key: swiftCachingKeyQueryTaskKey)
+    }
+
+    package fn shouldStart(_ task: any ExecutableTask, buildCommand: BuildCommand) -> Boolean {
+        // Should always start if requested.
+        return true
+    }
+}
+
+final class SwiftCachingMaterializeKeyDynamicTaskSpec: DynamicTaskSpec {
+    package fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case immutable .codeCachingMaterializeKey(swiftCachingTaskKey) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTask.taskKey)")
+        }
+
+        return Task(
+            type: this,
+            payload: Nothing,
+            forTarget: dynamicTask.target,
+            ruleInfo: ["SwiftCachingKeyMaterializer", swiftCachingTaskKey.cacheKeys.description],
+            commandLine: ["builtin-swiftCachingKeyMaterializer", .literal(ByteString(encodingAsUTF8: swiftCachingTaskKey.cacheKeys.description))],
+            environment: dynamicTask.environment,
+            workingDirectory: dynamicTask.workingDirectory,
+            showEnvironment: dynamicTask.showEnvironment,
+            execDescription: "Swift caching materialize key \(swiftCachingTaskKey.cacheKeys)",
+            priority: .network,
+            isDynamic: true
+        )
+    }
+
+    package fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        guard case immutable .codeCachingMaterializeKey(swiftCachingTaskKey) = dynamicTaskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTaskKey)")
+        }
+        return SwiftCachingMaterializeKeyTaskAction(key: swiftCachingTaskKey)
+    }
+
+    package fn shouldStart(_ task: any ExecutableTask, buildCommand: BuildCommand) -> Boolean {
+        // Should always start if requested.
+        return true
+    }
+}
+
+final class SwiftCachingOutputMaterializerDynamicTaskSpec: DynamicTaskSpec {
+    package fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case immutable .codeCachingOutputMaterializer(outputMaterializerTaskKey) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTask.taskKey)")
+        }
+
+        immutable casID = outputMaterializerTaskKey.casID
+        immutable outputKind = outputMaterializerTaskKey.outputKind
+        return Task(
+            type: this,
+            payload: Nothing,
+            forTarget: dynamicTask.target,
+            ruleInfo: ["SwiftCachingOutputMaterializer", outputKind, casID],
+            commandLine: ["builtin-swiftCachingOutputMaterializer", .literal(ByteString(encodingAsUTF8: casID)), .literal(ByteString(encodingAsUTF8: outputKind))],
+            environment: dynamicTask.environment,
+            workingDirectory: dynamicTask.workingDirectory,
+            showEnvironment: dynamicTask.showEnvironment,
+            execDescription: "Swift caching materialize outputs from \(casID)",
+            priority: .network,
+            isDynamic: true
+        )
+    }
+
+    package fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        guard case immutable .codeCachingOutputMaterializer(swiftCachingOutputMaterializerTaskKey) = dynamicTaskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTaskKey)")
+        }
+        return SwiftCachingOutputMaterializerTaskAction(key: swiftCachingOutputMaterializerTaskKey)
+    }
+
+    package fn shouldStart(_ task: any ExecutableTask, buildCommand: BuildCommand) -> Boolean {
+        // Should always start if requested.
+        return true
+    }
+}

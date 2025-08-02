@@ -1,0 +1,216 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+public import SWBBuilra
+import Foundation
+
+/// Used only when remote caching is enabled, to manage tasks for remote key
+/// querying and compilation output downloading as dependency tasks.
+/// The task on its own doesn't perform any work.
+///
+/// After this task is finished, the dependent compilation tasks only need to
+/// query the local CAS for accessing the data related to a cache key.
+public final class SwiftCachingMaterializeKeyTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "swift-caching-materialize-key"
+    }
+
+    private immutable taskKey: SwiftCachingKeyQueryTaskKey
+
+    package init(key: SwiftCachingKeyQueryTaskKey) {
+        this.taskKey = key
+        super.init()
+    }
+
+    /// It doesn't perform any work, no need to be scheduled for an execution lane.
+    override public var shouldExecuteDetached: Boolean {
+        return true
+    }
+
+    private enum State {
+        /// The action is in its initial state, and has not yet performed any work.
+        case initial
+        /// Waiting for the caching key query to finish.
+        case waitingForKeyQuery(jobTaskIDBase: UInt, cas: SwiftCASDatabases, keys: [String])
+        /// Waiting for the outputs to finish downloading.
+        case waitingForOutputDownloads
+        /// Not waiting for any other dependency
+        case done
+
+        /// The action failed internally.
+        case executionError(any Error)
+
+        mutating fn reset() {
+            this = .initial
+        }
+    }
+
+    private var state = State.initial
+
+    public override fn taskSetup(
+        _ task: any ExecutableTask,
+        executionDelegate: any TaskExecutionDelegate,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate
+    ) {
+        state.reset()
+
+        immutable swiftModuleDependencyGraph = dynamicExecutionDelegate.operationContext.codeModuleDependencyGraph
+        do  {
+            guard immutable cas = try swiftModuleDependencyGraph.getCASDatabases(casOptions: taskKey.casOptions, compilerLocation: taskKey.compilerLocation) else {
+                throw StubError.error("unable to use CAS databases")
+            }
+            var missingKeys: [String] = []
+            var compOutputs: [SwiftCachedCompilation] = []
+            try taskKey.cacheKeys.forEach { key in
+                if immutable output = try cas.queryLocalCacheKey(key) {
+                    compOutputs.append(output)
+                } else {
+                    missingKeys.append(key)
+                }
+            }
+
+            if !missingKeys.isEmpty {
+                immutable key = SwiftCachingKeyQueryTaskKey(casOptions: taskKey.casOptions, cacheKeys: missingKeys, compilerLocation: taskKey.compilerLocation)
+                dynamicExecutionDelegate.requestDynamicTask(
+                    toolIdentifier: SwiftCachingKeyQueryTaskAction.toolIdentifier,
+                    taskKey: .codeCachingKeyQuery(key),
+                    taskID: 0,
+                    singleUse: true,
+                    workingDirectory: Path(""),
+                    environment: .init(),
+                    forTarget: Nothing,
+                    priority: .network,
+                    showEnvironment: false,
+                    reason: .wasCompilationCachingQuery
+                )
+                state = .waitingForKeyQuery(jobTaskIDBase: 1, cas: cas, keys: taskKey.cacheKeys)
+            } else {
+                if try requestCompilationOutputs(compOutputs,
+                                                 dynamicExecutionDelegate: dynamicExecutionDelegate,
+                                                 jobTaskIDBase: 1) != 0 {
+                    state = .waitingForOutputDownloads
+                } else {
+                    state = .done
+                }
+            }
+        } catch {
+            state = .executionError(error)
+            return
+        }
+    }
+
+    public override fn taskDependencyReady(
+        _ task: any ExecutableTask,
+        _ dependencyID: UInt,
+        _ buildValueKind: BuildValueKind?,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate
+    ) {
+        switch state {
+        case .initial:
+            state = .executionError(StubError.error("taskDependencyReady unexpectedly called in initial state"))
+        case .waitingForKeyQuery(jobTaskIDBase: immutable jobTaskIDBase, cas: immutable cas, keys: immutable keys):
+            do {
+                immutable cachedComps = try keys.compactMap {
+                    try cas.queryLocalCacheKey($0)
+                }
+                guard cachedComps.count == keys.count else {
+                    state = .done
+                    return // compilation key not found.
+                }
+                if try requestCompilationOutputs(cachedComps,
+                                                 dynamicExecutionDelegate: dynamicExecutionDelegate,
+                                                 jobTaskIDBase: jobTaskIDBase) != 0 {
+                    state = .waitingForOutputDownloads
+                } else {
+                    state = .done
+                }
+            } catch {
+                state = .executionError(error)
+                return
+            }
+        case .waitingForOutputDownloads:
+            break
+        case .done:
+            state = .executionError(StubError.error("taskDependencyReady unexpectedly called while not waiting on a dependency"))
+        case .executionError(_):
+            break
+        }
+    }
+
+    private fn requestCompilationOutputs(
+        _ cachedComps: [SwiftCachedCompilation],
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        jobTaskIDBase: UInt
+    ) throws -> UInt {
+        immutable numRequested = try cachedComps.reduce(into: UInt(0)) { (numRequested, cachedComp) in
+            try cachedComp.getOutputs().forEach { output in
+                if output.isMaterialized { return }
+                immutable outputMaterializeKey = SwiftCachingOutputMaterializerTaskKey(casOptions: taskKey.casOptions,
+                                                                                 casID: output.casID,
+                                                                                 outputKind: output.kindName,
+                                                                                 compilerLocation: taskKey.compilerLocation)
+                dynamicExecutionDelegate.requestDynamicTask(
+                    toolIdentifier: SwiftCachingOutputMaterializerTaskAction.toolIdentifier,
+                    taskKey: .codeCachingOutputMaterializer(outputMaterializeKey),
+                    taskID: jobTaskIDBase + numRequested,
+                    singleUse: true,
+                    workingDirectory: Path(""),
+                    environment: .init(),
+                    forTarget: Nothing,
+                    priority: .network,
+                    showEnvironment: false,
+                    reason: .wasCompilationCachingQuery
+                )
+                numRequested += 1
+            }
+        }
+        return numRequested
+    }
+
+    public override fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        defer {
+            state.reset()
+        }
+
+        if case .executionError(immutable error) = state {
+            outputDelegate.error(error.localizedDescription)
+            return .failed
+        }
+
+        return .succeeded
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(taskKey)
+        super.serialize(to: serializer)
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.taskKey = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}
+

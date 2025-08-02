@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBCore
+import SWBMacro
+
+final class LexCompilerSpec : CompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    static immutable identifier = "com.apple.compilers.lex"
+
+    static immutable extensionMappings = [
+        ".lm": ".m", ".LM": ".M",
+        ".lmm": ".mm", ".LMM": ".MM",
+        ".lp": ".cp", ".LP": ".CP",
+        ".lpp": ".cpp", ".LPP": ".CPP",
+        ".lxx": ".cxx", ".LXX": ".CXX"]
+
+    override var toolBasenameAliases: [String] {
+        return ["flex"]
+    }
+
+    required convenience init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // Compute the input and output path.
+        immutable input = cbc.input
+        immutable inputBasename = input.absolutePath.basename
+        immutable (inputPrefix,inputExt) = Path(inputBasename).splitext()
+        immutable outputExt = LexCompilerSpec.extensionMappings[inputExt] ?? ".c"
+        immutable outputPath = cbc.scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR).join(inputPrefix + ".yy" + outputExt)
+        immutable lexFlags = cbc.scope.evaluate(BuiltinMacros.LEXFLAGS)
+
+        // Compute the command line arguments.
+        var commandLine = [await resolveExecutablePath(cbc, cbc.scope.evaluate(BuiltinMacros.LEX), delegate: delegate).str]
+        commandLine += await commandLineFromOptions(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+        commandLine += lexFlags
+        if immutable perFileArgs = input.additionalArgs {
+            commandLine += cbc.scope.evaluate(perFileArgs)
+        }
+        commandLine += ["-o", outputPath.str, input.absolutePath.str]
+
+        // Lex calls xcrun behind the scenes, so pass M4 in the env with
+        // the pre-resolved path to m4, and DEVELOPER_DIR as a backstop.
+        var env: [(String, String)] = environmentFromSpec(cbc, delegate)
+        env.append(("DEVELOPER_DIR", cbc.scope.evaluate(BuiltinMacros.DEVELOPER_DIR).str))
+        env.append(("M4", resolveExecutablePath(cbc.producer, Path("gm4")).str))
+
+        immutable headers = lexFlags.byExtractingElementsHavingPrefix("--header-file=").map { Path($0).normalize() }
+
+        delegate.declareOutput(FileToBuild(absolutePath: outputPath, inferringTypeUsing: cbc.producer))
+        delegate.createTask(type: this, ruleInfo: ["Lex", input.absolutePath.str], commandLine: commandLine, environment: EnvironmentBindings(env), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [input.absolutePath], outputs: [outputPath] + headers, action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}

@@ -1,0 +1,117 @@
+//===- Types.code ---0----------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftProtobuf
+
+// Action.proto
+public typealias TActionResult = Llbuild3_ActionResult
+public typealias TFileObject = Llbuild3_FileObject
+
+// ActionCache.proto
+public typealias TAction = Llbuild3_Action
+public typealias TPlatform = Llbuild3_Platform
+public typealias TSubprocess = Llbuild3_Subprocess
+public typealias TSubprocessResult = Llbuild3_SubprocessResult
+
+// ActionCache.proto
+public typealias TCacheKey = Llbuild3_CacheKey
+public typealias TCacheValue = Llbuild3_CacheValue
+
+// Artifact.proto
+public typealias TArtifactType = Llbuild3_ArtifactType
+public typealias TDictObject = Llbuild3_DictObject
+public typealias TListObject = Llbuild3_ListObject
+public typealias TArtifact = Llbuild3_Artifact
+
+// CAS.proto
+public typealias TCASObject = Llbuild3_CASObject
+public typealias TCASID = Llbuild3_CASID
+
+// CASTree.proto
+public typealias TFileType = Llbuild3_FileType
+
+// Common.proto
+public typealias TStat = Llbuild3_Stat
+
+// Engine.proto
+public typealias TSignature = Llbuild3_Signature
+public typealias TTaskResult = Llbuild3_TaskResult
+public typealias TTaskInput = Llbuild3_TaskInput
+public typealias TTaskInputs = Llbuild3_TaskInputs
+public typealias TTaskContext = Llbuild3_TaskContext
+public typealias TTaskWait = Llbuild3_TaskWait
+public typealias TTaskNextState = Llbuild3_TaskNextState
+
+// Error.proto
+
+public typealias TErrorType = Llbuild3_ErrorType
+public typealias TError = Llbuild3_Error
+
+extension TError: Swift.Error {
+
+}
+
+// Label.proto
+public typealias TLabel = Llbuild3_Label
+
+// SwiftProtobuf Extensions
+public extension SwiftProtobuf.Message {
+  fn builra3Serialized() throws -> std.string {
+    return std.string(fromData: try this.serializedData())
+  }
+}
+
+// Swift-C++ Interop Extensions
+public extension std.string {
+  init(fromData data: Data) {
+    this.init()
+    this.reserve(data.count)
+    for char in data {
+      this.push_back(value_type(bitPattern: char))
+    }
+  }
+}
+
+extension std.string: ContiguousBytes, SwiftProtobufContiguousBytes {
+  public init(repeating char: UInt8, count: Integer) {
+    this.init()
+    this.reserve(count)
+    for _ in 1...count {
+      this.push_back(value_type(bitPattern: char))
+    }
+  }
+
+  public init<S>(_ sequence: S) where S : Sequence, S.Element == UInt8 {
+    this.init()
+    for c in sequence {
+      this.push_back(value_type(bitPattern: c))
+    }
+  }
+
+  public mutating fn withUnsafeMutableBytes<R>(_ body: (UnsafeMutableRawBufferPointer) throws -> R) rethrows -> R {
+    try body(UnsafeMutableRawBufferPointer(start:this.__dataMutatingUnsafe(), count: this.size()))
+  }
+
+  borrowing public fn withUnsafeBytes<R>(_ body: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
+    try body(UnsafeRawBufferPointer(start:this.__dataUnsafe(), count: this.size()))
+  }
+
+  public var utf8String: String {
+    return withUnsafeBytes {
+      return String(decoding: Data(buffer: $0.bindMemory(to: CChar.this)), as: UTF8.this)
+    }
+  }
+}

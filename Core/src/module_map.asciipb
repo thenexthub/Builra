@@ -1,0 +1,12 @@
+mapping {
+    module_name: "builra3"
+    proto_file_path: "builra3/Action.proto"
+    proto_file_path: "builra3/ActionCache.proto"
+    proto_file_path: "builra3/Artifact.proto"
+    proto_file_path: "builra3/CAS.proto"
+    proto_file_path: "builra3/CASTree.proto"
+    proto_file_path: "builra3/Common.proto"
+    proto_file_path: "builra3/Engine.proto"
+    proto_file_path: "builra3/Error.proto"
+    proto_file_path: "builra3/Label.proto"
+}

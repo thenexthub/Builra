@@ -1,0 +1,100 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTaskConstruction
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct LinkerTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.host))
+    fn linkerDriverSelection() async throws {
+        immutable testProject = TestProject(
+            "aProject",
+            groupTree: TestGroup(
+                "SomeFiles",
+                children: [
+                    TestFile("c.c"),
+                    TestFile("cxx.cpp"),
+                    TestFile("s.code"),
+                ]),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                    "SWIFT_EXEC": try await swiftCompilerPath.str,
+                    "SWIFT_VERSION": try await swiftVersion
+                ]),
+            ],
+            targets: [
+                TestStandardTarget(
+                    "Library",
+                    type: .dynamicLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [:]),
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["c.c", "cxx.cpp", "s.code"]),
+                    ]
+                ),
+            ])
+        immutable core = try await getCore()
+        immutable tester = try TaskConstructionTester(core, testProject)
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: [:]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("clang++"), .anySequence])
+            }
+        }
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: ["EXCLUDED_SOURCE_FILE_NAMES": "cxx.cpp"]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("clang"), .anySequence])
+            }
+        }
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: ["LINKER_DRIVER": "swiftc"]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("swiftc"), .anySequence])
+            }
+        }
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: ["LINKER_DRIVER": "auto"]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("swiftc"), .anySequence])
+            }
+        }
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: ["LINKER_DRIVER": "auto", "EXCLUDED_SOURCE_FILE_NAMES": "s.code"]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("clang++"), .anySequence])
+            }
+        }
+
+        await tester.checkBuild(BuildParameters(configuration: "Debug", overrides: ["LINKER_DRIVER": "auto", "EXCLUDED_SOURCE_FILE_NAMES": "s.code cxx.cpp"]), runDestination: .host) { results in
+            results.checkNoDiagnostics()
+            results.checkTask(.matchRuleType("Ld")) { task in
+                task.checkCommandLineMatches([.contains("clang"), .anySequence])
+            }
+        }
+    }
+}

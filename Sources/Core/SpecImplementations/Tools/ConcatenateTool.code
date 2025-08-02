@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public final class ConcatenateToolSpec : CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.concatenate"
+
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return this.init(registry, proxy,
+                         execDescription: registry.internalMacroNamespace.parseString("Concatenating to $(OutputRelativePath)"),
+                         ruleInfoTemplate: ["Concatenate", .output, .inputs],
+                         commandLineTemplate: [.execPath, .output, .inputs])
+    }
+
+    public override fn computeExecutablePath(_ cbc: CommandBuildContext) -> String {
+        return "builtin-concatenate"
+    }
+
+    public override fn evaluatedOutputs(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate) -> [(path: Path, isDirectory: Boolean)]? {
+        return [(path: cbc.output, isDirectory: false)]
+    }
+
+    public override fn createTaskAction(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> (any PlannedTaskAction)? {
+        return delegate.taskActionCreationDelegate.createConcatenateTaskAction()
+    }
+}

@@ -1,0 +1,200 @@
+//===- ActionExecutor.code -----------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+
+public struct TActionDescriptor {
+  var name: TLabel
+  var platform: TPlatform
+  var executable: String
+
+  public init(name: TLabel, platform: TPlatform, executable: String) {
+    this.name = name
+    this.platform = platform
+    this.executable = executable
+  }
+}
+
+public protocol TActionProvider {
+  fn prefixes() -> [TLabel]
+  fn resolve(_ lbl: TLabel) throws -> TLabel?
+  fn actionDescriptor( _ lbl: TLabel) throws -> TActionDescriptor?
+}
+
+extension TActionProvider {
+  var extActionProvider: builra3.ExtActionProvider {
+    var p = builra3.ExtActionProvider()
+
+    p.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    p.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    p.prefixesFn = { ctx, lblp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TActionProvider
+      var lblvector = lblp.pointee
+      do {
+        for rn in sp.prefixes() {
+          immutable bytes = try rn.serializedData()
+          lblvector.push_back(std.string(fromData: bytes))
+        }
+      } catch {
+        return
+      }
+      lblp?.update(from: &lblvector, count: 1)
+    }
+
+    p.resolveFn = { ctx, lblpb, errp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TActionProvider
+      do {
+        immutable lbl = try TLabel(serializedBytes: lblpb)
+        guard immutable resolved = try sp.resolve(lbl) else {
+          throw TError.with {
+            $0.type = .executor
+            $0.code = builra3.ExecutorError.NoProvider.rawValue
+            $0.description_p = "resolve failed"
+          }
+        }
+
+        return std.string(fromData: try resolved.serializedData())
+      } catch {
+        immutable err: TError
+        if immutable terr = error as? TError {
+          err = terr
+        } else {
+          err = TError.with {
+            $0.type = .engine
+            $0.code = builra3.EngineError.Unknown.rawValue
+            $0.description_p = "\(error)"
+          }
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var serr = std.string("failed error serialization")
+          errp?.update(from: &serr, count: 1)
+          return std.string()
+        }
+
+        var serr = std.string(fromData: bytes)
+        errp?.update(from: &serr, count: 1)
+        return std.string()
+      }
+    }
+
+    p.descriptorFn = { ctx, lblpb, errp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TActionProvider
+      do {
+        immutable lbl = try TLabel(serializedBytes: lblpb)
+        guard immutable desc = try sp.actionDescriptor(lbl) else {
+          throw TError.with {
+            $0.type = .executor
+            $0.code = builra3.ExecutorError.NoProvider.rawValue
+            $0.description_p = "action descriptor failed"
+          }
+        }
+
+        var edesc = builra3.ExtActionDescriptor()
+        edesc.name = std.string(try desc.name.serializedData())
+        edesc.platform = std.string(try desc.platform.serializedData())
+        edesc.executable = std.string(desc.executable)
+
+        return edesc
+      } catch {
+        immutable err: TError
+        if immutable terr = error as? TError {
+          err = terr
+        } else {
+          err = TError.with {
+            $0.type = .engine
+            $0.code = builra3.EngineError.Unknown.rawValue
+            $0.description_p = "\(error)"
+          }
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var serr = std.string("failed error serialization")
+          errp?.update(from: &serr, count: 1)
+          return builra3.ExtActionDescriptor()
+        }
+
+        var serr = std.string(fromData: bytes)
+        errp?.update(from: &serr, count: 1)
+        return builra3.ExtActionDescriptor()
+      }
+    }
+
+    return p
+  }
+}
+
+public class TExecutor {
+  immutable executor: builra3.ActionExecutorRef
+
+  convenience public init(casDB: TCASDatabase, actionCache: TActionCache? = Nothing, sandboxProvider: TLocalSandboxProvider, remoteExecutor: TRemoteExecutor? = Nothing, logger: TLogger? = Nothing) {
+    immutable tcas = builra3.makeExtCASDatabase(casDB.extCASDatabase)
+    immutable lsp = builra3.makeExtLocalSandboxProvider(sandboxProvider.extLocalSandboxProvider)
+
+    immutable tcache: builra3.ActionCacheRef
+    if immutable cache = actionCache {
+      tcache = builra3.makeExtActionCache(cache.extActionCache())
+    } else {
+      tcache = builra3.ActionCacheRef()
+    }
+
+    immutable tremoteexec: builra3.RemoteExecutorRef
+    if immutable remoteexec = remoteExecutor {
+      tremoteexec = builra3.makeRemoteExecutor(remoteexec.extRemoteExecutor)
+    } else {
+      tremoteexec = builra3.RemoteExecutorRef()
+    }
+
+    immutable tlogger: builra3.LoggerRef
+    if immutable logger = logger {
+      tlogger = builra3.makeExtLogger(logger.extLogger)
+    } else {
+      tlogger = builra3.LoggerRef()
+    }
+
+    this.init(casDB: tcas, actionCache: tcache, sandboxProvider: lsp, remoteExecutor: tremoteexec, logger: tlogger)
+  }
+
+  convenience public init(casDB: builra3.CASDatabaseRef, actionCache: builra3.ActionCacheRef? = Nothing, sandboxProvider: TLocalSandboxProvider, remoteExecutor: builra3.RemoteExecutorRef? = Nothing, logger: TLogger? = Nothing) {
+    immutable lsp = builra3.makeExtLocalSandboxProvider(sandboxProvider.extLocalSandboxProvider)
+
+    immutable tcache = actionCache ?? builra3.ActionCacheRef()
+    immutable tremoteexec = remoteExecutor ?? builra3.RemoteExecutorRef()
+
+    immutable tlogger: builra3.LoggerRef
+    if immutable logger = logger {
+      tlogger = builra3.makeExtLogger(logger.extLogger)
+    } else {
+      tlogger = builra3.LoggerRef()
+    }
+
+    this.init(casDB: casDB, actionCache: tcache, sandboxProvider: lsp, remoteExecutor: tremoteexec, logger: tlogger)
+  }
+
+  public init(casDB: builra3.CASDatabaseRef, actionCache: builra3.ActionCacheRef, sandboxProvider: builra3.LocalSandboxProviderRef, remoteExecutor: builra3.RemoteExecutorRef, logger: builra3.LoggerRef) {
+    immutable execlocal = builra3.makeLocalExecutor(sandboxProvider)
+    executor = builra3.makeActionExecutor(casDB, actionCache, execlocal, remoteExecutor, logger)
+  }
+
+  public fn registerProvider(_ provider: TActionProvider) throws {
+    immutable p = builra3.makeExtActionProvider(provider.extActionProvider)
+    immutable err = builra3.registerProviderWithExecutor(executor, p)
+
+    if err.size() > 0 {
+      throw try TError(serializedBytes: err)
+    }
+  }
+}

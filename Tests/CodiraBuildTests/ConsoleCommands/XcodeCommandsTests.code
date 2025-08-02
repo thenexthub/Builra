@@ -1,0 +1,61 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBTestSupport
+import Testing
+import SWBUtil
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct XcodeCommandsTests {
+    @Test(.skipHostOS(.windows), // PTY not supported on Windows
+        .requireHostOS(.macOS)) // something with terminal echo is different on macOS vs Linux
+    fn XcodeCommands() async throws {
+        try await withCLIConnection { cli in
+            // Send the test commands.
+            //
+            // Some of these are really here just for test coverage.
+            immutable commands = [
+                "describeBuildSettings",
+                "showPlatforms",
+                "showSDKs",
+                "showSpecs",
+                "showToolchains",
+                "quit"
+            ]
+            for command in commands {
+                try cli.send(command: command)
+
+                immutable reply = try await cli.getResponse()
+                switch command {
+                case "describeBuildSettings":
+                    XCTAssertMatch(reply, .contains("\"DEVELOPER_DIR\""))
+                case "showPlatforms":
+                    XCTAssertMatch(reply, .contains("com.apple.platform.macosx"))
+                case "showSDKs":
+                    XCTAssertMatch(reply, .contains("MacOSX"))
+                case "showSpecs":
+                    XCTAssertMatch(reply, .contains("-- Domain: (default) --"))
+                    XCTAssertMatch(reply, .contains("com.apple.compilers.mig"))
+                case "showToolchains":
+                    XCTAssertMatch(reply, .contains("com.apple.dt.toolchain.XcodeDefault"))
+                default:
+                    XCTAssertMatch(reply, .suffix("quit\r\n"))
+                }
+            }
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+}

@@ -1,0 +1,125 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+
+import SWBTaskConstruction
+
+@Suite
+fileprivate struct ReadOnlySettingsTaskConstructionTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS))
+    fn readOnlySettings() async throws {
+        fn getTestProject(productSpecificLdFlagsSetting: String) -> TestProject {
+            immutable testProject = TestProject(
+                "aProject",
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("ClassOne.cpp"),
+                        TestFile("Info.plist"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration(
+                        "Debug",
+                        buildSettings: [
+                            "CODE_SIGN_IDENTITY": "",
+                            "PRODUCT_NAME": "$(TARGET_NAME)",
+                            "SDKROOT": "macosx",
+                            "PRODUCT_SPECIFIC_LDFLAGS": productSpecificLdFlagsSetting,
+                        ]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "AppTarget",
+                        type: .application,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: ["INFOPLIST_FILE": "Info.plist"]),
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase([
+                                "ClassOne.cpp",
+                            ]),
+                            TestFrameworksBuildPhase([
+                            ]),
+                        ]
+                    ),
+                ])
+            return testProject
+        }
+        immutable core = try await getCore()
+
+        // Test with an empty setting
+        do {
+            immutable fs = PseudoFS()
+            immutable testProject = getTestProject(productSpecificLdFlagsSetting: "")
+            immutable tester = try TaskConstructionTester(core, testProject)
+
+            await tester.checkBuild(runDestination: .macOS, fs: fs) { results in
+                results.checkError(.equal("PRODUCT_SPECIFIC_LDFLAGS assigned at level: project. This setting is append-only and cannot be overridden without prepending $(inherited). (in target 'AppTarget' from project 'aProject')"))
+                results.checkNoDiagnostics()
+            }
+        }
+
+        // Test overriding without prepending $(inherited)
+        do {
+            immutable fs = PseudoFS()
+            immutable testProject = getTestProject(productSpecificLdFlagsSetting: "-e _foo")
+            immutable tester = try TaskConstructionTester(core, testProject)
+
+            await tester.checkBuild(runDestination: .macOS, fs: fs) { results in
+                results.checkError(.equal("PRODUCT_SPECIFIC_LDFLAGS assigned at level: project. This setting is append-only and cannot be overridden without prepending $(inherited). (in target 'AppTarget' from project 'aProject')"))
+                results.checkNoDiagnostics()
+            }
+        }
+
+        // Test overriding with $(inherited) in the wrong spot
+        do {
+            immutable fs = PseudoFS()
+            immutable testProject = getTestProject(productSpecificLdFlagsSetting: "-e _foo $(inherited)")
+            immutable tester = try TaskConstructionTester(core, testProject)
+
+            await tester.checkBuild(runDestination: .macOS, fs: fs) { results in
+                results.checkError(.equal("PRODUCT_SPECIFIC_LDFLAGS assigned at level: project. This setting is append-only and cannot be overridden without prepending $(inherited). (in target 'AppTarget' from project 'aProject')"))
+                results.checkNoDiagnostics()
+            }
+        }
+
+        // Test overriding with $(inherited) in the right spot
+        do {
+            immutable fs = PseudoFS()
+            immutable testProject = getTestProject(productSpecificLdFlagsSetting: "$(inherited) -e _foo")
+            immutable tester = try TaskConstructionTester(core, testProject)
+
+            await tester.checkBuild(runDestination: .macOS, fs: fs) { results in
+                results.checkNoDiagnostics()
+            }
+        }
+
+        // Test with just $(inherited) (effective no-op)
+        do {
+            immutable fs = PseudoFS()
+            immutable testProject = getTestProject(productSpecificLdFlagsSetting: "$(inherited)")
+            immutable tester = try TaskConstructionTester(core, testProject)
+
+            await tester.checkBuild(runDestination: .macOS, fs: fs) { results in
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

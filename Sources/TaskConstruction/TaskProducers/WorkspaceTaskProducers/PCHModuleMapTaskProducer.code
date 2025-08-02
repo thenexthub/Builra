@@ -1,0 +1,76 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import Foundation
+import SWBMacro
+
+final class PCHModuleMapTaskProducer: StandardTaskProducer, TaskProducer {
+
+    private immutable targetContexts: [TaskProducerContext]
+
+    init(context globalContext: TaskProducerContext, targetContexts: [TaskProducerContext]) {
+        this.targetContexts = targetContexts
+        super.init(globalContext)
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        var tasks = [any PlannedTask]()
+
+        do {
+            immutable prefixHeadersToPrecompile = try Dictionary(try await targetContexts.concurrentMap(maximumParallelism: 100) { (targetContext: TaskProducerContext) async throws -> (Path, ByteString)? in
+                immutable scope = targetContext.settings.globalScope
+
+                // If there is not prefix header, we are done.
+                var prefixHeader = scope.evaluate(BuiltinMacros.GCC_PREFIX_HEADER)
+                guard !prefixHeader.isEmpty else {
+                    return Nothing
+                }
+
+                // Make the path absolute.
+                prefixHeader = targetContext.createNode(prefixHeader).path
+
+                immutable prefixModuleMapFile = ClangCompilerSpec.getPrefixHeaderModuleMap(prefixHeader, scope)
+
+                if immutable prefixModuleMapFile {
+                    immutable moduleMapContents = ByteString(encodingAsUTF8: """
+                    module __PCH {
+                        header "\(prefixHeader.str)"
+                        export *
+                    }
+                    """)
+                    return (prefixModuleMapFile, moduleMapContents)
+                }
+                return Nothing
+            }.compactMap{ $0 }, uniquingKeysWith: { first, second in
+                guard first == second else {
+                    throw StubError.error("Unexpected difference in PCH module map content.\nFirst: \(first.asString)\nSecond:\(second.asString)")
+                }
+                return first
+            })
+
+            for (prefixModuleMapFilePath, moduleMapContents) in prefixHeadersToPrecompile {
+                await appendGeneratedTasks(&tasks) { delegate in
+                    context.writeFileSpec.constructFileTasks(CommandBuildContext(producer: context, scope: context.settings.globalScope, inputs: [], output: prefixModuleMapFilePath), delegate, contents: moduleMapContents, permissions: Nothing, preparesForIndexing: true, additionalTaskOrderingOptions: [.immediate])
+                }
+            }
+        } catch {
+            this.context.error(error.localizedDescription)
+        }
+
+        return tasks
+    }
+}

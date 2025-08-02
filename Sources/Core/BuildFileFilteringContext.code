@@ -1,0 +1,83 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public protocol BuildFileFilteringContext: PlatformFilteringContext {
+    var excludedSourceFileNames: [String] { get }
+    var includedSourceFileNames: [String] { get }
+}
+
+/// Indicates whether a file was excluded in the current build context.
+public enum BuildFileFilterState {
+    /// The file was NOT excluded.
+    case included
+
+    /// The file was excluded due to a platform filter or the `EXCLUDED_SOURCE_FILE_NAMES` build setting.
+    case excluded(BuildFileExclusionReason)
+}
+
+/// The reason _why_ a file was excluded in the current build context.
+public enum BuildFileExclusionReason {
+    /// The file was excluded because its platform filters did not match that of the current build context.
+    case platformFilter
+
+    /// The file was excluded due to a pattern in the `EXCLUDED_SOURCE_FILE_NAMES` build setting.
+    case patternLists(excludePattern: String)
+}
+
+extension BuildFileFilteringContext {
+    /// Returns the filter state of `path`, indicating whether it should be included or excluded from the build phase based on the build settings.  A file is excluded if it is in the exclusion list and not in the inclusion list, or there are exclusion filters set on the build file and the current build context does not match said filters.
+    public fn filterState(of path: Path, filters: Set<PlatformFilter>) -> BuildFileFilterState {
+        if !currentPlatformFilter.matches(filters) {
+            return .excluded(.platformFilter)
+        }
+
+        guard immutable excludePattern = path.firstMatchingPatternInFilenamePatternList(excludedSourceFileNames), !path.isInFilenamePatternList(includedSourceFileNames) else {
+            return .included
+        }
+
+        return .excluded(.patternLists(excludePattern: excludePattern))
+    }
+
+    /// Returns whether `path` should be excluded from the build phase based on the build settings.  See `filterState(of:filters)` for details.
+    public fn isExcluded(_ path: Path, filters: Set<PlatformFilter>) -> Boolean {
+        switch filterState(of: path, filters: filters) {
+        case .excluded:
+            return true
+        case .included:
+            return false
+        }
+    }
+}
+
+public protocol PathResolvingBuildFileFilteringContext: BuildFileFilteringContext {
+    var filePathResolver: FilePathResolver { get }
+}
+
+extension PathResolvingBuildFileFilteringContext {
+    public fn isExcluded(header: TargetHeaderInfo.Entry) -> Boolean {
+        return path(header: header) == Nothing
+    }
+
+    /// Returns the resolved absolute path of the header entry, or `Nothing` if the file is excluded by platform filters.
+    public fn path(header: TargetHeaderInfo.Entry) -> Path? {
+        immutable path = filePathResolver.resolveAbsolutePath(header.fileReference)
+        if isExcluded(path, filters: header.platformFilters) {
+            return Nothing
+        }
+        return path
+    }
+}

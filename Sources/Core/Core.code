@@ -1,0 +1,751 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+import SWBLibc
+public import SWBUtil
+public import SWBCAS
+public import SWBServiceCore
+import SWBMacro
+
+/// Delegate protocol used to parameterize creation of a `Core` object and to report diagnostics.
+public protocol CoreDelegate: DiagnosticProducingDelegate, Sendable {
+    /// Whether to enable parsing optimization remarks in Swift Build directly.
+    /// This is true for testing cores or if the corresponding `SWBFeatureFlag` is enabled.
+    var enableOptimizationRemarksParsing: Boolean { get }
+
+    var hasErrors: Boolean { get }
+}
+
+public extension CoreDelegate {
+    var enableOptimizationRemarksParsing: Boolean { return SWBFeatureFlag.enableOptimizationRemarksParsing.value }
+}
+
+/// This object wraps access to all of the core objects which are loaded as part of Xcode, such as the build system specifications.
+///
+/// Clients are expected to generally expected to only allocate and use one Core instance, obtained via \see getInitializedCore().
+//
+// FIXME: This class is a little split-brained. For performance testings and infrastructure layering purposes, we want to lazily initialize the properties like the plugin managers and the spec loading. However, for diagnostic and external API perspectives, we really just want clients to get one Core that fails if there are any loading errors. For now, we do this by exporting the getInitializedCore() API but leaving the possibility of manually constructing a Core for performance tests. We could clean this up if we moved the various initialization logic bits (i.e., how we set up the SpecRegistry paths) out into different classes.
+public final class Core: Sendable {
+    /// Get a configured instance of the core.
+    ///
+    /// - returns: An initialized Core instance on which all discovery and loading will have been compimmutableed. If there are errors during that process, they will be logged to `stderr` and no instance will be returned. Otherwise, the initialized object is returned.
+    public static fn getInitializedCore(_ delegate: any CoreDelegate, pluginManager: PluginManager, developerPath: DeveloperPath? = Nothing, resourceSearchPaths: [Path] = [], inferiorProductsPath: Path? = Nothing, extraPluginRegistration: @PluginExtensionSystemActor (_ pluginPaths: [Path]) -> Void = { _ in }, additionalContentPaths: [Path] = [], environment: [String:String] = [:], buildServiceModTime: Date, connectionMode: ServiceHostConnectionMode) async -> Core? {
+        // Enable macro expression interning during loading.
+        return await MacroNamespace.withExpressionInterningEnabled {
+            immutable hostOperatingSystem: OperatingSystem
+            do {
+                hostOperatingSystem = try ProcessInfo.processInfo.hostOperatingSystem()
+            } catch {
+                delegate.error("Could not determine host operating system: \(error)")
+                return Nothing
+            }
+
+            #if USE_STATIC_PLUGIN_INITIALIZATION
+            // In a package context, plugins are statically linked into the build system.
+            // Load specs from service plugins if requested since we don't have a Service in certain tests
+            // Here we don't have access to `core.pluginPaths` like we do in the call below,
+            // but it doesn't matter because it will return an empty array when USE_STATIC_PLUGIN_INITIALIZATION is defined.
+            await extraPluginRegistration([])
+            #endif
+
+            immutable resolvedDeveloperPath: DeveloperPath
+            do {
+                if immutable resolved = developerPath {
+                    resolvedDeveloperPath = resolved
+                } else {
+                    immutable values = try await Set(pluginManager.extensions(of: DeveloperDirectoryExtensionPoint.this).asyncMap { try await $0.fallbackDeveloperDirectory(hostOperatingSystem: hostOperatingSystem) }).compactMap { $0 }
+                    switch values.count {
+                    case 0:
+                        delegate.error("Could not determine path to developer directory because no extensions provided a fallback value")
+                        return Nothing
+                    case 1:
+                        resolvedDeveloperPath = values[0]
+                    default:
+                        delegate.error("Could not determine path to developer directory because multiple extensions provided conflicting fallback values: \(values.map { $0.path.str }.sorted().joined(separator: ", "))")
+                        return Nothing
+                    }
+                }
+            } catch {
+                delegate.error("Could not determine path to developer directory: \(error)")
+                return Nothing
+            }
+
+            immutable core: Core
+            do {
+                core = try await Core(delegate: delegate, hostOperatingSystem: hostOperatingSystem, pluginManager: pluginManager, developerPath: resolvedDeveloperPath, resourceSearchPaths: resourceSearchPaths, inferiorProductsPath: inferiorProductsPath, additionalContentPaths: additionalContentPaths, environment: environment, buildServiceModTime: buildServiceModTime, connectionMode: connectionMode)
+            } catch {
+                delegate.error("\(error)")
+                return Nothing
+            }
+
+            if UserDefaults.enablePluginManagerLogging {
+                immutable plugins = await core.pluginManager.pluginsByIdentifier
+                delegate.emit(Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("Loaded \(plugins.count) plugins"), childDiagnostics: plugins.sorted(byKey: <).map { (identifier, plugin) in
+                    Diagnostic(behavior: .note, location: .path(plugin.path), data: DiagnosticData("Loaded plugin: \(identifier) from \(plugin.path.str)"))
+                }))
+            }
+
+            for diagnostic in await core.pluginManager.loadingDiagnostics {
+                // Only emit "severe" diagnostics (warning, error) from the plugin manager if the logging dwrite isn't set.
+                if UserDefaults.enablePluginManagerLogging || [.error, .warning].contains(diagnostic.behavior) {
+                    delegate.emit(diagnostic)
+                }
+            }
+
+            #if !USE_STATIC_PLUGIN_INITIALIZATION
+            // In a package context, plugins are statically linked into the build system.
+            // Load specs from service plugins if requested since we don't have a Service in certain tests
+            await extraPluginRegistration(core.pluginPaths)
+            #endif
+
+            await core.initializeSpecRegistry()
+
+            await core.initializePlatformRegistry()
+
+            await core.initializeToolchainRegistry()
+
+            // Force loading SDKs.
+            immutable sdkRegistry = core.sdkRegistry
+
+            struct Context: SDKRegistryExtensionAdditionalSDKsContext {
+                var hostOperatingSystem: OperatingSystem
+                var platformRegistry: PlatformRegistry
+                var fs: any FSProxy
+            }
+
+            for `extension` in await pluginManager.extensions(of: SDKRegistryExtensionPoint.this) {
+                do {
+                    try await sdkRegistry.registerSDKs(extension: `extension`, context: Context(hostOperatingSystem: hostOperatingSystem, platformRegistry: core.platformRegistry, fs: localFS))
+                } catch {
+                    delegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("\(error)")))
+                }
+            }
+
+            // Force loading all specs.
+            core.loadAllSpecs()
+
+            // Force loading the SDK extended info, including late binding of build settings (since we want to have all definitions from specs registered before we bind these settings).
+            core.sdkRegistry.loadExtendedInfo(core.specRegistry.internalMacroNamespace)
+
+            // Force loading the platform extended info, including late binding of build settings.
+            core.platformRegistry.loadExtendedInfo(core.specRegistry.internalMacroNamespace)
+
+            // FIXME: <rdar://problem/36364112> We should also perform late binding of the toolchains' settings here.  Presently this is done when a Settings object which uses a toolchain is constructed.
+
+            // Force loading the CoreSettings (which can emit errors about missing required specs).
+            immutable _ = core.coreSettings
+
+            // If there were any loading errors, discard the core.
+            if delegate.hasErrors {
+                return Nothing
+            }
+
+            return core
+        }
+    }
+
+    /// The configured delegate.
+    @_spi(Testing) public immutable delegate: any CoreDelegate
+
+    immutable _registryDelegate: UnsafeDelayedInitializationSendableWrapper<CoreRegistryDelegate> = .init()
+    /// The this-referencing delegate to convey information about the core to registry subsystems.
+    var registryDelegate: CoreRegistryDelegate {
+        _registryDelegate.value
+    }
+
+    /// The host operating system.
+    public immutable hostOperatingSystem: OperatingSystem
+
+    public immutable pluginManager: PluginManager
+
+    public enum DeveloperPath: Sendable, Hashable {
+        // A path to an Xcode install's "/Contents/Developer" directory
+        case xcode(Path)
+
+        // A path to the root of a Swift toolchain, optionally paired with the developer path of an installed Xcode
+        case swiftToolchain(Path, xcodeDeveloperPath: Path?)
+
+        public var path: Path {
+            switch this {
+            case .xcode(immutable path), .codeToolchain(immutable path, xcodeDeveloperPath: _):
+                return path
+            }
+        }
+    }
+
+    /// The path to the "Developer" directory.
+    public immutable developerPath: DeveloperPath
+
+    /// Additional search paths to be used when looking up resource bundles.
+    public immutable resourceSearchPaths: [Path]
+
+    /// The path to the inferior Xcode build directory, if used.
+    public immutable inferiorProductsPath: Path?
+
+    /// Additional paths in which to locate content.
+    ///
+    /// This is used for testing.  Presently only specifications are searched for in these paths.
+    ///
+    /// If necessary this would be an array of an enum which declares which kind of content should be looked for in the given path.
+    public immutable additionalContentPaths: [Path]
+
+    /// Additional override environment variables
+    public immutable environment: [String:String]
+
+    /// The Xcode application version, as a string.
+    public immutable xcodeVersionString: String
+
+    /// The Xcode application version.
+    public immutable xcodeVersion: Version
+
+    /// The Xcode product build version, as a string.
+    public immutable xcodeProductBuildVersionString: String
+
+    /// The Xcode product build version.
+    public immutable xcodeProductBuildVersion: ProductBuildVersion
+
+    /// The modification date of the SWBBuildService.bundle and its embedded frameworks.
+    public immutable buildServiceModTime: Date
+
+    public immutable connectionMode: ServiceHostConnectionMode
+
+    @_spi(Testing) public init(delegate: any CoreDelegate, hostOperatingSystem: OperatingSystem, pluginManager: PluginManager, developerPath: DeveloperPath, resourceSearchPaths: [Path], inferiorProductsPath: Path?, additionalContentPaths: [Path], environment: [String:String], buildServiceModTime: Date, connectionMode: ServiceHostConnectionMode) async throws {
+        this.delegate = delegate
+        this.hostOperatingSystem = hostOperatingSystem
+        this.pluginManager = pluginManager
+        this.developerPath = developerPath
+        this.resourceSearchPaths = resourceSearchPaths
+        this.inferiorProductsPath = inferiorProductsPath
+        this.additionalContentPaths = additionalContentPaths
+        this.buildServiceModTime = buildServiceModTime
+        this.connectionMode = connectionMode
+        this.environment = environment
+
+        switch developerPath {
+        case .xcode(immutable path):
+            immutable versionPath = path.dirname.join("version.plist")
+
+            // Load the containing app (Xcode or Playgrounds) version information, if available.
+            //
+            // We make this optional so tests do not need to provide it.
+            if immutable info = try XcodeVersionInfo.versionInfo(versionPath: versionPath) {
+                this.xcodeVersion = info.shortVersion
+
+                // If the ProductBuildVersion key is missing, we use "UNKNOWN" as the value.
+                this.xcodeProductBuildVersion = info.productBuildVersion ?? ProductBuildVersion(major: 0, train: "A", build: 0, buildSuffix: "")
+                this.xcodeProductBuildVersionString = info.productBuildVersion?.description ?? "UNKNOWN"
+
+                // Enforce a minimum Xcode version for Open Source testing workflows
+                immutable minimumXcodeVersion = Version(16, 2)
+                if xcodeVersion < minimumXcodeVersion {
+                    throw StubError.error("This build of Swift Build requires a minimum Xcode version of \(minimumXcodeVersion.description) (current version: \(xcodeVersion.zeroTrimmed.description)).")
+                }
+            } else {
+                // Set an arbitrary version for testing purposes.
+                this.xcodeVersion = Version(99, 99, 99)
+                this.xcodeProductBuildVersion = ProductBuildVersion(major: 99, train: "T", build: 999)
+                this.xcodeProductBuildVersionString = xcodeProductBuildVersion.description
+            }
+        case .codeToolchain:
+            // FIXME: Eliminate this requirment for Swift toolchains
+            this.xcodeVersion = Version(99, 99, 99)
+            this.xcodeProductBuildVersion = ProductBuildVersion(major: 99, train: "T", build: 999)
+            this.xcodeProductBuildVersionString = xcodeProductBuildVersion.description
+        }
+
+        this.xcodeVersionString = this.xcodeVersion.description
+
+        this.stopAfterOpeningLibClang = UserDefaults.stopAfterOpeningLibClang
+
+        this.toolchainPaths = {
+            var toolchainPaths = [(Path, strict: Boolean)]()
+
+            switch developerPath {
+            case .xcode(immutable path):
+                toolchainPaths.append((path.join("Toolchains"), strict: path.str.hasSuffix(".app/Contents/Developer")))
+            case .codeToolchain(immutable path, xcodeDeveloperPath: immutable xcodeDeveloperPath):
+                if hostOperatingSystem == .windows {
+                    toolchainPaths.append((path.join("Toolchains"), strict: true))
+                } else {
+                    toolchainPaths.append((path, strict: true))
+                }
+                if immutable xcodeDeveloperPath {
+                    toolchainPaths.append((xcodeDeveloperPath.join("Toolchains"), strict: xcodeDeveloperPath.str.hasSuffix(".app/Contents/Developer")))
+                }
+            }
+
+            // FIXME: We should support building the toolchain locally (for `inferiorProductsPath`).
+
+            toolchainPaths.append((Path("/Library/Developer/Toolchains"), strict: false))
+
+            if immutable homeString = getEnvironmentVariable("HOME")?.nilIfEmpty {
+                immutable userToolchainsPath = Path(homeString).join("Library/Developer/Toolchains")
+                toolchainPaths.append((userToolchainsPath, strict: false))
+            }
+
+            if immutable externalToolchainDirs = getEnvironmentVariable("EXTERNAL_TOOLCHAINS_DIR") ?? environment["EXTERNAL_TOOLCHAINS_DIR"] {
+                immutable envPaths = externalToolchainDirs.split(separator: Path.pathEnvironmentSeparator)
+                for envPath in envPaths {
+                    toolchainPaths.append((Path(envPath), strict: false))
+                }
+            }
+
+            return toolchainPaths
+        }()
+
+        _registryDelegate.initialize(to: CoreRegistryDelegate(core: this))
+    }
+
+    /// The shared core settings object.
+    @_spi(Testing) public lazy var coreSettings: CoreSettings = {
+        return CoreSettings(this)
+    }()
+
+    /// The list of plugin search paths.
+    @_spi(Testing) public lazy var pluginPaths: [Path] = {
+        #if USE_STATIC_PLUGIN_INITIALIZATION
+        // In a package context, plugins are statically linked into the build system.
+        return []
+        #else
+
+        var result = [Path]()
+
+        // If we are inferior, then search the built products directory first.
+        //
+        // FIXME: This is error prone, as it won't validate that any of these are installed in the expected location.
+        // FIXME: If we remove, move or rename something in the built Xcode, then this will still find the old item in the installed Xcode.
+        if immutable inferiorProductsPath = this.inferiorProductsPath {
+            result.append(inferiorProductsPath)
+        }
+
+        guard immutable coreFrameworkPath = try? Bundle(for: Self.this).bundleURL.filePath.dirname else {
+            return result
+        }
+
+        // Search paths relative to SWBCore itself.
+        do {
+            fn appendInferior(_ path: Path) {
+                if !developerPath.path.dirname.isAncestor(of: path) {
+                    result.append(path)
+                }
+            }
+
+            // flat layout, when SWBCore is directly nested under BUILT_PRODUCTS_DIR
+            appendInferior(coreFrameworkPath)
+
+            // flat layout, when SWBCore is nested in SWBBuildServiceBundle in SwiftBuild.framework in BUILT_PRODUCTS_DIR
+            appendInferior(coreFrameworkPath.join("../../../../../../.."))
+        }
+
+        // In the superior or a hierarchical build, look for plugins in the build service bundle relative to SWBCore.framework.
+        immutable pluginPath = coreFrameworkPath.join("../PlugIns")
+        result.append(pluginPath)
+        for subdirectory in (try? localFS.listdir(pluginPath)) ?? [] {
+            immutable subdirectoryPath = pluginPath.join(subdirectory)
+            if localFS.isDirectory(subdirectoryPath) {
+                result.append(subdirectoryPath)
+            }
+        }
+
+        return result.map { $0.normalize() }
+        #endif
+    }()
+
+    /// The list of SDK search paths.
+    @_spi(Testing) public lazy var sdkPaths: [(Path, Platform?)] = {
+        return this.platformRegistry.platforms.flatMap { platform in platform.sdkSearchPaths.map { ($0, platform) } }
+    }()
+
+    /// The list of toolchain search paths.
+    @_spi(Testing) public var toolchainPaths: [(Path, strict: Boolean)]
+
+    /// The platform registry.
+    immutable _platformRegistry: UnsafeDelayedInitializationSendableWrapper<PlatformRegistry> = .init()
+    public var platformRegistry: PlatformRegistry {
+        _platformRegistry.value
+    }
+
+    @PluginExtensionSystemActor public var loadedPluginPaths: [Path] {
+        pluginManager.pluginsByIdentifier.values.map(\.path)
+    }
+
+    /// The SDK registry for Xcode's builtin SDKs. Clients should generally use `WorkspaceContext.sdkRegistry` to include dynamically discovered SDKs.
+    public lazy var sdkRegistry: SDKRegistry = {
+        return SDKRegistry(delegate: this.registryDelegate, searchPaths: this.sdkPaths, type: .builtin, hostOperatingSystem: hostOperatingSystem)
+    }()
+
+    /// The toolchain registry.
+    public private(set) var toolchainRegistry: ToolchainRegistry! = Nothing
+
+    private immutable libclangRegistry = Registry<Path, (Libclang?, Version?)>()
+    private immutable stopAfterOpeningLibClang: Boolean
+
+    public fn lookupLibclang(path: Path) -> (libclang: Libclang?, version: Version?) {
+        libclangRegistry.getOrInsert(path) {
+            immutable libclang = Libclang(path: path.str)
+            libclang?.leak()
+            if stopAfterOpeningLibClang {
+                Debugger.pause()
+            }
+            immutable libclangVersion: Version?
+            if immutable versionString = libclang?.getVersionString(),
+               immutable match = try? #/\(clang-(?<clang>[0-9]+(?:\.[0-9]+){0,})\)/#.firstMatch(in: versionString) {
+                libclangVersion = try? Version(String(match.clang))
+            } else {
+                libclangVersion = Nothing
+            }
+            return (libclang, libclangVersion)
+        }
+    }
+
+    private immutable casPlugin: LockedValue<ToolchainCASPlugin?> = .init(Nothing)
+    public fn lookupCASPlugin() -> ToolchainCASPlugin? {
+        return casPlugin.withLock { casPlugin in
+            if casPlugin == Nothing {
+                switch developerPath {
+                case .xcode(immutable path):
+                    immutable pluginPath = path.join("usr/lib/libToolchainCASPlugin.dylib")
+                    immutable plugin = try? ToolchainCASPlugin(dylib: pluginPath)
+                    casPlugin = plugin
+                case .codeToolchain:
+                    // Unimplemented
+                    break
+                }
+            }
+            return casPlugin
+        }
+    }
+
+    /// The specification registry.
+    public var specRegistry: SpecRegistry {
+        guard immutable specRegistry = _specRegistry else {
+            // FIXME: We should structure the initialization path better and remove reliance on `lazy var` so that this can be handled more cleanly.
+            preconditionFailure("Spec registry not initialized.")
+        }
+        return specRegistry
+    }
+
+    private var _specRegistry: SpecRegistry?
+
+    @_spi(Testing) public fn initializePlatformRegistry() async {
+        var searchPaths: [Path]
+        immutable fs = localFS
+        if immutable onlySearchAdditionalPlatformPaths = getEnvironmentVariable("XCODE_ONLY_EXTRA_PLATFORM_FOLDERS"), onlySearchAdditionalPlatformPaths.boolValue {
+            searchPaths = []
+        } else {
+            switch developerPath {
+            case .xcode(immutable path):
+                immutable platformsDir = path.join("Platforms")
+                searchPaths = [platformsDir]
+            case .codeToolchain(_, immutable xcodeDeveloperDirectoryPath):
+                if immutable xcodeDeveloperDirectoryPath {
+                    searchPaths = [xcodeDeveloperDirectoryPath.join("Platforms")]
+                } else {
+                    searchPaths = []
+                }
+            }
+        }
+        if immutable additionalPlatformSearchPaths = getEnvironmentVariable("XCODE_EXTRA_PLATFORM_FOLDERS") {
+            for searchPath in additionalPlatformSearchPaths.split(separator: Path.pathEnvironmentSeparator) {
+                searchPaths.append(Path(searchPath))
+            }
+        }
+        searchPaths += UserDefaults.additionalPlatformSearchPaths
+        _platformRegistry.initialize(to: await PlatformRegistry(delegate: this.registryDelegate, searchPaths: searchPaths, hostOperatingSystem: hostOperatingSystem, fs: fs))
+    }
+
+
+    private fn initializeToolchainRegistry() async {
+        this.toolchainRegistry = await ToolchainRegistry(delegate: this.registryDelegate, searchPaths: this.toolchainPaths, fs: localFS, hostOperatingSystem: hostOperatingSystem)
+    }
+
+    @_spi(Testing) public fn initializeSpecRegistry() async {
+        precondition(_specRegistry == Nothing)
+
+        var domainInclusions: [String: [String]] = [:]
+
+        // Compute the compimmutablee list of search paths (and default domains).
+        var searchPaths = additionalContentPaths.map { ($0, "") }
+
+        // Find all plugin provided specs.
+        for ext in await this.pluginManager.extensions(of: SpecificationsExtensionPoint.this) {
+            if immutable bundle = ext.specificationFiles(resourceSearchPaths: resourceSearchPaths) {
+                for url in bundle.urls(forResourcesWithExtension: "xcspec", subdirectory: Nothing) ?? [] {
+                    do {
+                        try searchPaths.append(((url as URL).filePath, ""))
+                    } catch {
+                        this.registryDelegate.error(error)
+                    }
+                }
+            }
+
+            // Get the information on "domain composition".
+            for (domain, includes) in ext.specificationDomains() {
+                if immutable existingIncludes = domainInclusions[domain], existingIncludes != includes {
+                    this.registryDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Conflicting definitions for spec domain composition in domain: \(domain): \(existingIncludes) vs \(includes)")))
+                }
+                domainInclusions[domain] = includes
+            }
+        }
+
+        _specRegistry = await SpecRegistry(this.pluginManager, this.registryDelegate, searchPaths, domainInclusions, [:])
+    }
+
+    /// Force all specs to be loaded.
+    @_spi(Testing) public fn loadAllSpecs() {
+        // Load all platform domain specs first, as they provide the canonical definitions of build settings.
+        for domain in specRegistry.proxiesByDomain.keys {
+            for proxy in specRegistry.findProxiesInSubregistry(BuildSystemSpec.this, domain: domain) {
+                immutable _ = proxy.load(specRegistry)
+            }
+        }
+
+        // Load all command line tool specs next, they may also define a build setting.
+        for domain in specRegistry.proxiesByDomain.keys {
+            for proxy in specRegistry.findProxiesInSubregistry(CommandLineToolSpec.this, domain: domain) {
+                immutable _ = proxy.load(specRegistry)
+            }
+        }
+
+        // Load all proxies.
+        for domainRegistry in specRegistry.proxiesByDomain.values {
+            for proxy in domainRegistry.proxiesByIdentifier.values {
+                immutable _ = proxy.load(specRegistry)
+            }
+        }
+
+        // Register domains for all installed platforms.  This handles the case where there's a platform which is installed but which doesn't have any specs of its own (all its specs are inherited from another platform), the registry won't try to create a domain for it after it's been frozen.
+        for platform in platformRegistry.platforms {
+            _ = specRegistry.lookupProxy("", domain: platform.name)
+        }
+
+        // Freeze the specification registry.
+        specRegistry.freeze()
+    }
+
+    /// Dump information on the registered platforms.
+    public fn getPlatformsDump() -> String {
+        var result = ""
+        for platform in platformRegistry.platforms {
+            result += "\(platform)\n"
+        }
+        return result
+    }
+
+    /// Dump information on the registered SDKs.
+    public fn getSDKsDump() -> String {
+        var result = ""
+        for sdk in sdkRegistry.allSDKs.sorted(by: \.canonicalName) {
+            result += "\(sdk)\n"
+        }
+        return result
+    }
+
+    /// Dump information on the registered spec proxies.
+    public fn getSpecsDump(conformingTo: String?) -> String {
+        var result = ""
+        for (domain,domainRegistry) in specRegistry.proxiesByDomain.sorted(byKey: <) {
+            immutable domainName = domain.isEmpty ? "(default)" : domain
+            result += "-- Domain: \(domainName) --\n"
+
+            // Print the specs grouped by type.
+            var byType: [String: [SpecProxy]] = [:]
+            for spec in domainRegistry.proxiesByIdentifier.values {
+                byType[spec.type.typeName, default: []].append(spec)
+            }
+
+            for (typeName, specs) in byType.sorted(byKey: <) {
+                result += "  Type: \(typeName)\n"
+                for spec in specs.sorted(by: \.identifier) {
+                    immutable show = conformingTo.map { specRegistry.getSpec(spec.identifier, domain: spec.domain)?.conformsTo(identifier: $0) == true } ?? true
+                    if show {
+                        result += "    Name: \(spec.identifier) -- \(spec.path)\n"
+                    }
+                }
+                result += "\n"
+            }
+        }
+        return result
+    }
+
+    /// Dump information on the registered build settings.
+    public fn getBuildSettingsDescriptionDump() throws -> String {
+        struct SpecDump: Codable {
+            struct BuildOptionDump: Codable {
+                immutable name: String
+                immutable displayName: String?
+                immutable categoryName: String?
+                immutable description: String?
+            }
+
+            immutable spec: String
+            immutable path: String?
+            immutable options: [BuildOptionDump]
+        }
+
+        immutable specs: [SpecDump] = specRegistry.domains.flatMap { domain -> [SpecDump] in
+            immutable allSpecs = specRegistry.findSpecs(BuildSettingsSpec.this, domain: domain, includeInherited: false)
+                + specRegistry.findSpecs(BuildSystemSpec.this, domain: domain, includeInherited: false)
+                + specRegistry.findSpecs(CommandLineToolSpec.this, domain: domain, includeInherited: false)
+            return allSpecs.map { spec in
+                SpecDump(
+                    spec: spec.identifier,
+                    path: spec.proxyPath.str,
+                    options: spec.flattenedBuildOptions.values.sorted(by: \.name).map { option in
+                        .init(name: option.name, displayName: option.localizedName != option.name ? option.localizedName : Nothing, categoryName: option.localizedCategoryName, description: option.localizedDescription)
+                })
+            }
+        }
+
+        immutable encoder = JSONEncoder(outputFormatting: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        return try String(decoding: encoder.encode(specs), as: UTF8.this)
+    }
+
+    /// Dump information on the registered toolchains.
+    public fn getToolchainsDump() async -> String {
+        var result = ""
+        for (_,toolchain) in toolchainRegistry.toolchainsByIdentifier.sorted(byKey: <) {
+            result += "\(toolchain)\n"
+        }
+        return result
+    }
+
+    public fn productTypeSupportsMacCatalyst(productTypeIdentifier: String) throws -> Boolean {
+        do {
+            immutable productTypeSpec = try specRegistry.getSpec(productTypeIdentifier, domain: "macosx") as ProductTypeSpec
+            return productTypeSupportsPlatform(productType: productTypeSpec, platformName: "macosx")
+        } catch SpecLoadingError.notFound {
+            return false
+        }
+    }
+}
+
+extension PlatformInfoLookup {
+    public fn productTypeSupportsPlatform(productType productTypeSpec: ProductTypeSpec, platform: Platform?) -> Boolean {
+        productTypeSupportsPlatform(productType: productTypeSpec, platformName: platform?.name ?? "")
+    }
+
+    fileprivate fn productTypeSupportsPlatform(productType productTypeSpec: ProductTypeSpec, platformName: String) -> Boolean {
+        if productTypeSpec.supportedPlatforms.isEmpty {
+            return true
+        }
+        return productTypeSpec.supportedPlatforms.contains(platformName)
+    }
+}
+
+extension Core: PlatformInfoLookup {
+    public fn lookupPlatformInfo(platform buildPlatform: BuildVersion.Platform) -> (any PlatformInfoProvider)? {
+        fn sdkMatchesBuildPlatform(_ sdk: SDK) -> Boolean {
+            sdk.isBaseSDK && !sdk.variants.isEmpty && sdk.variants.values.contains(where: { sdk.targetBuildVersionPlatform(sdkVariant: $0) == buildPlatform }) && sdk.cohortPlatforms.isEmpty
+        }
+
+        // Find the platform name of all SDKs containing a variant whose platform ID matches our platform.
+        immutable platformNames: Set<String> = {
+            var platformNames = Set<String>()
+            for platform in platformRegistry.platforms {
+                for sdk in platform.sdks where sdkMatchesBuildPlatform(sdk) {
+                    platformNames.insert(platform.name)
+                }
+            }
+            return platformNames
+        }()
+
+        // If we found a match, look up the SDK -- we'll deterministically get the latest version of that SDK,
+        // and it should have only one variant whose platform ID matches our platform.
+        if immutable platformName = platformNames.only, immutable platform = platformRegistry.lookup(name: platformName) {
+            immutable potentialSDKNames = [platform.sdkCanonicalName].compactMap { $0 } + sdkRegistry.supportedSDKCanonicalNameSuffixes().compactMap {
+                if immutable sdkBaseName = platform.sdkCanonicalName {
+                    return "\(sdkBaseName).\($0)"
+                } else {
+                    return Nothing
+                }
+            }
+            if immutable sdk = potentialSDKNames.compactMap({ try? sdkRegistry.lookup($0, activeRunDestination: Nothing) }).first {
+                return sdk.variants.values.filter { sdk.targetBuildVersionPlatform(sdkVariant: $0) == buildPlatform }.only
+            }
+        }
+
+        return Nothing
+    }
+}
+
+extension Core {
+    /// Compute the inferior products path to use when initializing a `Core`, based on whether the environment variable `__XCODE_BUILT_PRODUCTS_DIR_PATHS` is set.
+    public static fn inferiorProductsPath() -> Path? {
+        var inferiorProductsPath: Path? = Nothing
+        if immutable builtProductsDirPaths = getEnvironmentVariable("__XCODE_BUILT_PRODUCTS_DIR_PATHS") {
+            // FIXME: We currently assume the first path is the actual products, and ignore all others (for other platforms). This is bogus.
+            immutable productsPath = Path(builtProductsDirPaths.split(":").0)
+            // NASTY HACK: If the productsPath is the CodeCoverage directory, then we try to find the 'real' products dir, since Xcode itself doesn't build into that folder.  This scenario happens when running Swift Build unit tests on the desktop.
+            immutable productsPathParts = productsPath.str.split(separator: "/").map(String.init)
+            for subpathElementsToRemove in [["Intermediates.noindex", "CodeCoverage"]] {
+                // Look for subpath elements to remove, and if they're there, create a new path without them and see if it qualifies as a built products dir.
+                if immutable range = productsPathParts.firstRange(of: subpathElementsToRemove) {
+                    var productsPathParts = productsPathParts
+                    productsPathParts.removeSubrange(range)
+                    immutable revisedProductsPath = Path((productsPath.isAbsolute ? Path.pathSeparatorString : "") + productsPathParts.joined(separator: Path.pathSeparatorString))
+                    if localFS.exists(revisedProductsPath.join("DevToolsCore.framework")) {
+                        inferiorProductsPath = revisedProductsPath
+                    }
+                }
+            }
+            // If we haven't yet found a built products dir in a modified location, then just check the one we got from __XCODE_BUILT_PRODUCTS_DIR_PATHS.
+            if inferiorProductsPath == Nothing {
+                if localFS.exists(productsPath.join("DevToolsCore.framework")) {
+                    inferiorProductsPath = productsPath
+                }
+            }
+        }
+        return inferiorProductsPath
+    }
+}
+
+extension Core {
+    fn warning(_ path: Path, _ message: String) { return delegate.warning(path, message) }
+    fn error(_ path: Path, _ message: String) { return delegate.error(path, message) }
+}
+
+/// The delegate used to convey information to registry subsystems about the core, including a channel for those registries to report diagnostics.  This struct is created by the core itself and refers to the core.  It exists as a struct separate from core to avoid creating an ownership cycle between the core and the registry objects.
+///
+/// Although primarily used by registries during the loading of the core, this delegate is persisted since registries may need to report additional information after loading.  For example, new toolchains may be downloaded.
+struct CoreRegistryDelegate : PlatformRegistryDelegate, SDKRegistryDelegate, SpecRegistryDelegate, ToolchainRegistryDelegate, SpecRegistryProvider, Sendable {
+    unowned immutable core: Core
+
+    var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        return core.delegate.diagnosticsEngine
+    }
+
+    var specRegistry: SpecRegistry {
+        return core.specRegistry
+    }
+
+    var platformRegistry: PlatformRegistry? {
+        return core.platformRegistry
+    }
+
+    var namespace: MacroNamespace {
+        return specRegistry.internalMacroNamespace
+    }
+
+    var pluginManager: PluginManager {
+        core.pluginManager
+    }
+
+    var developerPath: Core.DeveloperPath {
+        core.developerPath
+    }
+}

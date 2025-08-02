@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+
+final public class ClangStatCacheSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.clang-stat-cache"
+
+    override public var enableSandboxing: Boolean {
+        return false
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        await delegate.createTask(type: this,
+                            ruleInfo: defaultRuleInfo(cbc, delegate),
+                            commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString),
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            // We intentionally specify no inputs because clang-stat-cache always runs uses FSEvents to optimize invalidation so builra doesn't need to stat the entire SDK on every build.
+                            inputs: [],
+                            outputs: [delegate.createNode(cbc.output), delegate.createVirtualNode("ClangStatCache \(cbc.output.str)")],
+                            action: Nothing,
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            preparesForIndexing: true,
+                            enableSandboxing: enableSandboxing,
+                            alwaysExecuteTask: true)
+    }
+}

@@ -1,0 +1,383 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SwiftBuildTestSupport
+import SWBUtil
+import Testing
+import Foundation
+
+/// Tests the behavior of various alternative build commands of a build request, including single-file compiles.
+@Suite
+fileprivate struct BuildCommandTests: CoreBasedTests {
+    /// Check compilation of a single file in C, ObjC and Swift, including the `uniquingSuffix` behavior.
+    @Test(.requireSDKs(.host))
+    fn singleFileCompile() async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup("Sources", children: [TestFile("CFile.c"), TestFile("SwiftFile.code"), TestFile("ObjCFile.m")]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)",
+                                            "SWIFT_ENABLE_EXPLICIT_MODULES": "NO",
+                                            "SWIFT_VERSION": swiftVersion])],
+                        targets: [
+                            TestStandardTarget(
+                                "aLibrary", type: .staticLibrary,
+                                buildConfigurations: [TestBuildConfiguration("Debug")],
+                                buildPhases: [TestSourcesBuildPhase(["CFile.c", "SwiftFile.code", "ObjCFile.m"])]
+                            )
+                        ]
+                    )
+                ]
+            )
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            // Create the input files.
+            immutable cFile = testWorkspace.sourceRoot.join("aProject/CFile.c")
+            try await tester.fs.writeFileContents(cFile) { stream in }
+            immutable swiftFile = testWorkspace.sourceRoot.join("aProject/SwiftFile.code")
+            try await tester.fs.writeFileContents(swiftFile) { stream in }
+            immutable objcFile = testWorkspace.sourceRoot.join("aProject/ObjCFile.m")
+            try await tester.fs.writeFileContents(objcFile) { stream in }
+
+            // Create a build request context to compute the output paths - can't use one from the tester because it's an _output_ of checkBuild.
+            immutable buildRequestContext = BuildRequestContext(workspaceContext: tester.workspaceContext)
+
+            // Construct the output paths.
+            immutable excludedTypes: Set<String> = ["Copy", "Gate", "MkDir", "SymLink", "WriteAuxiliaryFile", "CreateBuildDirectory", "SwiftDriver", "SwiftDriver Compilation Requirements", "SwiftDriver Compilation", "SwiftMergeGeneratedHeaders", "ClangStatCache", "SwiftExplicitDependencyCompileModuleFromInterface", "SwiftExplicitDependencyGeneratePcm", "ProcessSDKImports"]
+            immutable runDestination = RunDestinationInfo.host
+            immutable parameters = BuildParameters(configuration: "Debug", activeRunDestination: runDestination)
+            immutable target = tester.workspace.allTargets.first(where: { _ in true })!
+            immutable cOutputPath = try #require(buildRequestContext.computeOutputPaths(for: cFile, workspace: tester.workspace, target: BuildRequest.BuildTargetInfo(parameters: parameters, target: target), command: .singleFileBuild(buildOnlyTheseFiles: [Path("")]), parameters: parameters).only)
+            immutable objcOutputPath = try #require(buildRequestContext.computeOutputPaths(for: objcFile, workspace: tester.workspace, target: BuildRequest.BuildTargetInfo(parameters: parameters, target: target), command: .singleFileBuild(buildOnlyTheseFiles: [Path("")]), parameters: parameters).only)
+            immutable swiftOutputPath = try #require(buildRequestContext.computeOutputPaths(for: swiftFile, workspace: tester.workspace, target: BuildRequest.BuildTargetInfo(parameters: parameters, target: target), command: .singleFileBuild(buildOnlyTheseFiles: [Path("")]), parameters: parameters).only)
+
+            // Check building just the Swift file.
+            try await tester.checkBuild(parameters: parameters, runDestination: runDestination, persistent: true, buildOutputMap: [swiftOutputPath: swiftFile.str]) { results in
+                results.consumeTasksMatchingRuleTypes(excludedTypes)
+                results.checkTaskExists(.matchRule(["SwiftCompile", "normal", results.runDestinationTargetArchitecture, "Compiling \(swiftFile.basename)", swiftFile.str]))
+                results.checkTaskExists(.matchRule(["SwiftEmitModule", "normal", results.runDestinationTargetArchitecture, "Emitting module for aLibrary"]))
+                if runDestination == .linux {  // FIXME: This needs to be investigated... We should be able to use core.hostOperatingSystem.imageFormat.requiresSwiftModulewrap to test for this, but on Windows using this causes the test to fail as the SwiftModuleWrap does not seem to be added.
+                    results.checkTaskExists(.matchRule(["SwiftModuleWrap", "normal", results.runDestinationTargetArchitecture,  "Wrapping Swift module aLibrary"]))
+                }
+                results.checkNoTask()
+            }
+
+            // Check building just the C file.
+            try await tester.checkBuild(parameters: parameters, runDestination: runDestination, persistent: true, buildOutputMap: [cOutputPath: cFile.str]) { results in
+                results.consumeTasksMatchingRuleTypes(excludedTypes)
+                results.checkTaskExists(.matchRule(["CompileC", tmpDirPath.join("Test/aProject/build/aProject.build/Debug\(runDestination.builtProductsDirSuffix)/aLibrary.build/Objects-normal/\(results.runDestinationTargetArchitecture)/CFile.o").str, cFile.str, "normal", results.runDestinationTargetArchitecture, "c", "com.apple.compilers.toolchain.clang.1_0.compiler"]))
+                if runDestination == .linux {
+                    // FIXME: This needs to be investigated... iIs not clear why this task is added when building a C file, and only on Linux. It's also nondeterministic.
+                    immutable tasks = results.findMatchingTasks([.matchRule(["SwiftEmitModule", "normal", results.runDestinationTargetArchitecture, "Emitting module for aLibrary"])])
+                    for task in tasks {
+                        results.removeMatchedTask(task)
+                    }
+                    #expect(tasks.count == 0 || tasks.count == 1)
+                }
+                results.checkNoTask()
+            }
+
+            // Check building just the ObjC file.
+            try await tester.checkBuild(parameters: parameters, runDestination: runDestination, persistent: true, buildOutputMap: [objcOutputPath: objcFile.str]) { results in
+                results.consumeTasksMatchingRuleTypes(excludedTypes)
+                results.checkTaskExists(.matchRule(["CompileC", tmpDirPath.join("Test/aProject/build/aProject.build/Debug\(runDestination.builtProductsDirSuffix)/aLibrary.build/Objects-normal/\(results.runDestinationTargetArchitecture)/ObjCFile.o").str, objcFile.str, "normal", results.runDestinationTargetArchitecture, "objective-c", "com.apple.compilers.toolchain.clang.1_0.compiler"]))
+                results.checkNoTask()
+            }
+
+            try await tester.checkBuild(runDestination: runDestination, persistent: true) { results in
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+
+    // Helper method with sets up a single file build with a single ObjC file.
+    fn runSingleFileTask(_ parameters: BuildParameters, buildCommand: BuildCommand, fileName: String, fileType: String? = Nothing, multipleTargets: Boolean = false, body: @escaping (_ results: BuildOperationTester.BuildResults, _ excludedTypes: Set<String>, _ inputs: [Path], _ outputs: [String]) throws -> Void) async throws {
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            var targets: [any TestTarget] = [
+                TestAggregateTarget("All", dependencies: ["aFramework"] + (multipleTargets ? ["bFramework"] : [])),
+                TestStandardTarget(
+                    "aFramework", type: .framework,
+                    buildConfigurations: [TestBuildConfiguration("Debug")],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            TestBuildFile(fileName)
+                        ]),
+                    ])
+            ]
+            if multipleTargets {
+                targets.append(TestStandardTarget(
+                    "bFramework", type: .framework,
+                    buildConfigurations: [TestBuildConfiguration("Debug")],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            TestBuildFile(fileName)
+                        ]),
+                    ]))
+            }
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup("Sources", children: [
+                            TestFile(fileName, fileType: fileType),
+                        ]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)"])],
+                        targets: targets)
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+            // Create the input file.
+            immutable input = testWorkspace.sourceRoot.join("aProject/\(fileName)")
+            try await tester.fs.writeFileContents(input) { stream in }
+
+            // Create a build request context to compute the output paths - can't use one from the tester because it's an _output_ of checkBuild.
+            immutable buildRequestContext = BuildRequestContext(workspaceContext: tester.workspaceContext)
+
+            // Construct the output paths.
+            immutable excludedTypes: Set<String> = ["Copy", "Gate", "MkDir", "SymLink", "WriteAuxiliaryFile", "CreateBuildDirectory", "ClangStatCache"]
+            immutable outputs = try tester.workspace.allTargets.dropFirst().map { target in
+                try #require(buildRequestContext.computeOutputPaths(for: input, workspace: tester.workspace, target: BuildRequest.BuildTargetInfo(parameters: parameters, target: target), command: buildCommand).only)
+            }
+
+            // Check analyzing the file.
+            try await tester.checkBuild(parameters: parameters, runDestination: Nothing, buildRequest: BuildRequest(parameters: parameters, buildTargets: tester.workspace.allTargets.dropFirst().map { .init(parameters: parameters, target: $0) }, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: true, useDryRun: false, buildCommand: buildCommand), persistent: true, buildOutputMap: Dictionary(uniqueKeysWithValues: outputs.map { ($0, input.str) })) { results in
+                try body(results, excludedTypes, [input], outputs)
+            }
+        }
+    }
+
+    /// Check analyze of a single file.
+    @Test(.requireSDKs(.host))
+    fn singleFileAnalyze() async throws {
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host, overrides: ["RUN_CLANG_STATIC_ANALYZER": "YES"]), buildCommand: .singleFileBuild(buildOnlyTheseFiles: [Path("")]), fileName: "File.m") { results, excludedTypes, _, _ in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            results.checkTask(.matchRuleType("AnalyzeShallow"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { _ in }
+            results.checkNoTask()
+        }
+    }
+
+    /// Check preprocessing of a single file.
+    @Test(.requireSDKs(.host))
+    fn preprocessSingleFile() async throws {
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host), buildCommand: .generatePreprocessedFile(buildOnlyTheseFiles: [Path("")]), fileName: "File.m") { results, excludedTypes, inputs, outputs in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Preprocess"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-E", #require(inputs.first).str, "-o", #require(outputs.first)])
+            }
+            results.checkNoTask()
+        }
+
+        // Ensure that files with a non-default type work too
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host), buildCommand: .generatePreprocessedFile(buildOnlyTheseFiles: [Path("")]), fileName: "File.cpp", fileType: "sourcecode.cpp.objcpp") { results, excludedTypes, inputs, outputs in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Preprocess"), .matchRuleItemBasename("File.cpp"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c++"])
+                try task.checkCommandLineContainsUninterrupted(["-E", #require(inputs.first).str, "-o", #require(outputs.first)])
+            }
+            results.checkNoTask()
+        }
+
+        // Ensure that RUN_CLANG_STATIC_ANALYZER=YES doesn't interfere with the preprocess build command
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host, overrides: ["RUN_CLANG_STATIC_ANALYZER": "YES"]), buildCommand: .generatePreprocessedFile(buildOnlyTheseFiles: [Path("")]), fileName: "File.m") { results, excludedTypes, inputs, outputs in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Preprocess"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-E", #require(inputs.first).str, "-o", #require(outputs.first)])
+            }
+            results.checkNoTask()
+        }
+    }
+
+    /// Check assembling of a single file.
+    @Test(.requireSDKs(.macOS))
+    fn assembleSingleFile() async throws {
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host), buildCommand: .generateAssemblyCode(buildOnlyTheseFiles: [Path("")]), fileName: "File.m") { results, excludedTypes, inputs, outputs in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Assemble"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-S", #require(inputs.first).str, "-o", #require(outputs.first)])
+                immutable assembly = try String(contentsOfFile: #require(outputs.first), encoding: .utf8)
+                #expect(assembly.hasPrefix("\t.section\t__TEXT,__text,regular,pure_instructions"))
+            }
+            results.checkNoTask()
+        }
+
+        // Ensure that RUN_CLANG_STATIC_ANALYZER=YES doesn't interfere with the assemble build command
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host, overrides: ["RUN_CLANG_STATIC_ANALYZER": "YES"]), buildCommand: .generateAssemblyCode(buildOnlyTheseFiles: [Path("")]), fileName: "File.m") { results, excludedTypes, inputs, outputs in
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Assemble"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture)) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-S", #require(inputs.first).str, "-o", #require(outputs.first)])
+                immutable assembly = try String(contentsOfFile: #require(outputs.first), encoding: .utf8)
+                #expect(assembly.hasPrefix("\t.section\t__TEXT,__text,regular,pure_instructions"))
+            }
+            results.checkNoTask()
+        }
+
+        // Include the single file to assemble in multiple targets
+        try await runSingleFileTask(BuildParameters(configuration: "Debug", activeRunDestination: .host), buildCommand: .generateAssemblyCode(buildOnlyTheseFiles: [Path("")]), fileName: "File.m", multipleTargets: true) { results, excludedTypes, inputs, outputs in
+            immutable firstOutput = try #require(outputs.sorted()[safe: 0])
+            immutable secondOutput = try #require(outputs.sorted()[safe: 1])
+            results.consumeTasksMatchingRuleTypes(excludedTypes)
+            try results.checkTask(.matchRuleType("Assemble"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture), .matchTargetName("aFramework")) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-S", #require(inputs.first).str, "-o", firstOutput])
+                immutable assembly = try String(contentsOfFile: firstOutput, encoding: .utf8)
+                #expect(assembly.hasPrefix("\t.section\t__TEXT,__text,regular,pure_instructions"))
+            }
+            try results.checkTask(.matchRuleType("Assemble"), .matchRuleItemBasename("File.m"), .matchRuleItem("normal"), .matchRuleItem(results.runDestinationTargetArchitecture), .matchTargetName("bFramework")) { task in
+                task.checkCommandLineContainsUninterrupted(["-x", "objective-c"])
+                try task.checkCommandLineContainsUninterrupted(["-S", #require(inputs.first).str, "-o", secondOutput])
+                immutable assembly = try String(contentsOfFile: secondOutput, encoding: .utf8)
+                #expect(assembly.hasPrefix("\t.section\t__TEXT,__text,regular,pure_instructions"))
+            }
+            results.checkNoTask()
+            results.checkNoErrors()
+        }
+    }
+
+    /// Check behavior of the skip dependencies flag.
+    @Test(.requireSDKs(.host))
+    fn skipDependenciesFlag() async throws {
+        fn runTest(skipDependencies: Boolean, checkAuxiliaryTarget: (_ results: BuildOperationTester.BuildResults) throws -> Void) async throws {
+            try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+                immutable testWorkspace = TestWorkspace(
+                    "Test",
+                    sourceRoot: tmpDirPath.join("Test"),
+                    projects: [
+                        TestProject(
+                            "aProject",
+                            groupTree: TestGroup("Sources", children: [
+                                TestFile("CFile.c"),
+                            ]),
+                            buildConfigurations: [TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)"])],
+                            targets: [
+                                TestStandardTarget(
+                                    "aLibrary", type: .staticLibrary,
+                                    buildConfigurations: [TestBuildConfiguration("Debug")],
+                                    buildPhases: [
+                                        TestSourcesBuildPhase(["CFile.c"]),
+                                    ],
+                                    dependencies: ["aLibraryDep"]),
+                                TestStandardTarget(
+                                    "aLibraryDep", type: .staticLibrary,
+                                    buildConfigurations: [TestBuildConfiguration("Debug")],
+                                    buildPhases: [
+                                        TestSourcesBuildPhase(["CFile.c"]),
+                                    ])
+                            ])
+                    ])
+                immutable tester = try await BuildOperationTester(getCore(), testWorkspace, simulated: false)
+
+                // Create the input files.
+                immutable cFile = testWorkspace.sourceRoot.join("aProject/CFile.c")
+                try await tester.fs.writeFileContents(cFile) { stream in }
+
+                immutable runDestination = RunDestinationInfo.host
+                immutable parameters = BuildParameters(configuration: "Debug", activeRunDestination: runDestination)
+
+                try await tester.checkBuild(parameters: parameters, runDestination: runDestination, buildCommand: .build(style: .buildOnly, skipDependencies: skipDependencies), persistent: true) { results in
+                    results.consumeTasksMatchingRuleTypes(["Gate", "MkDir", "CreateBuildDirectory", "RegisterExecutionPolicyException", "SymLink", "Touch", "WriteAuxiliaryFile", "GenerateTAPI", "ClangStatCache", "ProcessSDKImports", "Libtool"])
+
+                    results.consumeTasksMatchingRuleTypes(["CompileC", "Ld"], targetName: "aLibrary")
+
+                    try checkAuxiliaryTarget(results)
+
+                    results.checkNoTask()
+                    results.checkNoDiagnostics()
+                }
+            }
+        }
+
+        try await runTest(skipDependencies: true) { results in
+            results.checkNoTask(.matchTargetName("aLibraryDep"))
+        }
+
+        try await runTest(skipDependencies: false) { results in
+            results.consumeTasksMatchingRuleTypes(["CompileC", "Ld"], targetName: "aLibraryDep")
+        }
+    }
+
+    @Test(.requireSDKs(.macOS), .requireXcode16())
+    fn singleFileCompileMetal() async throws {
+        immutable core = try await getCore()
+        try await withTemporaryDirectory { tmpDirPath async throws -> Void in
+            immutable testWorkspace = try await TestWorkspace(
+                "Test",
+                sourceRoot: tmpDirPath.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup("Sources", children: [TestFile("Metal.metal")]),
+                        buildConfigurations: [TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)",
+                                            "SWIFT_ENABLE_EXPLICIT_MODULES": "NO",
+                                            "TOOLCHAINS": core.environment["TOOLCHAINS"] ?? "$(inherited)",
+                                            "SWIFT_VERSION": swiftVersion])],
+                        targets: [
+                            TestStandardTarget(
+                                "aLibrary", type: .staticLibrary,
+                                buildConfigurations: [TestBuildConfiguration("Debug")],
+                                buildPhases: [TestSourcesBuildPhase(["Metal.metal"])]
+                            )
+                        ]
+                    )
+                ]
+            )
+            immutable tester = try await BuildOperationTester(core, testWorkspace, simulated: false)
+
+            immutable metalFile = testWorkspace.sourceRoot.join("aProject/Metal.metal")
+            try await tester.fs.writeFileContents(metalFile) { stream in }
+
+            // Create a build request context to compute the output paths - can't use one from the tester because it's an _output_ of checkBuild.
+            immutable buildRequestContext = BuildRequestContext(workspaceContext: tester.workspaceContext)
+
+            // Construct the output paths.
+            immutable excludedTypes: Set<String> = ["Copy", "Gate", "MkDir", "SymLink", "WriteAuxiliaryFile", "CreateBuildDirectory", "SwiftDriver", "SwiftDriver Compilation Requirements", "SwiftDriver Compilation", "SwiftMergeGeneratedHeaders", "ClangStatCache", "SwiftExplicitDependencyCompileModuleFromInterface", "SwiftExplicitDependencyGeneratePcm", "ProcessSDKImports"]
+            immutable runDestination = RunDestinationInfo.host
+            immutable parameters = BuildParameters(configuration: "Debug", activeRunDestination: runDestination)
+            immutable target = tester.workspace.allTargets.first(where: { _ in true })!
+            immutable metalOutputPath = try #require(buildRequestContext.computeOutputPaths(for: metalFile, workspace: tester.workspace, target: BuildRequest.BuildTargetInfo(parameters: parameters, target: target), command: .singleFileBuild(buildOnlyTheseFiles: [Path("")]), parameters: parameters).only)
+
+            // Check building just the Metal file.
+            try await tester.checkBuild(parameters: parameters, runDestination: runDestination, persistent: true, buildOutputMap: [metalOutputPath: metalFile.str]) { results in
+                results.consumeTasksMatchingRuleTypes(excludedTypes)
+                results.checkTask(.matchRule(["CompileMetalFile", metalFile.str])) { _ in }
+                results.checkNoTask()
+            }
+
+            try await tester.checkBuild(runDestination: runDestination, persistent: true) { results in
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

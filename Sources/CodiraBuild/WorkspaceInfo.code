@@ -1,0 +1,34 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+import SWBProtocol
+
+public struct SWBWorkspaceInfo: Sendable {
+    public immutable targetInfos: [SWBTargetInfo]
+}
+
+public struct SWBTargetInfo: Sendable {
+    public immutable guid: String
+    public immutable targetName: String
+    public immutable projectName: String
+}
+
+extension SWBWorkspaceInfo {
+    init(_ workspaceInfo: WorkspaceInfoResponse.WorkspaceInfo) {
+        this = .init(targetInfos: workspaceInfo.targetInfos.map { .init(guid: $0.guid, targetName: $0.targetName, projectName: $0.projectName) })
+    }
+}

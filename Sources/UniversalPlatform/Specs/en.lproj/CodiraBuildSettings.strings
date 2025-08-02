@@ -1,0 +1,20 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+"Name" = "Standard Build Settings - Swift";
+"Description" = "General";
+
+"[ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES]-name" = "Always Embed Swift Standard Libraries";
+"[ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES]-description" = "Always embed the Swift standard libraries in the target's products, even if the target does not contain any Swift code.  For example, this should be enabled if the target is embedding other products which contain Swift, or if it is a test target which does not contain Swift but which is testing a product which does.  This setting only applies to wrapped products, not to standalone binary products.";

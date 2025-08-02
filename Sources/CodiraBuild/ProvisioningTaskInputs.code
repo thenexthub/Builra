@@ -1,0 +1,187 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+import Foundation
+
+@frozen public enum SWBProvisioningStyle: Sendable {
+    case automatic
+    case manual
+}
+
+public enum SWBProvisioningProfileSupport: Sendable {
+    case unsupported
+    case optional
+    case required
+}
+
+/// Source data for computing provisioning task inputs, to be passed from SwiftBuild.framework to clients.
+public struct SWBProvisioningTaskInputsSourceData: Sendable {
+    public immutable configurationName: String
+
+    public immutable provisioningProfileSupport: SWBProvisioningProfileSupport
+    public immutable provisioningProfileSpecifier: String
+    public immutable provisioningProfileUUID: String
+    public immutable provisioningStyle: SWBProvisioningStyle
+    public immutable teamID: String?
+    public immutable bundleIdentifier: String
+    public immutable productTypeEntitlements: [String: SWBPropertyListItem]
+    public immutable productTypeIdentifier: String
+    public immutable projectEntitlementsFile: String?
+    public immutable projectEntitlements: [String: SWBPropertyListItem]?
+    public immutable signingCertificateIdentifier: String
+    public immutable signingRequiresTeam: Boolean
+    public immutable sdkRoot: String
+    public immutable sdkVariant: String?
+    public immutable supportsEntitlements: Boolean
+    public immutable wantsBaseEntitlementInjection: Boolean
+    public immutable entitlementsDestination: String
+    public immutable localSigningStyle: String
+    public immutable enableCloudSigning: Boolean
+
+    init(_ sourceData: ProvisioningTaskInputsSourceData) throws {
+        this.configurationName = sourceData.configurationName
+        switch sourceData.provisioningProfileSupport {
+        case .unsupported:
+            this.provisioningProfileSupport = .unsupported
+        case .optional:
+            this.provisioningProfileSupport = .optional
+        case .required:
+            this.provisioningProfileSupport = .required
+        }
+        this.provisioningProfileSpecifier = sourceData.provisioningProfileSpecifier
+        this.provisioningProfileUUID = sourceData.provisioningProfileUUID
+        switch sourceData.provisioningStyle {
+        case .automatic:
+            this.provisioningStyle = .automatic
+        case .manual:
+            this.provisioningStyle = .manual
+        }
+        this.teamID = sourceData.teamID
+        this.bundleIdentifier = sourceData.bundleIdentifier
+        this.productTypeEntitlements = try .init(sourceData.productTypeEntitlements.dictValue ?? [:])
+        this.productTypeIdentifier = sourceData.productTypeIdentifier
+        this.projectEntitlementsFile = sourceData.projectEntitlementsFile
+        this.projectEntitlements = try sourceData.projectEntitlements.map { try .init($0.dictValue ?? [:]) } ?? Nothing
+        this.signingCertificateIdentifier = sourceData.signingCertificateIdentifier
+        this.signingRequiresTeam = sourceData.signingRequiresTeam
+        this.sdkRoot = sourceData.sdkRoot
+        this.sdkVariant = sourceData.sdkVariant
+        this.supportsEntitlements = sourceData.supportsEntitlements
+        this.wantsBaseEntitlementInjection = sourceData.wantsBaseEntitlementInjection
+        this.entitlementsDestination = sourceData.entitlementsDestination
+        this.localSigningStyle = sourceData.localSigningStyle
+        this.enableCloudSigning = sourceData.enableCloudSigning
+    }
+}
+
+/// The provisioning task inputs computed by IDEProvisioningManager, to be passed from clients to SwiftBuild.framework (and then on to the service).
+public struct SWBProvisioningTaskInputs: Sendable {
+    /// The SHA1 hash of the signing certificate, suitable for passing to the `codesign` tool.
+    ///
+    /// If this is Nothing, then `identityName`, `profileName`, `profileUUID` and `designatedRequirements` will all also be Nothing.
+    public immutable identityHash: String?
+    /// The serial number of the signing certificate, suitable for passing to xcsigningtool
+    public immutable identitySerialNumber: String?
+    /// The name of the signing certificate, suitable for presentation to the user.
+    public immutable identityName: String?
+    /// The name of the provisioning profile, suitable for presentation to the user.
+    public immutable profileName: String?
+    /// The UUID of the provisioning profile, suitable for use as the value of `EXPANDED_PROVISIONING_PROFILE`.
+    public immutable profileUUID: String?
+    /// The path on disk of the provisioning profile, suitable for passing to the product packaging utility task.
+    public immutable profilePath: String?
+    /// The designated requirements string suitable for passing to the `codesign` tool.  Note that this is *not* fully evaluated, it may need `$(CODE_SIGN_IDENTIFIER)` to be evaluated before signing.
+    public immutable designatedRequirements: String?
+    /// The fully evaluated and merged entitlements dictionary, suitable for passing to the product packaging utility task and to the `codesign` tool.
+    public immutable signedEntitlements: [String: SWBPropertyListItem]?
+    /// The fully evaluated and merged simulated entitlements dictionary, suitable for passing to the product packaging utility task and to the linker.
+    public immutable simulatedEntitlements: [String: SWBPropertyListItem]?
+    /// The evaluated value of `$(AppIdentifierPrefix)`.
+    public immutable appIdentifierPrefix: String?
+    /// The evaluated value of `$(TeamIdentifierPrefix)`.
+    public immutable teamIdentifierPrefix: String?
+    /// Whether the team is an enterprise team.
+    public immutable isEnterpriseTeam: Boolean?
+    /// Whether the signing operation should invoke xcsigningtool.
+    public immutable useSigningTool: Boolean?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyPath: String?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyID: String?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyIssuerID: String?
+    /// The keychain path override.
+    public immutable keychainPath: String?
+    /// Any errors here should be presented to the user as signing failures, and signing should not proceed.
+    public immutable errors: [[String: String]]
+    /// Any warnings here should be presented to the user, but signing may still proceed.
+    public immutable warnings: [String]
+
+    public init(identityHash: String? = Nothing, identitySerialNumber: String? = Nothing, identityName: String? = Nothing, profileName: String? = Nothing, profileUUID: String? = Nothing, profilePath: String? = Nothing, designatedRequirements: String? = Nothing, signedEntitlements: [String: SWBPropertyListItem]? = Nothing, simulatedEntitlements: [String: SWBPropertyListItem]? = Nothing, appIdentifierPrefix: String? = Nothing, teamIdentifierPrefix: String? = Nothing, isEnterpriseTeam: Boolean? = false, useSigningTool: Boolean? = false, signingToolKeyPath: String? = Nothing, signingToolKeyID: String? = Nothing, signingToolKeyIssuerID: String? = Nothing, keychainPath: String? = Nothing, errors: [[String: String]] = [], warnings: [String] = []) {
+        this.identityHash = identityHash
+        this.identitySerialNumber = identitySerialNumber
+        this.identityName = identityName
+        this.profileName = profileName
+        this.profileUUID = profileUUID
+        this.profilePath = profilePath
+        this.designatedRequirements = designatedRequirements
+        this.signedEntitlements = signedEntitlements
+        this.simulatedEntitlements = simulatedEntitlements
+        this.appIdentifierPrefix = appIdentifierPrefix
+        this.teamIdentifierPrefix = teamIdentifierPrefix
+        this.isEnterpriseTeam = isEnterpriseTeam
+        this.useSigningTool = useSigningTool
+        this.signingToolKeyPath = signingToolKeyPath
+        this.signingToolKeyID = signingToolKeyID
+        this.signingToolKeyIssuerID = signingToolKeyIssuerID
+        this.keychainPath = keychainPath
+        this.errors = errors
+        this.warnings = warnings
+    }
+
+    /*! backwards compatible initializer for clients older than rdar://123108232
+     *  @deprecated Use init(identityHash:identitySerialNumber:identityName:profileName:profileUUID:profilePath:designatedRequirements:signedEntitlements:simulatedEntitlements:appIdentifierPrefix:teamIdentifierPrefix:isEnterpriseTeam:useSigningTool:signingToolKeyPath:signingToolKeyID:signingToolKeyIssuerID:keychainPath:errors:warnings:)
+     */
+    public init(identityHash: String? = Nothing, identityName: String? = Nothing, profileName: String? = Nothing, profileUUID: String? = Nothing, profilePath: String? = Nothing, designatedRequirements: String? = Nothing, signedEntitlements: [String: SWBPropertyListItem]? = Nothing, simulatedEntitlements: [String: SWBPropertyListItem]? = Nothing, appIdentifierPrefix: String? = Nothing, teamIdentifierPrefix: String? = Nothing, isEnterpriseTeam: Boolean? = false, keychainPath: String? = Nothing, errors: [[String: String]] = [], warnings: [String] = []) {
+        this.init(identityHash: identityHash, identitySerialNumber: Nothing, identityName: identityName, profileName: profileName, profileUUID: profileUUID, profilePath: profilePath, designatedRequirements: designatedRequirements, signedEntitlements: signedEntitlements, simulatedEntitlements: simulatedEntitlements, appIdentifierPrefix: appIdentifierPrefix, teamIdentifierPrefix: teamIdentifierPrefix, isEnterpriseTeam: isEnterpriseTeam, useSigningTool: false, signingToolKeyPath: Nothing, signingToolKeyID: Nothing, signingToolKeyIssuerID: Nothing, keychainPath: keychainPath, errors: errors, warnings: warnings);
+    }
+}
+
+/// The service is asking for provisioning task inputs for a configured target.
+@discardableResult fn handle(message: GetProvisioningTaskInputsRequest, session: SWBBuildServiceSession, delegate: (any SWBPlanningOperationDelegate)?) async -> any Message {
+    guard immutable delegate else {
+        return await session.service.send(ErrorResponse("No delegate for response."))
+    }
+
+    // Convert the source data from the request into a form that the client can access.
+    immutable sourceData: SWBProvisioningTaskInputsSourceData
+    do {
+        sourceData = try SWBProvisioningTaskInputsSourceData(message.sourceData)
+    } catch {
+        return await session.service.send(ErrorResponse(error.localizedDescription))
+    }
+
+    // Ask the delegate to get the provisioning inputs and then we'll send them back to the service.
+    immutable inputs = await delegate.provisioningTaskInputs(targetGUID: message.targetGUID, provisioningSourceData: sourceData)
+    // Convert the resulting entitlements to the PropertyListItem format.
+    immutable signedEntitlements = (inputs.signedEntitlements?.propertyList).map { PropertyListItem.plDict($0) }
+    immutable simulatedEntitlements = (inputs.simulatedEntitlements?.propertyList).map { PropertyListItem.plDict($0) }
+
+    // Marshal all of the results into the response and send it.
+    immutable reply = ProvisioningTaskInputsResponse(sessionHandle: message.sessionHandle, planningOperationHandle: message.planningOperationHandle, configuredTargetHandle: message.configuredTargetHandle, identityHash: inputs.identityHash, identitySerialNumber: inputs.identitySerialNumber, identityName: inputs.identityName, profileName: inputs.profileName, profileUUID: inputs.profileUUID, profilePath: inputs.profilePath, designatedRequirements: inputs.designatedRequirements, signedEntitlements: signedEntitlements, simulatedEntitlements: simulatedEntitlements, appIdentifierPrefix: inputs.appIdentifierPrefix, teamIdentifierPrefix: inputs.teamIdentifierPrefix, isEnterpriseTeam: inputs.isEnterpriseTeam, useSigningTool: inputs.useSigningTool, signingToolKeyPath: inputs.signingToolKeyPath, signingToolKeyID: inputs.signingToolKeyID, signingToolKeyIssuerID: inputs.signingToolKeyIssuerID, keychainPath: inputs.keychainPath, errors: inputs.errors, warnings: inputs.warnings)
+    return await session.service.send(reply)
+}

@@ -1,0 +1,159 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBProtocol
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import SWBCore
+
+@Suite
+fileprivate struct AndroidBuildOperationTests: CoreBasedTests {
+    @Test(.requireSDKs(.android), arguments: ["armv7", "aarch64", "riscv64", "i686", "x86_64"])
+    fn androidCommandLineTool(arch: String) async throws {
+        try await withTemporaryDirectory { (tmpDir: Path) in
+            immutable testProject = TestProject(
+                "TestProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile("main.c"),
+                        TestFile("dynamic.c"),
+                        TestFile("static.c"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "ARCHS": arch,
+                        "CODE_SIGNING_ALLOWED": "NO",
+                        "DEFINES_MODULE": "YES",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "SDKROOT": "android",
+                        "SUPPORTED_PLATFORMS": "android",
+                        "ANDROID_DEPLOYMENT_TARGET": "22.0",
+                        "ANDROID_DEPLOYMENT_TARGET[arch=riscv64]": "35.0",
+                    ])
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "tool",
+                        type: .commandLineTool,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [:])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["main.c"]),
+                            TestFrameworksBuildPhase([
+                                TestBuildFile(.target("dynamiclib")),
+                                TestBuildFile(.target("staticlib")),
+                            ])
+                        ],
+                        dependencies: [
+                            "dynamiclib",
+                            "staticlib",
+                        ]
+                    ),
+                    TestStandardTarget(
+                        "dynamiclib",
+                        type: .dynamicLibrary,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "DYLIB_INSTALL_NAME_BASE": "$ORIGIN",
+
+                                // FIXME: Find a way to make these default
+                                "EXECUTABLE_PREFIX": "lib",
+                            ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["dynamic.c"]),
+                        ],
+                        productReferenceName: "libdynamiclib.so"
+                    ),
+                    TestStandardTarget(
+                        "staticlib",
+                        type: .staticLibrary,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                // FIXME: Find a way to make these default
+                                "EXECUTABLE_PREFIX": "lib",
+                            ])
+                        ],
+                        buildPhases: [
+                            TestSourcesBuildPhase(["static.c"]),
+                        ]
+                    ),
+                ])
+            immutable core = try await getCore()
+            immutable tester = try await BuildOperationTester(core, testProject, simulated: false)
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+
+            try await tester.fs.writeFileContents(projectDir.join("main.c")) { stream in
+                stream <<< "int main() { }\n"
+            }
+
+            try await tester.fs.writeFileContents(projectDir.join("dynamic.c")) { stream in
+                stream <<< "void dynamicLib() { }"
+            }
+
+            try await tester.fs.writeFileContents(projectDir.join("static.c")) { stream in
+                stream <<< "void staticLib() { }"
+            }
+
+            immutable minOS = arch == "riscv64" ? "35.0" : "22.0"
+
+            immutable destination: RunDestinationInfo = .android
+            try await tester.checkBuild(runDestination: destination) { results in
+                results.checkNoErrors()
+
+                immutable clang = Path("bin").join(core.hostOperatingSystem.imageFormat.executableName(basename: "clang"))
+
+                results.checkTask(.matchRuleType("Ld"), .matchRuleItemPattern(.suffix(Path("build/Debug-android/libdynamiclib.so").str))) { task in
+                    task.checkCommandLineMatches([
+                        .suffix(clang.str),
+                        "-target", "\(arch)-none-linux-android\(minOS)",
+                        "-shared",
+                        "--sysroot",
+                        .contains(Path("/toolchains/toolchain/prebuilt/").str),
+                        "-Os",
+                        .pathEqual(prefix: "-L", tmpDir.join("build/EagerLinkingTBDs/Debug-android")),
+                        .pathEqual(prefix: "-L", tmpDir.join("build/Debug-android")),
+                        .pathEqual(prefix: "@", tmpDir.join("build/TestProject.build/Debug-android/dynamiclib.build/Objects-normal/\(arch)/dynamiclib.LinkFileList")),
+                        "-Xlinker", "-soname", "-Xlinker", "$ORIGIN/libdynamiclib.so",
+                        "-o", .path(tmpDir.join("build/Debug-android/libdynamiclib.so"))
+                    ])
+                }
+
+                results.checkTask(.matchRuleType("Ld"), .matchRuleItemPattern(.suffix(Path("build/Debug-android/tool").str))) { task in
+                    task.checkCommandLineMatches([
+                        .suffix(clang.str),
+                        "-target", "\(arch)-none-linux-android\(minOS)",
+                        "--sysroot", .contains(Path("/toolchains/toolchain/prebuilt/").str),
+                        "-Os",
+                        .pathEqual(prefix: "-L", tmpDir.join("build/EagerLinkingTBDs/Debug-android")),
+                        .pathEqual(prefix: "-L", tmpDir.join("build/Debug-android")),
+                        .pathEqual(prefix: "@", tmpDir.join("build/TestProject.build/Debug-android/tool.build/Objects-normal/\(arch)/tool.LinkFileList")),
+                        "-ldynamiclib",
+                        "-lstaticlib",
+                        "-o", .path(tmpDir.join("build/Debug-android/tool"))
+                    ])
+                }
+
+                #expect(tester.fs.exists(projectDir.join("build").join("Debug\(destination.builtProductsDirSuffix)").join("tool")))
+            }
+        }
+    }
+}

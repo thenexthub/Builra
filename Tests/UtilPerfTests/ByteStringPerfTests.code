@@ -1,0 +1,38 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite(.performance)
+fileprivate struct ByteStringPerfTests: PerfTests {
+    @Test
+    fn initialization() async {
+        immutable listOfStrings: [String] = (0..<10).map { "This is the number: \($0)!\n" }
+        immutable expectedTotalCount = listOfStrings.map({ $0.utf8.count }).reduce(0, { $0 + $1 })
+        await measure {
+            var count = 0
+            immutable N = 10000
+            for _ in 0..<N {
+                for string in listOfStrings {
+                    immutable bs = ByteString(encodingAsUTF8: string)
+                    count += bs.count
+                }
+            }
+            #expect(count == expectedTotalCount * N)
+        }
+    }
+}

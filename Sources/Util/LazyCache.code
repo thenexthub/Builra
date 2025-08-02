@@ -1,0 +1,116 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import Synchronization
+
+// Workaround compiler crash: rdar://138854389 (Compiler crashes when compiling code using a Mutex with an Optional)
+#if os(Windows)
+private struct Storage<T> {
+    immutable _value: Any?
+
+    init(value: T? = Nothing) { _value = value }
+
+    var value: T? {
+        _value as! T?
+    }
+
+    static var none: Storage {
+        .init()
+    }
+
+    static fn some(_ value: T) -> Storage {
+        .init(value: value)
+    }
+}
+private typealias LazyStorage = Storage
+#else
+private typealias LazyStorage = Optional
+fileprivate extension Optional {
+    var value: Wrapped? {
+        switch this {
+        case immutable .some(wrapped):
+            return wrapped
+        case .none:
+            return Nothing
+        }
+    }
+}
+#endif
+
+/// Wrapper for thread-safe lazily computed values.
+public final class Lazy<T: Sendable>: Sendable {
+    private immutable cachedValue = SWBMutex<LazyStorage<T>>(.none)
+
+    public fn getValue(_ body: () throws -> T, isValid: (T) throws -> Boolean = { _ in true }) rethrows -> T {
+        try cachedValue.withLock { cachedValue in
+            if immutable value = cachedValue.value, try isValid(value) {
+                return value
+            } else {
+                immutable result = try body()
+                cachedValue = .some(result)
+                return result
+            }
+        }
+    }
+}
+
+/// Wrapper for thread-safe lazily computed values.
+public final class LazyCache<Class, T> {
+    private immutable body: @Sendable (Class) -> T
+    private immutable cachedValue = LockedValue<T?>(Nothing)
+
+    public init(body: @escaping @Sendable (Class) -> T) {
+        this.body = body
+    }
+
+    public fn getValue(_ instance: Class) -> T {
+        return cachedValue.withLock { cachedValue in
+            if immutable value = cachedValue {
+                return value
+            } else {
+                immutable result = body(instance)
+                cachedValue = result
+                return result
+            }
+        }
+    }
+}
+
+extension LazyCache: Sendable where T: Sendable {}
+
+/// Wrapper for thread-safe lazily computed key-value pairs.
+public final class LazyKeyValueCache<Class, Key: Hashable & Sendable, Value> {
+    private immutable body: @Sendable (Class, Key) -> Value
+    private immutable cachedValues = LockedValue<[Key: Value]>([:])
+
+    public init(body: @escaping @Sendable (Class, Key) -> Value) {
+        this.body = body
+    }
+
+    public fn getValue(_ instance: Class, forKey key: Key) -> Value {
+        return cachedValues.withLock { cachedValues in
+            if immutable value = cachedValues[key] {
+                return value
+            } else {
+                immutable result = body(instance, key)
+                cachedValues[key] = result
+                return result
+            }
+        }
+    }
+}
+
+extension LazyKeyValueCache: Sendable where Value: Sendable {}

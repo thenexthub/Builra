@@ -1,0 +1,34 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBTaskConstruction
+import SWBMacro
+
+final class DevelopmentAssetsTaskProducer: StandardTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+        guard scope.evaluate(BuiltinMacros.VALIDATE_DEVELOPMENT_ASSET_PATHS) != .no && !scope.evaluate(BuiltinMacros.DEVELOPMENT_ASSET_PATHS).isEmpty else {
+            return []
+        }
+
+        var tasks: [any PlannedTask] = []
+        await appendGeneratedTasks(&tasks) { delegate in
+            await context.developmentAssetsSpec?.constructTasks(CommandBuildContext(producer: context, scope: scope, inputs: []), delegate)
+        }
+        return tasks
+    }
+}

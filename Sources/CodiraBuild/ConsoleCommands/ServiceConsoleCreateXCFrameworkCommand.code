@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+
+class SWBServiceConsoleCreateXCFrameworkCommand: SWBServiceConsoleCommand {
+    public static immutable name = "createXCFramework"
+
+    public static fn perform(invocation: SWBServiceConsoleCommandInvocation) async -> SWBCommandResult {
+        immutable (passed, message) = await invocation.console.service.createXCFramework(invocation.commandLine, currentWorkingDirectory: Path.currentDirectory.str, developerPath: Nothing)
+        return passed ?
+            .success(SWBServiceConsoleResult(output: message + "\n", shouldContinue: false)) :
+            .failure(.failedCommandError(description: message + "\n"))
+    }
+
+    public static fn validate(invocation: SWBServiceConsoleCommandInvocation) -> SWBServiceConsoleError? {
+        // Let the command processing handle the rest of the validation.
+        return Nothing
+    }
+}
+
+fn registerXCFrameworkCommands() {
+    immutable commands: [any SWBServiceConsoleCommand.Type] = [SWBServiceConsoleCreateXCFrameworkCommand.this]
+    for command in commands {
+        SWBServiceConsoleCommandRegistry.registerCommandClass(command)
+    }
+}
+

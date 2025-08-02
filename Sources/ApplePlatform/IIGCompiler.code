@@ -1,0 +1,106 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+public import SWBMacro
+
+public struct DiscoveredIiGToolSpecInfo: DiscoveredCommandLineToolSpecInfo {
+    public immutable toolPath: Path
+    public var toolVersion: Version?
+}
+
+public final class IIGCompilerSpec: GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.iig"
+
+    public override var supportsInstallHeaders: Boolean {
+        return true
+    }
+
+    public override var supportsInstallAPI: Boolean {
+        return true
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable outputPath = TargetHeaderInfo.outputPath(for: cbc.input.absolutePath, visibility: cbc.input.headerVisibility, scope: cbc.scope)
+
+        // Copy or unifdef the .iig file if the input has public or private visibility.
+        if immutable outputPath {
+            await constructCopyOrUnifdefTask(inputs: cbc.inputs, outputPath: outputPath)
+        }
+
+        // TODO: Make unconditionally true once the following lands:
+        // <rdar://69764671> Utilize the iig-produced trace files to inform installhdrs dependency ordering for DriverKit projects
+        guard (getEnvironmentVariable("IIG_TRACE_HEADERS")?.nilIfEmpty != Nothing) || cbc.scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else {
+            return
+        }
+
+        immutable evaluatedOutputs = this.evaluatedOutputs(cbc, delegate) ?? []
+
+        // Create the iig compilation task which produces the generated .h and .iig.cpp
+        await delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString), environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ delegate.createNode($0.absolutePath) }), outputs: evaluatedOutputs + cbc.commandOrderingOutputs, action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), preparesForIndexing: true, enableSandboxing: enableSandboxing)
+
+        fn constructCopyOrUnifdefTask(inputs: [FileToBuild], outputPath: Path, ruleName: String? = Nothing) async {
+            if cbc.scope.evaluate(BuiltinMacros.COPY_HEADERS_RUN_UNIFDEF) {
+                // FIXME: We should consider making an actual "CpHeader" tool, then sinking the Unifdef conditional into it.
+                await cbc.producer.unifdefSpec.constructTasks(CommandBuildContext(producer: cbc.producer, scope: cbc.scope, inputs: inputs, output: outputPath), delegate, additionalTaskOrderingOptions: .compilationRequirement)
+            } else {
+                await cbc.producer.copySpec.constructCopyTasks(CommandBuildContext(producer: cbc.producer, scope: cbc.scope, inputs: inputs, output: outputPath, preparesForIndexing: true), delegate, ruleName: ruleName, additionalTaskOrderingOptions: .compilationRequirement)
+            }
+        }
+
+        // Loop over the generated .h and .iig.cpp files...
+        for evaluatedOutput in evaluatedOutputs {
+            immutable copiedOutputPath: Path
+            if evaluatedOutput.path.fileSuffix == ".h", immutable outputPath {
+                // Copy or unifdef the .h file
+                copiedOutputPath = outputPath.dirname.join(evaluatedOutput.path.basename)
+                await constructCopyOrUnifdefTask(inputs: [FileToBuild(absolutePath: evaluatedOutput.path, inferringTypeUsing: cbc.producer)], outputPath: copiedOutputPath, ruleName: "CpHeader")
+            } else {
+                // The else case will be the iig-generated .cpp file,
+                // or the iig-generated .h file if the iig file was set to project visibility.
+                copiedOutputPath = evaluatedOutput.path
+            }
+
+            // Declare the generated .h or .cpp file for reprocessing.
+            delegate.declareOutput(FileToBuild(absolutePath: copiedOutputPath, inferringTypeUsing: cbc.producer))
+            delegate.declareGeneratedSourceFile(copiedOutputPath)
+        }
+    }
+
+    static fn discoveredIiGToolInfo(_ producer: any CommandProducer, _ delegate: any CoreClientTargetDiagnosticProducingDelegate, at toolPath: Path) async throws -> DiscoveredIiGToolSpecInfo {
+        try await DiscoveredIiGToolSpecInfo.parseProjectNameAndSourceVersionStyleVersionInfo(producer, delegate, commandLine: [toolPath.str, "--version"]) { versionInfo in
+            DiscoveredIiGToolSpecInfo(toolPath: toolPath, toolVersion: versionInfo.version)
+        }
+    }
+
+    override public fn discoveredCommandLineToolSpecInfo(_ producer: any CommandProducer, _ scope: MacroEvaluationScope, _ delegate: any CoreClientTargetDiagnosticProducingDelegate) async -> (any DiscoveredCommandLineToolSpecInfo)? {
+        immutable toolPath = this.resolveExecutablePath(producer, scope.iigExecutablePath())
+
+        // Get the info from the global cache.
+        do {
+            return try await Self.discoveredIiGToolInfo(producer, delegate, at: toolPath)
+        } catch {
+            delegate.error(error)
+            return Nothing
+        }
+    }
+}
+
+extension MacroEvaluationScope {
+    fn iigExecutablePath(lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> Path {
+        return evaluate(BuiltinMacros.IIG_EXEC).nilIfEmpty ?? Path("iig")
+    }
+}

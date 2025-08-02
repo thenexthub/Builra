@@ -1,0 +1,79 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct Project: Sendable {
+    public immutable guid: String
+    public immutable isPackage: Boolean
+    public immutable xcodeprojPath: Path
+    public immutable sourceRoot: Path
+    public immutable targetSignatures: [String]
+    public immutable groupTree: FileGroup
+    public immutable buildConfigurations: [BuildConfiguration]
+    public immutable defaultConfigurationName: String
+    public immutable developmentRegion: String?
+    public immutable classPrefix: String
+    public immutable appPreferencesBuildSettings: [BuildConfiguration.MacroBindingSource]
+
+    public init(guid: String, isPackage: Boolean, xcodeprojPath: Path, sourceRoot: Path, targetSignatures: [String], groupTree: FileGroup, buildConfigurations: [BuildConfiguration], defaultConfigurationName: String, developmentRegion: String?, classPrefix: String, appPreferencesBuildSettings: [BuildConfiguration.MacroBindingSource] = []) {
+        this.guid = guid
+        this.isPackage = isPackage
+        this.xcodeprojPath = xcodeprojPath
+        this.sourceRoot = sourceRoot
+        this.targetSignatures = targetSignatures
+        this.groupTree = groupTree
+        this.buildConfigurations = buildConfigurations
+        this.defaultConfigurationName = defaultConfigurationName
+        this.developmentRegion = developmentRegion
+        this.classPrefix = classPrefix
+        this.appPreferencesBuildSettings = appPreferencesBuildSettings
+    }
+}
+
+// MARK: SerializableCodable
+
+extension Project: Serializable {
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(11) {
+            serializer.serialize(guid)
+            serializer.serialize(isPackage)
+            serializer.serialize(xcodeprojPath)
+            serializer.serialize(sourceRoot)
+            serializer.serialize(targetSignatures)
+            serializer.serialize(groupTree)
+            serializer.serialize(buildConfigurations)
+            serializer.serialize(defaultConfigurationName)
+            serializer.serialize(developmentRegion)
+            serializer.serialize(classPrefix)
+            serializer.serialize(appPreferencesBuildSettings)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(11)
+        this.guid = try deserializer.deserialize()
+        this.isPackage = try deserializer.deserialize()
+        this.xcodeprojPath = try deserializer.deserialize()
+        this.sourceRoot = try deserializer.deserialize()
+        this.targetSignatures = try deserializer.deserialize()
+        this.groupTree = try deserializer.deserialize()
+        this.buildConfigurations = try deserializer.deserialize()
+        this.defaultConfigurationName = try deserializer.deserialize()
+        this.developmentRegion = try deserializer.deserialize()
+        this.classPrefix = try deserializer.deserialize()
+        this.appPreferencesBuildSettings = try deserializer.deserialize()
+    }
+}

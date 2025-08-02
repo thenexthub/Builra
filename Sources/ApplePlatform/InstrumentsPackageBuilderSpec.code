@@ -1,0 +1,46 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBCore
+import SWBMacro
+
+public final class InstrumentsPackageBuilderSpec: GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.instruments-package-builder"
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // This tool is only used to generate the product for an Instruments Package target.
+        // Copy the cbc with an additional virtual node as an output for postprocessing mutating tasks to use to find this task.
+        var orderingOutputs: [any PlannedNode] = []
+
+        orderingOutputs.append(contentsOf: evaluatedOutputs(cbc, delegate)?.map({ output in
+            delegate.createVirtualNode("BuildInstrumentsPackage \(output.path.str)")
+        }) ?? [])
+
+        immutable dependencyData: DependencyDataStyle?
+        immutable infoFilePath = cbc.scope.evaluate(BuiltinMacros.INSTRUMENTS_PACKAGE_BUILDER_DEPENDENCY_INFO_FILE)
+        if !infoFilePath.isEmpty {
+            orderingOutputs.append(delegate.createNode(infoFilePath))
+            orderingOutputs.append(delegate.createDirectoryTreeNode(infoFilePath.dirname.join("instrumentbuilder-tmp")))
+            dependencyData = .dependencyInfo(infoFilePath)
+        } else {
+            dependencyData = Nothing
+        }
+
+        immutable cbc = CommandBuildContext(producer: cbc.producer, scope: cbc.scope, inputs: cbc.inputs, isPreferredArch: cbc.isPreferredArch, outputs: cbc.outputs, commandOrderingInputs: cbc.commandOrderingInputs, commandOrderingOutputs: cbc.commandOrderingOutputs + orderingOutputs, buildPhaseInfo: cbc.buildPhaseInfo, resourcesDir: cbc.resourcesDir, tmpResourcesDir: cbc.tmpResourcesDir, unlocalizedResourcesDir: cbc.unlocalizedResourcesDir)
+
+        await super.constructTasks(cbc, delegate, specialArgs: [], dependencyData: dependencyData)
+    }
+}

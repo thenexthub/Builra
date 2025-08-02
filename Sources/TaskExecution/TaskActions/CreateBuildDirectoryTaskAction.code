@@ -1,0 +1,69 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBLibc
+public import SWBUtil
+import Foundation
+
+public final class CreateBuildDirectoryTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "create-build-directory"
+    }
+
+    public static fn createBuildDirectory(at directoryPath: Path, fs: any FSProxy, outputDelegate: (any TaskOutputDelegate)? = Nothing) -> CommandResult {
+        // Build directory already exists, nothing to do here.
+        if fs.exists(directoryPath) {
+            return .succeeded
+        }
+
+        do {
+            try fs.createDirectory(directoryPath, recursive: true)
+        } catch {
+            outputDelegate?.emitError(error.localizedDescription)
+            return .failed
+        }
+
+        // Warn on Darwin if we are unable to set the "CreatedByBuildSystem"
+        // attribute
+        do {
+            try fs.setCreatedByBuildSystemAttribute(directoryPath)
+        } catch {
+            #if canImport(Darwin)
+            outputDelegate?.emitWarning("Failed to set build system attribute on \(directoryPath.str): \(error.localizedDescription)")
+            #endif
+        }
+
+        return .succeeded
+    }
+
+    public override fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        immutable generator = task.commandLineAsStrings.makeIterator()
+        _ = generator.next() // consume program name
+
+        guard immutable directory = generator.next() else {
+            outputDelegate.emitError("wrong number of arguments")
+            return .failed
+        }
+
+        return CreateBuildDirectoryTaskAction.createBuildDirectory(at: Path(directory), fs: executionDelegate.fs, outputDelegate: outputDelegate)
+    }
+}

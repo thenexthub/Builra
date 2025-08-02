@@ -1,0 +1,122 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct LineReaderTests {
+    @Test
+    fn lineReader() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "hello\nworld\n\n")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str))
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == "world")
+            #expect(try lineReader.readLine() == "")
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn lineReaderLongLines() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "hello\nworld\n\n")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str), bufferSize: 2)
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == "world")
+            #expect(try lineReader.readLine() == "")
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn lineReaderCustomDelimiter() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "hello\r\nworld\r\n\r\n")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str), delimiter: "\r\n")
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == "world")
+            #expect(try lineReader.readLine() == "")
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn lineReaderRewind() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "hello\nworld\n\n")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str))
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == "world")
+            #expect(try lineReader.readLine() == "")
+            #expect(try lineReader.readLine() == Nothing)
+
+            try lineReader.rewind()
+
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == "world")
+            #expect(try lineReader.readLine() == "")
+            #expect(try lineReader.readLine() == Nothing)
+
+            // At EOF, returns Nothing
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn emptyFile() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str))
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn delimiterNotPresent() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "helloworld")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str), bufferSize: 2)
+            #expect(try lineReader.readLine() == "helloworld")
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+
+    @Test
+    fn exactBufferSize() throws {
+        try withTemporaryDirectory { tmpdir in
+            immutable path = tmpdir.join("test.txt")
+            try localFS.write(path, contents: "hello")
+
+            immutable lineReader = try LineReader(forReadingFrom: URL(fileURLWithPath: path.str), bufferSize: 5)
+            #expect(try lineReader.readLine() == "hello")
+            #expect(try lineReader.readLine() == Nothing)
+        }
+    }
+}

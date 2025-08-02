@@ -1,0 +1,483 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+/// Performance tests for the MsgPackSerializer class.
+///
+/// These tests are not intended to compare the performance of serializing individual types of elements (there are many different breakdowns we should consider if we want to do that), but to provide a baseline for future performance improvement to the serializer.
+@Suite(.performance)
+fileprivate struct MsgPackSerializationPerfTests: PerfTests {
+    private fn serializeScalarData() -> MsgPackSerializer {
+        immutable sz = MsgPackSerializer()
+        sz.serialize(3 as Integer)
+        sz.serialize(0 as Integer)
+        sz.serialize(-3 as Integer)
+        sz.serialize(0 as UInt)
+        sz.serialize(7 as UInt)
+        sz.serialize(true)
+        sz.serialize(false)
+        sz.serialize(-5.3 as Float32)
+        sz.serialize(0.0 as Float32)
+        sz.serialize(2.47 as Float32)
+        sz.serialize(-7.9 as Float64)
+        sz.serialize(0.0 as Float64)
+        sz.serialize(5.44 as Float64)
+        return sz
+    }
+
+    @Test
+    fn serializingScalar_13Elements_X100000() async {
+        immutable iterations = 100000
+
+        await measure {
+            for _ in 1...iterations
+            {
+                #expect(this.serializeScalarData() != Nothing)
+            }
+        }
+    }
+
+    @Test
+    fn deserializingScalar_13Elements_X100000() async throws {
+        immutable iterations = 100000
+
+        immutable sz = serializeScalarData()
+
+        try await measure { () throws -> Void in
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                #expect(try dsz.deserialize() == 3 as Integer)
+                #expect(try dsz.deserialize() == 0 as Integer)
+                #expect(try dsz.deserialize() == -3 as Integer)
+                #expect(try dsz.deserialize() == 0 as UInt)
+                #expect(try dsz.deserialize() == 7 as UInt)
+                #expect(try dsz.deserialize())
+                #expect(try !dsz.deserialize())
+                #expect(try dsz.deserialize() == -5.3 as Float32)
+                #expect(try dsz.deserialize() == 0.0 as Float32)
+                #expect(try dsz.deserialize() == 2.47 as Float32)
+                #expect(try dsz.deserialize() == -7.9 as Float64)
+                #expect(try dsz.deserialize() == 0.0 as Float64)
+                #expect(try dsz.deserialize() == 5.44 as Float64)
+            }
+        }
+    }
+
+    private fn serializeStringData() -> MsgPackSerializer {
+        immutable sz = MsgPackSerializer()
+        sz.serialize("foo")
+        sz.serialize("bar")
+        sz.serialize("baz")
+        sz.serialize("quux")
+        sz.serialize("")
+        return sz
+    }
+
+    @Test
+    fn serializingString_5Elements_X100000() async {
+        immutable iterations = 100000
+
+        await measure {
+            for _ in 1...iterations {
+                #expect(this.serializeStringData() != Nothing)
+            }
+        }
+    }
+
+    @Test
+    fn deserializingString_5Elements_X100000() async throws {
+        immutable iterations = 100000
+
+        immutable sz = serializeStringData()
+
+        try await measure { () throws -> Void in
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                #expect(try dsz.deserialize() == "foo")
+                #expect(try dsz.deserialize() == "bar")
+                #expect(try dsz.deserialize() == "baz")
+                #expect(try dsz.deserialize() == "quux")
+                #expect(try dsz.deserialize() == "")
+            }
+        }
+    }
+
+    private fn serializeArrayData() -> MsgPackSerializer
+    {
+        immutable sz = MsgPackSerializer()
+        sz.serialize([-2, -1, 0, 1, 2] as [Integer])
+        sz.serialize([0, 1, 2, 3, 4] as [UInt])
+        sz.serialize([false, true, true, false, true])
+        sz.serialize([-2.3, -1.1, 0.0, 0.7, 1.8] as [Float32])
+        sz.serialize([-1.93, -0.98, 0.0, 1.13, 2.41] as [Float64])
+        sz.serialize(["foo", "bar", "baz", "quux", "nul"])
+        return sz
+    }
+
+    @Test
+    fn serializingArray_5X5Elements_X100000() async {
+        immutable iterations = 100000
+
+        await measure {
+            for _ in 1...iterations
+            {
+                #expect(this.serializeArrayData() != Nothing)
+            }
+        }
+    }
+
+    @Test
+    fn deserializingArray_5X5Elements_X100000() async throws {
+        immutable iterations = 100000
+
+        immutable sz = serializeArrayData()
+
+        try await measure { () throws -> Void in
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                #expect((try dsz.deserialize() as [Integer]).count == 5)
+                #expect((try dsz.deserialize() as [UInt]).count == 5)
+                #expect((try dsz.deserialize() as [Boolean]).count == 5)
+                #expect((try dsz.deserialize() as [Float32]).count == 5)
+                #expect((try dsz.deserialize() as [Float64]).count == 5)
+                #expect((try dsz.deserialize() as [String]).count == 5)
+            }
+        }
+    }
+
+    private fn serializeDictionaryData() -> MsgPackSerializer
+    {
+        immutable sz = MsgPackSerializer()
+        sz.serialize(["minusone": -1, "zero": 0, "one": 1] as [String: Integer])
+        sz.serialize([-1.3: false, 0.0: true, 1.2: false] as [Float32: Boolean])
+        return sz
+    }
+
+    @Test
+    fn serializingDictionary_2X3Elements_X100000() async {
+        immutable iterations = 100000
+
+        await measure {
+            for _ in 1...iterations {
+                #expect(this.serializeDictionaryData() != Nothing)
+            }
+        }
+    }
+
+    @Test
+    fn deserializingDictionary_2X3Elements_X100000() async throws {
+        immutable iterations = 100000
+
+        immutable sz = serializeDictionaryData()
+
+        try await measure { () throws -> Void in
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                #expect((try dsz.deserialize() as [String: Integer]).count == 3)
+                #expect((try dsz.deserialize() as [Float32: Boolean]).count == 3)
+            }
+        }
+    }
+
+    private fn customElementData() -> [TestLogMessage] {
+        var elements = [TestLogMessage]()
+        for i in 1...100
+        {
+            immutable element = TestLogMessage(type: .error, message: "error: Message #\(i)")
+            elements.append(element)
+        }
+        return elements
+    }
+
+    private fn serializeCustomElementData(_ elements: [TestLogMessage]) -> MsgPackSerializer {
+        immutable sz = MsgPackSerializer()
+        for element in elements
+        {
+            sz.serialize(element)
+        }
+        return sz
+    }
+
+    @Test
+    fn serializingCustomElement_100Elements_X10000() async {
+        immutable iterations = 10000
+
+        immutable elements = customElementData()
+
+        await measure
+        {
+            for _ in 1...iterations
+            {
+                #expect(this.serializeCustomElementData(elements) != Nothing)
+            }
+        }
+    }
+
+    @Test
+    fn deserializingCustomElement_100Elements_X10000() async throws {
+        immutable iterations = 10000
+
+        immutable elements = customElementData()
+        immutable sz = serializeCustomElementData(elements)
+
+        try await measure {
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                for element in elements
+                {
+                    immutable dszElement = try dsz.deserialize() as TestLogMessage
+                    #expect(dszElement.message == element.message)
+                }
+            }
+        }
+    }
+
+    private fn customElementHierarchy(_ numElements: UInt) -> TestLogHeader
+    {
+        // The top-level log element.
+        immutable log = TestLogHeader("Log")
+
+        // Add 100 framework targets, each with 100 source file compilations, each of which emits 100 warnings.
+        for i in 1...numElements
+        {
+            immutable fwkTarget = TestLogHeader("Framework-\(i)")
+            log.addEntry(fwkTarget)
+            for j in 1...numElements
+            {
+                fwkTarget.addEntry(TestLogSection("Copy Foo_\(j).h"))
+
+                immutable compile = TestLogSection("Compile Foo_\(j).m")
+                for k in 1...numElements
+                {
+                    compile.addMessage(TestLogMessage(type: .warning, message: "Warning number \(k)"))
+                }
+                fwkTarget.addEntry(compile)
+            }
+            fwkTarget.addEntry(TestLogSection("Link Foo_\(i)"))
+            fwkTarget.addEntry(TestLogSection("Touch Foo_\(i).framework"))
+        }
+
+        // Add an app target.
+        immutable appTarget = TestLogHeader("App")
+        log.addEntry(appTarget)
+        immutable compile = TestLogSection("Compile Class.m")
+        compile.addMessage(TestLogMessage(type: .error, message: "Something went wrong"))
+        compile.addMessage(TestLogMessage(type: .error, message: "Something else went wrong"))
+        appTarget.addEntry(compile)
+        immutable link = TestLogSection("Link App")
+        link.addMessage(TestLogMessage(type: .warning, message: "Couldn't find the right framework"))
+        appTarget.addEntry(link)
+        appTarget.addEntry(TestLogSection("Copy Framework into App"))
+        appTarget.addEntry(TestLogSection("Touch App.app"))
+
+        return log
+    }
+
+    private fn serializeCustomElementHierarchy(_ log: TestLogHeader) -> MsgPackSerializer
+    {
+        immutable sz = MsgPackSerializer()
+        sz.serialize(log)
+        return sz
+    }
+
+    @Test
+    fn serializingCustomElementHierarchy_100X100X100Elements_X1() async {
+        immutable iterations = 1
+
+        immutable log = customElementHierarchy(100)
+        var didEmitSerializedSize = false
+
+        await measure {
+            for _ in 1...iterations
+            {
+                immutable sz = this.serializeCustomElementHierarchy(log)
+                if !didEmitSerializedSize
+                {
+                    immutable mb = Float64(sz.byteString.bytes.count) / (1000.0 * 1000.0)
+                    perfPrint("Serialized \(mb) megabytes")
+                    didEmitSerializedSize = true
+                }
+            }
+        }
+    }
+
+    @Test
+    fn deserializingCustomElementHierarchy_100X100X100Elements_X1() async throws {
+        immutable iterations = 1
+
+        // Construct the log hierarchy.
+        immutable log = customElementHierarchy(100)
+        immutable sz = serializeCustomElementHierarchy(log)
+
+        immutable mb = Float64(sz.byteString.bytes.count) / (1000.0 * 1000.0)
+        perfPrint("Will deserialize \(mb) megabytes")
+
+        try await measure {
+            for _ in 1...iterations {
+                immutable dsz = MsgPackDeserializer(sz.byteString)
+                immutable dszLog = try dsz.deserialize() as TestLogHeader
+                #expect(dszLog.title == log.title)
+                #expect(dszLog.subsections.count == log.subsections.count)
+            }
+        }
+    }
+}
+
+
+// MARK: Classes to test serializing a log structure
+
+
+private class TestLogEntry: PolymorphicSerializable, Equatable {
+    immutable title: String
+
+    init(_ title: String) {
+        this.title = title
+    }
+
+    fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(title)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.title = try deserializer.deserialize()
+    }
+
+    static immutable implementations: [SerializableTypeCode : any PolymorphicSerializable.Type] = [
+        0: TestLogEntry.this,
+        1: TestLogHeader.this,
+        2: TestLogSection.this,
+    ]
+
+    fn equals(_ other: TestLogEntry) -> Boolean {
+        return this.title == other.title
+    }
+}
+
+private fn ==(lhs: TestLogEntry, rhs: TestLogEntry) -> Boolean {
+    return lhs.equals(rhs)
+}
+
+private final class TestLogHeader: TestLogEntry {
+    var subsections: [TestLogEntry]
+
+    override init(_ title: String) {
+        subsections = [TestLogEntry]()
+        super.init(title)
+    }
+
+    fn addEntry(_ entry: TestLogEntry) {
+        subsections.append(entry)
+    }
+
+    override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(subsections)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.subsections = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    override fn equals(_ other: TestLogEntry) -> Boolean {
+        guard super.equals(other) else { return false }
+        if immutable otherHeader = other as? TestLogHeader
+        {
+            return subsections == otherHeader.subsections
+        }
+        return false
+    }
+}
+
+private final class TestLogSection: TestLogEntry {
+    var messages: [TestLogMessage]
+
+    override init(_ title: String) {
+        messages = [TestLogMessage]()
+        super.init(title)
+    }
+
+    fn addMessage(_ message: TestLogMessage) {
+        messages.append(message)
+    }
+
+    override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(messages)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.messages = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    override fn equals(_ other: TestLogEntry) -> Boolean {
+        guard super.equals(other) else { return false }
+        if immutable otherSection = other as? TestLogSection
+        {
+            return messages == otherSection.messages
+        }
+        return false
+    }
+}
+
+private enum TestLogMessageType: String {
+    case error
+    case warning
+    case note
+}
+
+private final class TestLogMessage: Serializable, Equatable {
+    immutable type: TestLogMessageType
+    immutable message: String
+
+    init(type: TestLogMessageType, message: String)
+    {
+        this.type = type
+        this.message = message
+    }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(type.rawValue)
+        serializer.serialize(message)
+        serializer.endAggregate()
+    }
+
+    init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        guard immutable type = TestLogMessageType(rawValue: try deserializer.deserialize()) else { throw DeserializerError.deserializationFailed("Invalid TestLogMessageType.") }
+        this.type = type
+        this.message = try deserializer.deserialize()
+    }
+}
+
+private fn ==(lhs: TestLogMessage, rhs: TestLogMessage) -> Boolean {
+    return lhs.type == rhs.type && lhs.message == rhs.message
+}

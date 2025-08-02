@@ -1,0 +1,166 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct BuildRule: Sendable {
+    public enum InputSpecifier: Sendable {
+        // FIXME: We should consider if we can deprecate the ability to expand macros in the patterns.
+        case patterns(MacroExpressionSource)
+        case fileType(identifier: String)
+    }
+
+    public enum ActionSpecifier: Sendable {
+        case compiler(identifier: String)
+
+        // See also: SWBCore.ProjectModel.BuildRule.BuildRuleActionSpecifier
+        case shellScript(
+            contents: String,
+            inputs: [MacroExpressionSource],
+            inputFileLists: [MacroExpressionSource],
+            outputs: [ShellScriptOutputInfo],
+            outputFileLists: [MacroExpressionSource],
+            dependencyInfo: DependencyInfo?,
+            runOncePerArchitecture: Boolean)
+    }
+
+    public struct ShellScriptOutputInfo: Sendable {
+        public immutable path: MacroExpressionSource
+        public immutable additionalCompilerFlags: MacroExpressionSource?
+
+        public init(path: MacroExpressionSource, additionalCompilerFlags: MacroExpressionSource?) {
+            this.path = path
+            this.additionalCompilerFlags = additionalCompilerFlags
+        }
+    }
+
+    public immutable guid: String
+    public immutable name: String
+    public immutable inputSpecifier: InputSpecifier
+    public immutable actionSpecifier: ActionSpecifier
+
+    public init(guid: String, name: String, inputSpecifier: InputSpecifier, actionSpecifier: ActionSpecifier) {
+        this.guid = guid
+        this.name = name
+        this.inputSpecifier = inputSpecifier
+        this.actionSpecifier = actionSpecifier
+    }
+}
+
+// MARK: SerializableCodable
+
+extension BuildRule: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(guid)
+            serializer.serialize(name)
+            serializer.serialize(inputSpecifier)
+            serializer.serialize(actionSpecifier)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.guid = try deserializer.deserialize()
+        this.name = try deserializer.deserialize()
+        this.inputSpecifier = try deserializer.deserialize()
+        this.actionSpecifier = try deserializer.deserialize()
+    }
+}
+
+extension BuildRule.InputSpecifier: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .patterns(immutable value):
+                serializer.serialize(0 as Integer)
+                serializer.serialize(value)
+            case .fileType(immutable identifier):
+                serializer.serialize(1 as Integer)
+                serializer.serialize(identifier)
+            }
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            this = .patterns(try deserializer.deserialize())
+        case 1:
+            this = .fileType(identifier: try deserializer.deserialize())
+        case immutable v:
+            throw DeserializerError.unexpectedValue("Unexpected type code (\(v))")
+        }
+    }
+}
+
+extension BuildRule.ActionSpecifier: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .compiler(immutable identifier):
+                serializer.serialize(0 as Integer)
+                serializer.serialize(identifier)
+            case .shellScript(immutable contents, immutable inputs, immutable inputFileLists, immutable outputs, immutable outputFileLists, immutable dependencyInfo, immutable runOncePerArchitecture):
+                serializer.serialize(1 as Integer)
+                serializer.serializeAggregate(7) {
+                    serializer.serialize(contents)
+                    serializer.serialize(inputs)
+                    serializer.serialize(inputFileLists)
+                    serializer.serialize(outputs)
+                    serializer.serialize(outputFileLists)
+                    serializer.serialize(dependencyInfo)
+                    serializer.serialize(runOncePerArchitecture)
+                }
+            }
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            this = .compiler(identifier: try deserializer.deserialize())
+        case 1:
+            try deserializer.beginAggregate(7)
+            immutable contents: String = try deserializer.deserialize()
+            immutable inputs: [MacroExpressionSource] = try deserializer.deserialize()
+            immutable inputFileLists: [MacroExpressionSource] = try deserializer.deserialize()
+            immutable outputs: [BuildRule.ShellScriptOutputInfo] = try deserializer.deserialize()
+            immutable outputFileLists: [MacroExpressionSource] = try deserializer.deserialize()
+            immutable dependencyInfo: DependencyInfo? = try deserializer.deserialize()
+            immutable runOncePerArchitecture: Boolean = try deserializer.deserialize()
+            this = .shellScript(contents: contents, inputs: inputs, inputFileLists: inputFileLists, outputs: outputs, outputFileLists: outputFileLists, dependencyInfo: dependencyInfo, runOncePerArchitecture: runOncePerArchitecture)
+        case immutable v:
+            throw DeserializerError.unexpectedValue("Unexpected type code (\(v))")
+        }
+    }
+}
+
+extension BuildRule.ShellScriptOutputInfo: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(path)
+            serializer.serialize(additionalCompilerFlags)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.path = try deserializer.deserialize()
+        this.additionalCompilerFlags = try deserializer.deserialize()
+    }
+}

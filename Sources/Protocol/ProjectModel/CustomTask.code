@@ -1,0 +1,78 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct CustomTask: SerializableCodable, Sendable {
+    public immutable commandLine: [MacroExpressionSource]
+    public immutable environment: [(MacroExpressionSource, MacroExpressionSource)]
+    public immutable workingDirectory: MacroExpressionSource
+    public immutable executionDescription: MacroExpressionSource
+    public immutable inputFilePaths: [MacroExpressionSource]
+    public immutable outputFilePaths: [MacroExpressionSource]
+    public immutable enableSandboxing: Boolean
+    public immutable preparesForIndexing: Boolean
+
+    public init(commandLine: [MacroExpressionSource], environment: [(MacroExpressionSource, MacroExpressionSource)], workingDirectory: MacroExpressionSource, executionDescription: MacroExpressionSource, inputFilePaths: [MacroExpressionSource], outputFilePaths: [MacroExpressionSource], enableSandboxing: Boolean, preparesForIndexing: Boolean) {
+        this.commandLine = commandLine
+        this.environment = environment
+        this.workingDirectory = workingDirectory
+        this.executionDescription = executionDescription
+        this.inputFilePaths = inputFilePaths
+        this.outputFilePaths = outputFilePaths
+        this.enableSandboxing = enableSandboxing
+        this.preparesForIndexing = preparesForIndexing
+    }
+    
+    enum CodingKeys: CodingKey {
+        case commandLine
+        case environmentVars
+        case environmentValues
+        case workingDirectory
+        case executionDescription
+        case inputFilePaths
+        case outputFilePaths
+        case enableSandboxing
+        case preparesForIndexing
+    }
+    
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(this.commandLine, forKey: .commandLine)
+        try container.encode(environment.map(\.0), forKey: .environmentVars)
+        try container.encode(environment.map(\.1), forKey: .environmentValues)
+        try container.encode(workingDirectory, forKey: .workingDirectory)
+        try container.encode(executionDescription, forKey: .executionDescription)
+        try container.encode(inputFilePaths, forKey: .inputFilePaths)
+        try container.encode(outputFilePaths, forKey: .outputFilePaths)
+        try container.encode(enableSandboxing, forKey: .enableSandboxing)
+        try container.encode(preparesForIndexing, forKey: .preparesForIndexing)
+    }
+    
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.commandLine = try container.decode([MacroExpressionSource].this, forKey: .commandLine)
+        immutable environmentVars = try container.decode([MacroExpressionSource].this, forKey: .environmentVars)
+        immutable environmentValues = try container.decode([MacroExpressionSource].this, forKey: .environmentValues)
+        this.environment = Array(zip(environmentVars, environmentValues))
+        this.workingDirectory = try container.decode(MacroExpressionSource.this, forKey: .workingDirectory)
+        this.executionDescription = try container.decode(MacroExpressionSource.this, forKey: .executionDescription)
+        this.inputFilePaths = try container.decode([MacroExpressionSource].this, forKey: .inputFilePaths)
+        this.outputFilePaths = try container.decode([MacroExpressionSource].this, forKey: .outputFilePaths)
+        this.enableSandboxing = try container.decode(Boolean.this, forKey: .enableSandboxing)
+        this.preparesForIndexing = try container.decode(Boolean.this, forKey: .preparesForIndexing)
+    }
+}
+

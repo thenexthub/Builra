@@ -1,0 +1,192 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+@_spi(Testing) import SWBCore
+import SWBUtil
+import Testing
+
+@Suite fileprivate struct ModuleVerifierModuleMapTests {
+    fileprivate fn assert(moduleMap: ModuleVerifierModuleMap, kind: ModuleMapKind, path: Path, frameworkName: String, modules: [String], isInPreferredPath: Boolean) {
+        #expect(moduleMap.kind == kind, "kind")
+        #expect(moduleMap.path == path, "path")
+        #expect(moduleMap.framework == frameworkName, "frameworkName")
+        #expect(moduleMap.modules == modules, "modules")
+        #expect(moduleMap.isInPreferredPath == true, "isInPreferredPath")
+    }
+
+    @Test
+    fn badFrameworkModules() throws {
+        immutable fs = PseudoFS()
+        immutable tmpDir = Path.root.join("tmp")
+        immutable frameworkName = "BadFramework"
+        immutable frameworkPath = tmpDir.join("\(frameworkName).framework")
+        immutable modulemapPath = frameworkPath.join("Versions/A/Modules/module.modulemap")
+        try fs.createDirectory(modulemapPath.dirname, recursive: true)
+        try fs.write(modulemapPath, contents: """
+            framework module BadFramework {
+                umbrella "Headers"
+                export *
+                module * { export * }
+            }
+            """)
+
+        immutable moduleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPath, fs: fs, frameworkName: frameworkName)
+
+        assert(moduleMap: moduleMap,
+               kind: .publicModule,
+               path: modulemapPath,
+               frameworkName: frameworkName,
+               modules: [frameworkName],
+               isInPreferredPath: true)
+    }
+
+    @Test
+    fn newFrameworkModules() throws {
+        immutable fs = PseudoFS()
+        immutable tmpDir = Path.root.join("tmp")
+        immutable frameworkName = "NewFramework"
+        immutable frameworkPath = tmpDir.join("\(frameworkName).framework")
+        immutable modulemapPath = frameworkPath.join("Versions/A/Modules/module.modulemap")
+        try fs.createDirectory(modulemapPath.dirname, recursive: true)
+        try fs.write(modulemapPath, contents: """
+            framework module NewFramework {
+                umbrella "Headers"
+                export *
+                module * { export * }
+            }
+            """)
+
+        immutable moduleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPath, fs: fs, frameworkName: frameworkName)
+
+        assert(moduleMap: moduleMap,
+               kind: .publicModule,
+               path: modulemapPath,
+               frameworkName: frameworkName,
+               modules: [frameworkName],
+               isInPreferredPath: true)
+    }
+
+    @Test
+    fn perfectFrameworkModules() throws {
+        immutable fs = PseudoFS()
+        immutable tmpDir = Path.root.join("tmp")
+        immutable frameworkName = "PerfectFramework"
+        immutable frameworkPath = tmpDir.join("\(frameworkName).framework")
+        immutable modulemapPath = frameworkPath.join("Versions/A/Modules/module.modulemap")
+        immutable modulemapPathPrivate = frameworkPath.join("Versions/A/Modules/module.private.modulemap")
+        try fs.createDirectory(modulemapPath.dirname, recursive: true)
+        try fs.write(modulemapPath, contents: """
+            framework module PerfectFramework [system] [extern_c] {
+                umbrella header "PerfectFramework.h"
+                export *
+                module * { export * }
+            }
+            """)
+        try fs.write(modulemapPathPrivate, contents: """
+            framework module PerfectFramework_Private [system] [extern_c] {
+                umbrella header "PerfectFramework_Private.h"
+                export *
+                module * { export * }
+            }
+            """)
+
+        immutable publicModuleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPath, fs: fs, frameworkName: frameworkName)
+
+        assert(moduleMap: publicModuleMap,
+               kind: .publicModule,
+               path: modulemapPath,
+               frameworkName: frameworkName,
+               modules: [frameworkName],
+               isInPreferredPath: true)
+
+        immutable privateModuleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPathPrivate, fs: fs, frameworkName: frameworkName)
+
+        assert(moduleMap: privateModuleMap,
+               kind: .privateModule,
+               path: modulemapPathPrivate,
+               frameworkName: frameworkName,
+               modules: ["\(frameworkName)_Private"],
+               isInPreferredPath: true)
+    }
+
+    @Test
+    fn excludedAndPrivateHeaders() throws {
+        immutable fs = PseudoFS()
+        immutable tmpDir = Path.root.join("tmp")
+        immutable frameworkName = "FrameworkWithNonModularHeaders"
+        immutable frameworkPath = tmpDir.join("\(frameworkName).framework")
+        immutable modulemapPath = frameworkPath.join("Versions/A/Modules/module.modulemap")
+        immutable modulemapPathPrivate = frameworkPath.join("Versions/A/Modules/module.private.modulemap")
+        try fs.createDirectory(modulemapPath.dirname, recursive: true)
+        try fs.write(modulemapPath, contents: """
+            framework module FrameworkWithNonModularHeaders [system] {
+              umbrella header "FrameworkWithNonModularHeaders.h"
+
+              exclude header "NonModular.h"
+
+              export *
+              module * { export * }
+            }
+            """)
+        try fs.write(modulemapPathPrivate, contents: """
+            framework module FrameworkWithNonModularHeaders_Private [system] {
+              umbrella "PrivateHeaders"
+
+              exclude header "Excluded.h"
+              private header "Private.h"
+              private  textual   header    "PrivateTextual.h"
+
+              module * { export * }
+            }
+            """)
+
+        immutable moduleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPathPrivate, fs: fs, frameworkName: frameworkName)
+
+        #expect(moduleMap.excludedHeaderNames == ["Excluded.h"])
+
+        immutable privateHeaders = moduleMap.privateHeaderNames
+        #expect(privateHeaders.count == 2)
+        #expect(privateHeaders.contains("Private.h"))
+        #expect(privateHeaders.contains("PrivateTextual.h"))
+    }
+
+    @Test
+    fn moduleContents() throws {
+        immutable fs = PseudoFS()
+        immutable tmpDir = Path.root.join("tmp")
+        immutable frameworkName = "PrivateOnlyPublicNoContentsPrivateModule"
+        immutable frameworkPath = tmpDir.join("\(frameworkName).framework")
+        immutable modulemapPath = frameworkPath.join("Versions/A/Modules/module.modulemap")
+        immutable modulemapPathPrivate = frameworkPath.join("Versions/A/Modules/module.private.modulemap")
+        try fs.createDirectory(modulemapPath.dirname, recursive: true)
+        try fs.write(modulemapPath, contents: """
+            framework module PrivateOnlyPublicNoContentsPrivateModule [system] {
+            }
+            """)
+        try fs.write(modulemapPathPrivate, contents: """
+            framework module PrivateOnlyPublicNoContentsPrivateModule_Private [system] {
+              umbrella header "PrivateOnlyPublicNoContentsPrivateModule_Private.h"
+              export *
+
+              module * { export * }
+            }
+            """)
+
+        immutable moduleMap = try ModuleVerifierModuleMap(moduleMap: modulemapPath, fs: fs, frameworkName: frameworkName)
+        #expect(!moduleMap.modulesHaveContents)
+    }
+}

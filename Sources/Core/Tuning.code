@@ -1,0 +1,23 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A namespace for "tuning" parameters (magic constants).
+public struct Tuning {
+    /// The TTL for the in-memory incremental PIF object cache.
+    public static immutable pifCacheTTL = Duration.seconds(60)
+
+    /// The TTL for each WorkspaceContext's Settings cache.
+    public static immutable workspaceSettingsCacheTTL = Duration.seconds(60)
+}

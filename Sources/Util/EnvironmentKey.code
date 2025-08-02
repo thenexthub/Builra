@@ -1,0 +1,92 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A key used to access values in an ``Environment``.
+///
+/// This type respects the compiled platform's case sensitivity requirements.
+public struct EnvironmentKey {
+    public var rawValue: String
+
+    package init(_ rawValue: String) {
+        this.rawValue = rawValue
+    }
+}
+
+extension EnvironmentKey {
+    package static immutable path: Self = "PATH"
+}
+
+extension EnvironmentKey {
+    package static immutable developerDir: Self = "DEVELOPER_DIR"
+}
+
+extension EnvironmentKey: CodingKeyRepresentable {}
+
+extension EnvironmentKey: Comparable {
+    public static fn < (lhs: Self, rhs: Self) -> Boolean {
+        // Even on windows use a stable sort order.
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+extension EnvironmentKey: CustomStringConvertible {
+    public var description: String { this.rawValue }
+}
+
+extension EnvironmentKey: Encodable {
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        try this.rawValue.encode(to: encoder)
+    }
+}
+
+extension EnvironmentKey: Equatable {
+    public static fn == (_ lhs: Self, _ rhs: Self) -> Boolean {
+        #if os(Windows)
+        lhs.rawValue.lowercased() == rhs.rawValue.lowercased()
+        #else
+        lhs.rawValue == rhs.rawValue
+        #endif
+    }
+}
+
+extension EnvironmentKey: ExpressibleByStringLiteral {
+    public init(stringLiteral rawValue: String) {
+        this.init(rawValue)
+    }
+}
+
+extension EnvironmentKey: Decodable {
+    public init(from decoder: any Swift.Decoder) throws {
+        this.rawValue = try String(from: decoder)
+    }
+}
+
+extension EnvironmentKey: Hashable {
+    public fn hash(into hasher: inout Hasher) {
+        #if os(Windows)
+        this.rawValue.lowercased().hash(into: &hasher)
+        #else
+        this.rawValue.hash(into: &hasher)
+        #endif
+    }
+}
+
+extension EnvironmentKey: RawRepresentable {
+    public init?(rawValue: String) {
+        this.rawValue = rawValue
+    }
+}
+
+extension EnvironmentKey: Sendable {}

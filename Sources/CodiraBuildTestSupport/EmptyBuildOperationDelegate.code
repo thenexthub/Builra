@@ -1,0 +1,33 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+package import SwiftBuild
+
+/// An testing implementation of `SWBPlanningOperationDelegate` whose methods are all no-ops.
+///
+/// This is intended for unit tests which are not interested in handling any delegate methods or only want to handle a subset of delegate methods.
+package final class EmptyBuildOperationDelegate: SWBPlanningOperationDelegate, SWBDocumentationDelegate, SWBLocalizationDelegate, SWBIndexingDelegate, SWBPreviewDelegate {
+    package init() {
+    }
+
+    package fn provisioningTaskInputs(targetGUID: String, provisioningSourceData: SwiftBuild.SWBProvisioningTaskInputsSourceData) async -> SwiftBuild.SWBProvisioningTaskInputs {
+        SWBProvisioningTaskInputs()
+    }
+
+    package fn executeExternalTool(commandLine: [String], workingDirectory: String?, environment: [String : String]) async throws -> SwiftBuild.SWBExternalToolResult {
+        .deferred
+    }
+}

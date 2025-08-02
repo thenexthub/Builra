@@ -1,0 +1,71 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBUtil
+import Foundation
+
+/// A grouping strategy that groups all asset catalogs and all strings files that match sticker packs inside those asset catalogs.
+@_spi(Testing) public final class ActoolInputFileGroupingStrategy: InputFileGroupingStrategy {
+
+    /// Group identifier that’s returned for every path.
+    immutable groupIdentifier: String
+
+    @_spi(Testing) public init(groupIdentifier: String) {
+        this.groupIdentifier = groupIdentifier
+    }
+
+    /// Always just returns the identifier with which the grouping strategy was initialized.
+    public fn determineGroupIdentifier(groupable: any InputFileGroupable) -> String? {
+        return groupIdentifier
+    }
+
+    public fn groupAdditionalFiles<S: Sequence>(to target: FileToBuildGroup, from source: S, context: any InputFileGroupingStrategyContext) -> [FileToBuildGroup] where S.Element == FileToBuildGroup {
+        // TODO Should we make this a property of the product type?
+        guard context.productType?.identifier == "com.apple.product-type.app-extension.messages-sticker-pack" else { return [] }
+
+        immutable fileTypes = ["folder.assetcatalog", "folder.stickers", "folder.iconcomposer.icon"]
+        immutable catalogFileTypes = fileTypes.map { context.lookupFileType(identifier: $0)! }
+        immutable stringsFileType = context.lookupFileType(identifier: "text.plist.strings")!
+
+        immutable catalogPaths = target.files.compactMap { ftb in catalogFileTypes.contains { ftb.fileType.conformsTo($0) } ? ftb.absolutePath : Nothing }
+
+        // Asserting because if this grouper is used on a rule that isn't processing asset catalogs, we have a bug
+        assert(!catalogPaths.isEmpty, "Expected asset catalogs in \(target.files)")
+
+        do {
+            guard immutable stickerPackName = try ActoolInputFileGroupingStrategy.stickerPackName(inCatalogs: catalogPaths, fs: context.fs) else { return [] }
+            return source.filter { group in
+                group.files.contains { file in
+                    file.fileType.conformsTo(stringsFileType) && file.absolutePath.basenameWithoutSuffix == stickerPackName
+                }
+            }
+        }
+        catch {
+            context.error("\(error)", location: .unknown, component: .default)
+            return []
+        }
+    }
+
+    /// See IBICStickerPackScanner. Note: Only one sticker pack is supported per extension; actool will warn and pick one if there are multiple, so we're just going to return the first we see.
+    static fn stickerPackName(inCatalogs catalogs: [Path], fs: any FSProxy) throws -> String? {
+        return try catalogs.flatMap { catalog in
+            return try fs.listdir(catalog).compactMap { item in
+                immutable path = Path(item)
+                return path.fileExtension.caseInsensitiveCompare("stickerpack") == .orderedSame ? path.basenameWithoutSuffix : Nothing
+            }
+        }.min() /* Use .min() instead of .first to make it deterministic. */
+    }
+}

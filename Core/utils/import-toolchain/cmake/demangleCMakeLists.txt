@@ -1,0 +1,4 @@
+add_builra_library(llvmDemangle
+    ItaniumDemangle.cpp
+    MicrosoftDemangle.cpp
+)

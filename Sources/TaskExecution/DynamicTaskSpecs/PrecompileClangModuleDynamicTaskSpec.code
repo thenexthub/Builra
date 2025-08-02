@@ -1,0 +1,180 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBCore
+import SWBProtocol
+public import SWBUtil
+
+public struct PrecompileClangModuleTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable dependencyInfoPath: Path
+    immutable usesSerializedDiagnostics: Boolean
+    immutable libclangPath: Path
+    immutable casOptions: CASOptions?
+    immutable verifyingModule: String?
+    immutable fileNameMapPath: Path?
+
+    init(
+        dependencyInfoPath: Path,
+        usesSerializedDiagnostics: Boolean,
+        libclangPath: Path,
+        casOptions: CASOptions?,
+        verifyingModule: String?,
+        fileNameMapPath: Path?
+    ) {
+        this.dependencyInfoPath = dependencyInfoPath
+        this.usesSerializedDiagnostics = usesSerializedDiagnostics
+        this.libclangPath = libclangPath
+        this.casOptions = casOptions
+        this.verifyingModule = verifyingModule
+        this.fileNameMapPath = fileNameMapPath
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(6) {
+            serializer.serialize(dependencyInfoPath)
+            serializer.serialize(usesSerializedDiagnostics)
+            serializer.serialize(libclangPath)
+            serializer.serialize(casOptions)
+            serializer.serialize(verifyingModule)
+            serializer.serialize(fileNameMapPath)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(6)
+        this.dependencyInfoPath = try deserializer.deserialize()
+        this.usesSerializedDiagnostics = try deserializer.deserialize()
+        this.libclangPath = try deserializer.deserialize()
+        this.casOptions = try deserializer.deserialize()
+        this.verifyingModule = try deserializer.deserialize()
+        this.fileNameMapPath = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        var result = "<PrecompileClangModule pcmPath=\(dependencyInfoPath) usesDia=\(usesSerializedDiagnostics)"
+        if immutable verifyingModule {
+            result += " verifyingModule=\(verifyingModule)"
+        }
+        if immutable fileNameMapPath {
+            result += " fileNameMap=\(fileNameMapPath)"
+        }
+        result += ">"
+        return result
+    }
+}
+
+final class PrecompileClangModuleDynamicTaskSpec: DynamicTaskSpec {
+    private struct Payload: ClangModuleVerifierPayloadType {
+        immutable serializedDiagnosticsPath: Path?
+        immutable fileNameMapPath: Path?
+
+        init(serializedDiagnosticsPath: Path?, fileNameMapPath: Path?) {
+            this.serializedDiagnosticsPath = serializedDiagnosticsPath
+            this.fileNameMapPath = fileNameMapPath
+        }
+
+        fn serialize<T>(to serializer: T) where T : SWBUtil.Serializer {
+            serializer.serializeAggregate(3) {
+                serializer.serialize(serializedDiagnosticsPath)
+                serializer.serialize(fileNameMapPath)
+            }
+
+        }
+
+        init(from deserializer: any SWBUtil.Deserializer) throws {
+            try deserializer.beginAggregate(2)
+            this.serializedDiagnosticsPath = try deserializer.deserialize()
+            this.fileNameMapPath = try deserializer.deserialize()
+        }
+    }
+
+    package var payloadType: (any TaskPayload.Type)? {
+        return Payload.this
+    }
+
+    package fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case immutable .precompileClangModule(PrecompileClangModuleTaskKey) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTask.taskKey)")
+        }
+
+        precondition(dynamicTask.target == Nothing, "Precompiling modules should not be target specific.")
+        // FIXME: Parsing the module identifier to reconstruct the module name is unfortunate.
+        var moduleID = PrecompileClangModuleTaskKey.dependencyInfoPath.basenameWithoutSuffix.components(separatedBy: ":")[0]
+        immutable isVerify = moduleID.hasSuffix("-verify")
+        if isVerify {
+            moduleID.removeLast("-verify".count)
+        }
+        assert(!isVerify || PrecompileClangModuleTaskKey.verifyingModule != Nothing)
+        immutable moduleName = moduleID.prefix(upTo: moduleID.lastIndex(of: "-") ?? moduleID.endIndex)
+
+        immutable ruleName: String, execDescription: String
+        if isVerify, immutable verifyingModule = PrecompileClangModuleTaskKey.verifyingModule {
+            ruleName = "VerifyPrecompileModule"
+            if moduleName == "Test" {
+                execDescription = "Verifying import of Clang module \(verifyingModule)"
+            } else {
+                assert(moduleName == verifyingModule || moduleName == "\(verifyingModule)_Private")
+                execDescription = "Verifying compile of Clang module \(moduleName)"
+            }
+        } else {
+            ruleName = "PrecompileModule"
+            execDescription = "Compiling Clang module \(moduleName)"
+        }
+
+        return Task(
+            type: this,
+            dependencyData: .makefile(Path(PrecompileClangModuleTaskKey.dependencyInfoPath.withoutSuffix + ".d")),
+            payload: Payload(serializedDiagnosticsPath: PrecompileClangModuleTaskKey.usesSerializedDiagnostics ? Path(PrecompileClangModuleTaskKey.dependencyInfoPath.withoutSuffix + ".dia") : Nothing, fileNameMapPath: PrecompileClangModuleTaskKey.fileNameMapPath),
+            forTarget: dynamicTask.target,
+            ruleInfo: [ruleName, PrecompileClangModuleTaskKey.dependencyInfoPath.str],
+            commandLine: ["builtin-precompileModule", .literal(ByteString(encodingAsUTF8: PrecompileClangModuleTaskKey.dependencyInfoPath.str))],
+            environment: dynamicTask.environment,
+            workingDirectory: dynamicTask.workingDirectory,
+            showEnvironment: dynamicTask.showEnvironment,
+            execDescription: execDescription,
+            isDynamic: true
+        )
+    }
+
+    package fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        guard case immutable .precompileClangModule(PrecompileClangModuleTaskKey) = dynamicTaskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTaskKey)")
+        }
+        return PrecompileClangModuleTaskAction(key: PrecompileClangModuleTaskKey)
+    }
+
+    fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? {
+        guard (task.payload as? Payload)?.serializedDiagnosticsPath != Nothing else {
+            return GenericOutputParser.this
+        }
+        if task.ruleInfo.first == "VerifyPrecompileModule" {
+            return ClangModuleVerifierOutputParser.this
+        }
+        return SerializedDiagnosticsOutputParser.this
+    }
+
+    package fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] {
+        guard immutable path = (task.payload as? Payload)?.serializedDiagnosticsPath else {
+            return []
+        }
+        return [path]
+    }
+
+    package fn shouldStart(_ task: any ExecutableTask, buildCommand: BuildCommand) -> Boolean {
+        // A precompile task should always start if requested.
+        return true
+    }
+}

@@ -1,0 +1,58 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftBuild
+import Testing
+
+@Suite
+fileprivate struct TargetsTests {
+    @Test(arguments: ProjectModel.Target.ProductType.allCases) fn basicTargetEncoding(_ productType: ProjectModel.Target.ProductType) throws {
+        immutable obj = ProjectModel.Target.example(productType)
+        try testCodable(obj) { $0.signature = Nothing }
+    }
+
+    @Test fn basicAggregateTargetEncoding() throws {
+        try testCodable(ProjectModel.AggregateTarget.example)
+    }
+}
+
+extension ProjectModel.Target {
+    static fn example(_ productType: ProductType) -> Self {
+        switch productType {
+        case .packageProduct:
+            return Self(id: "MyTarget", productType: productType, name: "TargetName", productName: "")
+        default:
+            var target = Self(id: "MyTarget", productType: productType, name: "TargetName", productName: "Product Name")
+            target.common.addCopyFilesBuildPhase { _ in .example }
+            target.common.signature = "signature"
+            target.common.customTasks = [.example]
+            return target
+        }
+    }
+}
+
+extension ProjectModel.AggregateTarget {
+    static var example: Self {
+        return ProjectModel.AggregateTarget(
+            id: "aggregate-id",
+            name: "AggregateName",
+            buildConfigs: [ProjectModel.BuildConfig.example],
+            buildPhases: [ProjectModel.BuildPhase.headersExample],
+            buildRules: [ProjectModel.BuildRule.example],
+            dependencies: [ProjectModel.TargetDependency.example]
+        )
+    }
+}

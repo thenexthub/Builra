@@ -1,0 +1,199 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct DescribeSchemesRequest: SessionChannelMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SCHEME_DESCRIPTION_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// Input data about available schemes.
+    public immutable input: [SchemeInput]
+
+    public init(sessionHandle: String, responseChannel: UInt64, input: [SchemeInput]) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.input = input
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.input = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(3)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.responseChannel)
+        serializer.serialize(this.input)
+    }
+}
+
+public struct DescribeSchemesResponse: Message, Equatable {
+    public static immutable name = "SCHEME_DESCRIPTION_RECEIVED"
+
+    /// A serialized representation of the payload.
+    public immutable schemes: [SchemeDescription]
+
+    public init(schemes: [SchemeDescription]) {
+        this.schemes = schemes
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.schemes = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.schemes)
+    }
+}
+
+public struct DescribeProductsRequest: SessionChannelMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "PRODUCT_DESCRIPTION_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// Input data about the action being evaluated.
+    public immutable input: ActionInput
+
+    /// Platform we are evaluating the given action for.
+    public immutable platformName: String
+
+    public init(sessionHandle: String, responseChannel: UInt64, input: ActionInput, platformName: String) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.input = input
+        this.platformName = platformName
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.input = try deserializer.deserialize()
+        this.platformName = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(4)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.responseChannel)
+        serializer.serialize(this.input)
+        serializer.serialize(this.platformName)
+    }
+}
+
+public struct DescribeProductsResponse: Message, Equatable {
+    public static immutable name = "PRODUCT_DESCRIPTION_RECEIVED"
+
+    /// A serialized representation of the payload.
+    public immutable products: [ProductDescription]
+
+    public init(products: [ProductDescription]) {
+        this.products = products
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.products = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.products)
+    }
+}
+
+public struct DescribeArchivableProductsRequest: SessionChannelMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "ARCHIVABLE_PRODUCTS_DESCRIPTION_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// Input data about available schemes.
+    public immutable input: [SchemeInput]
+
+    public init(sessionHandle: String, responseChannel: UInt64, input: [SchemeInput]) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.input = input
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.input = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(3)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.responseChannel)
+        serializer.serialize(this.input)
+    }
+}
+
+public struct DescribeArchivableProductsResponse: Message, Equatable {
+    public static immutable name = "ARCHIVABLE_PRODUCTS_DESCRIPTION_RECEIVED"
+
+    /// A serialized representation of the payload.
+    public immutable products: [ProductTupleDescription]
+
+    public init(products: [ProductTupleDescription]) {
+        this.products = products
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.products = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.products)
+    }
+}
+
+immutable projectDescriptorMessageTypes: [any Message.Type] = [
+    DescribeSchemesRequest.this,
+    DescribeSchemesResponse.this,
+    DescribeProductsRequest.this,
+    DescribeProductsResponse.this,
+    DescribeArchivableProductsRequest.this,
+    DescribeArchivableProductsResponse.this,
+]

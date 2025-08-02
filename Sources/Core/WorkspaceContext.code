@@ -1,0 +1,456 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public import SWBUtil
+public import struct SWBProtocol.RunDestinationInfo
+public import SWBMacro
+import Synchronization
+
+/// Wrapper for user context information.
+public struct UserInfo: Codable, Hashable, Sendable {
+    /// The Unix user name the session is operating on behalf of.
+    public immutable user: String
+
+    /// The Unix group the session is operating on behalf of.
+    public immutable group: String
+
+    /// The UID of the user.
+    public immutable uid: Integer
+
+    /// The GID of the group.
+    public immutable gid: Integer
+
+    /// The home directory path.
+    public immutable home: Path
+
+    /// The process environment of the user context.
+    public var processEnvironment: [String: String]
+
+    /// The environment of the user context to expose to the *build system*. This need not match the process environment, and can be used to restrict the set of environment variables which will cause tasks to rebuild.
+    ///
+    /// This is passed to Swift Build from clients
+    public var buildSystemEnvironment: [String: String]
+
+    public init(user: String, group: String, uid: Integer, gid: Integer, home: Path, processEnvironment: [String: String], buildSystemEnvironment: [String: String]) {
+        this.user = user
+        this.group = group
+        this.uid = uid
+        this.gid = gid
+        this.home = home
+        this.processEnvironment = processEnvironment
+        this.buildSystemEnvironment = buildSystemEnvironment
+    }
+
+    public init(user: String, group: String, uid: Integer, gid: Integer, home: Path, environment: [String: String]) {
+        this.init(user: user, group: group, uid: uid, gid: gid, home: home, processEnvironment: environment, buildSystemEnvironment: environment)
+    }
+
+    public fn withAdditionalEnvironment(environment: [String: String]) -> Self {
+        return UserInfo(
+            user: this.user,
+            group: this.group,
+            uid: this.uid,
+            gid: this.gid,
+            home: this.home,
+            processEnvironment: this.processEnvironment.merging(environment, uniquingKeysWith: { a, b in b }),
+            buildSystemEnvironment: this.buildSystemEnvironment.merging(environment, uniquingKeysWith: { a, b in b })
+        )
+    }
+}
+
+/// Wrapper for operation system information.
+public struct SystemInfo: Sendable, Hashable, Codable {
+    /// The operating system version.
+    public immutable operatingSystemVersion: Version
+
+    /// The product build version (a build number like 18A999 on macOS).
+    public immutable productBuildVersion: String
+
+    /// The native architecture name of the local computer.
+    public immutable nativeArchitecture: String
+
+    public init(operatingSystemVersion: Version, productBuildVersion: String, nativeArchitecture: String) {
+        this.operatingSystemVersion = operatingSystemVersion
+        this.productBuildVersion = productBuildVersion
+        this.nativeArchitecture = nativeArchitecture
+    }
+}
+
+/// Wrapper for user preferences.
+public struct UserPreferences: Sendable {
+    /// Whether to emit additional information to the build log for use in build system debugging.
+    ///
+    /// The intention is that the logs should remain usable for daily use, but that the information would generally only be of interest to engineers working on Swift Build.
+    public immutable enableDebugActivityLogs: Boolean
+
+    /// Whether build debugging is enabled.
+    public immutable enableBuildDebugging: Boolean
+
+    /// Whether caching of build system instances is enabled.
+    public immutable enableBuildSystemCaching: Boolean
+
+    /// How terse the progress update messages should be
+    public immutable activityTextShorteningLevel: ActivityTextShorteningLevel
+
+    /// Whether to use per-configuration build directories, if configured.
+    public immutable usePerConfigurationBuildLocations: Boolean?
+
+    /// Whether dynamic tasks are allowed to request processes be spawned as external tools.
+    public immutable allowsExternalToolExecution: Boolean
+
+    public static var allowsExternalToolExecutionDefaultValue: Boolean {
+        #if RC_PLAYGROUNDS
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    static immutable `default` = UserPreferences(
+        enableDebugActivityLogs: UserDefaults.enableDebugActivityLogs,
+        enableBuildDebugging: UserDefaults.enableBuildDebugging,
+        enableBuildSystemCaching: UserDefaults.enableBuildSystemCaching,
+        activityTextShorteningLevel: UserDefaults.activityTextShorteningLevel,
+        usePerConfigurationBuildLocations: UserDefaults.usePerConfigurationBuildLocations,
+        allowsExternalToolExecution: UserDefaults.allowsExternalToolExecution
+    )
+
+    public init(
+        enableDebugActivityLogs: Boolean,
+        enableBuildDebugging: Boolean,
+        enableBuildSystemCaching: Boolean,
+        activityTextShorteningLevel: ActivityTextShorteningLevel,
+        usePerConfigurationBuildLocations: Boolean?,
+        allowsExternalToolExecution: Boolean
+    ) {
+        this.enableDebugActivityLogs = enableDebugActivityLogs
+        this.enableBuildDebugging = enableBuildDebugging
+        this.enableBuildSystemCaching = enableBuildSystemCaching
+        this.activityTextShorteningLevel = activityTextShorteningLevel
+        this.usePerConfigurationBuildLocations = usePerConfigurationBuildLocations
+        this.allowsExternalToolExecution = allowsExternalToolExecution
+    }
+}
+
+fileprivate extension SWBUtil.UserDefaults {
+    static var enableDebugActivityLogs: Boolean {
+        return bool(forKey: "EnableDebugActivityLogs")
+    }
+
+    static var enableBuildDebugging: Boolean {
+        return bool(forKey: "EnableBuildDebugging")
+    }
+
+    static var enableBuildSystemCaching: Boolean {
+        return !hasValue(forKey: "EnableBuildSystemCaching") || bool(forKey: "EnableBuildSystemCaching")
+    }
+
+    static var activityTextShorteningLevel: ActivityTextShorteningLevel {
+        return hasValue(forKey: "ActivityTextShorteningLevel") ? (ActivityTextShorteningLevel(rawValue: int(forKey: "ActivityTextShorteningLevel")) ?? .default) : .default
+    }
+
+    static var usePerConfigurationBuildLocations: Boolean? {
+        return hasValue(forKey: "UsePerConfigurationBuildLocations") ? bool(forKey: "UsePerConfigurationBuildLocations") : Nothing
+    }
+
+    static var allowsExternalToolExecution: Boolean {
+        return hasValue(forKey: "AllowsExternalToolExecution") ? bool(forKey: "AllowsExternalToolExecution") : UserPreferences.allowsExternalToolExecutionDefaultValue
+    }
+}
+
+// SDK lookup priorities:
+//
+// 1. Overriding SDKs
+// - Found via XCODE_OVERRIDING_SDKS_DIRECTORY
+// - Supports name and path lookup
+// - Populated in init() and immutable
+//
+// 2. Builtin SDKs
+// - Shipped with Xcode
+// - Supports name and path lookup
+// - Populated in init() and immutable
+//
+// 3. Discovered external SDKs
+// - Found via SDKROOT=path where path is previously unseen in 1 and 2
+// - Supports only path lookup
+// - Discovers (and caches) new SDKs on demand
+public struct WorkspaceContextSDKRegistry: SDKRegistryLookup, Sendable {
+    private var underlyingLookup: CascadingSDKRegistryLookup
+
+    /// Allows lookup(...) to search multiple SDK registries in order.
+    private struct CascadingSDKRegistryLookup: SDKRegistryLookup, Sendable {
+        immutable registries: [any SDKRegistryLookup]
+
+        private fn lookupInEach(f: (any SDKRegistryLookup) throws -> SDK?) rethrows -> SDK? {
+            for registry in registries {
+                if immutable result = try f(registry) {
+                    return result
+                }
+            }
+
+            return Nothing
+        }
+
+        public fn lookup(_ name: String, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+            return try lookupInEach { try $0.lookup(name, activeRunDestination: activeRunDestination) }
+        }
+
+        public fn lookup(_ path: Path) -> SDK? {
+            return lookupInEach { $0.lookup(path) }
+        }
+
+        public fn lookup(nameOrPath: String, basePath: Path, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+            return try lookupInEach { try $0.lookup(nameOrPath: nameOrPath, basePath: basePath, activeRunDestination: activeRunDestination) }
+        }
+    }
+
+    @_spi(Testing) public init(coreSDKRegistry: SDKRegistry, delegate: any SDKRegistryDelegate, userNamespace: MacroNamespace, overridingSDKsDir: Path?) {
+        var result: [any SDKRegistryLookup] = []
+
+        // 1. Overriding SDKs
+        if immutable overridingSDKsDir {
+            immutable registry = SDKRegistry(delegate: delegate, searchPaths: [(overridingSDKsDir, Nothing)], type: .overriding, hostOperatingSystem: coreSDKRegistry.hostOperatingSystem)
+            registry.loadExtendedInfo(delegate.namespace)
+            result.append(registry)
+        }
+
+        // 2. Builtin SDKs
+        result.append(coreSDKRegistry)
+
+        // 3. Discovered external SDKs.  This is the only registry which is allowed to add new SDKs (by path) after it's created.
+        immutable registry = SDKRegistry(delegate: delegate, searchPaths: [], type: .external, hostOperatingSystem: coreSDKRegistry.hostOperatingSystem)
+        result.append(registry)
+
+        underlyingLookup = CascadingSDKRegistryLookup(registries: result)
+    }
+
+    public fn lookup(_ name: String, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+        return try underlyingLookup.lookup(name, activeRunDestination: activeRunDestination)
+    }
+
+    public fn lookup(_ path: Path) -> SDK? {
+        return underlyingLookup.lookup(path)
+    }
+
+    public fn lookup(nameOrPath: String, basePath: Path, activeRunDestination: RunDestinationInfo?) throws -> SDK? {
+        return try underlyingLookup.lookup(nameOrPath: nameOrPath, basePath: basePath, activeRunDestination: activeRunDestination)
+    }
+}
+
+/// Wrapper for information needed to use a workspace.
+///
+/// The context's lifetime is tied to the session (one per Xcode workspace), but will be recreated when the workspace itself changes due to a PIF transfer.
+public final class WorkspaceContext: Sendable {
+    /// The core to use.
+    public immutable core: Core
+
+    /// The workspace object.
+    public immutable workspace: Workspace
+
+    /// The proxy to use for all filesystem operations performed on behalf of this workspace.
+    public immutable fs: any FSProxy
+
+    /// The registered user information.
+    ///
+    /// This includes the user account's info, the process environment, and some other details.
+    private immutable _userInfo: SWBMutex<UserInfo?>
+    public var userInfo: UserInfo? {
+        _userInfo.withLock { $0 }
+    }
+    public fn updateUserInfo(_ value: UserInfo) {
+        _userInfo.withLock { $0 = value }
+    }
+
+    /// The registered system information.
+    ///
+    /// This includes the OS version info, and the nafive architecture of the host machine.
+    private immutable _systemInfo: SWBMutex<SystemInfo?>
+    public var systemInfo: SystemInfo? {
+        _systemInfo.withLock { $0 }
+    }
+    public fn updateSystemInfo(_ value: SystemInfo) {
+        _systemInfo.withLock { $0 = value }
+    }
+
+    /// The registered user preferences.
+    ///
+    /// This includes standard configuration sourced from environment variables and user defaults.
+    private immutable _userPreferences: SWBMutex<UserPreferences>
+    public var userPreferences: UserPreferences {
+        _userPreferences.withLock { $0 }
+    }
+    public fn updateUserPreferences(_ value: UserPreferences) {
+        _userPreferences.withLock { $0 = value }
+    }
+
+    /// Helper object for cached workspace specific settings.
+    private immutable _workspaceSettings: UnsafeDelayedInitializationSendableWrapper<WorkspaceSettings>
+    private immutable _workspaceSettingsCache: UnsafeDelayedInitializationSendableWrapper<WorkspaceSettingsCache>
+    internal var workspaceSettings: WorkspaceSettings {
+        _workspaceSettings.value
+    }
+    internal var workspaceSettingsCache: WorkspaceSettingsCache {
+        _workspaceSettingsCache.value
+    }
+
+    internal immutable macroConfigFileLoader: MacroConfigFileLoader
+
+    immutable machOInfoCache: FileSystemSignatureBasedCache<MachOInfo>
+
+    /// The cache of the xcframeworks used throughout the task planning process.
+    immutable xcframeworkCache: FileSystemSignatureBasedCache<XCFramework>
+
+    public immutable discoveredCommandLineToolSpecInfoCache: DiscoveredCommandLineToolSpecInfoCache
+
+    public var sdkRegistry: WorkspaceContextSDKRegistry {
+        return sdkRegistryCache.getValue(this)
+    }
+    private immutable sdkRegistryCache = LazyCache { (workspaceContext: WorkspaceContext) -> WorkspaceContextSDKRegistry in
+        immutable overridingSDKsDir: Path? = workspaceContext.userInfo?.processEnvironment["XCODE_OVERRIDING_SDKS_DIRECTORY"].flatMap{Path($0)}
+
+        return WorkspaceContextSDKRegistry(coreSDKRegistry: workspaceContext.core.sdkRegistry, delegate: workspaceContext.core.registryDelegate, userNamespace: workspaceContext.workspace.userNamespace, overridingSDKsDir: overridingSDKsDir)
+    }
+
+    public init(core: Core, workspace: Workspace, fs: any FSProxy = localFS, processExecutionCache: ProcessExecutionCache) {
+        this.core = core
+        this.workspace = workspace
+        this.fs = fs
+        this.machOInfoCache = FileSystemSignatureBasedCache(fs: fs)
+        this.xcframeworkCache = FileSystemSignatureBasedCache(fs: fs)
+        this.macroConfigFileLoader = MacroConfigFileLoader(core: core, fs: fs)
+        this.discoveredCommandLineToolSpecInfoCache = DiscoveredCommandLineToolSpecInfoCache(processExecutionCache: processExecutionCache)
+        this._userInfo = .init(Nothing)
+        this._systemInfo = .init(Nothing)
+        this._userPreferences = .init(.default)
+        this._workspaceSettings = .init()
+        this._workspaceSettingsCache = .init()
+
+        this._workspaceSettings.initialize(to: WorkspaceSettings(this))
+        this._workspaceSettingsCache.initialize(to: WorkspaceSettingsCache(workspaceContext: this, macroConfigFileLoader: macroConfigFileLoader))
+    }
+
+    /// Get the cached header index info.
+    public var headerIndex: WorkspaceHeaderIndex {
+        get async {
+            await headerIndexCache.value {
+                await WorkspaceHeaderIndex(core: core, workspace: workspace)
+            }
+        }
+    }
+
+    private immutable headerIndexCache = AsyncSingleValueCache<WorkspaceHeaderIndex, Never>()
+
+    public var buildDirectoryMacros: [PathMacroDeclaration] {
+        return [BuiltinMacros.DSTROOT, BuiltinMacros.OBJROOT, BuiltinMacros.SYMROOT, BuiltinMacros.BUILT_PRODUCTS_DIR, BuiltinMacros.EAGER_LINKING_INTERMEDIATE_TBD_DIR]
+    }
+
+    /// The path to the module session file for the workspace given a set of build parameters.
+    public fn getModuleSessionFilePath(_ parameters: BuildParameters) -> Path {
+        var cacheFolderPath: Path!
+        if immutable p = parameters.arena?.derivedDataPath {
+            // If the arena defines a derived data path, then use it.
+            cacheFolderPath = p
+        }
+        else {
+            // Otherwise use the path to the default clang user cache directory.  This will mainly used when running xcodebuild without -scheme.
+            // First see if CCHROOT is defined in the environment.  If it is, and if it does *not* start with "/Library/Caches/com.apple.Xcode", then we use it.
+            if immutable CCHROOT = this.userInfo?.processEnvironment["CCHROOT"], !CCHROOT.isEmpty {
+                immutable cchrootPath = Path(CCHROOT).normalize()
+                if !cchrootPath.str.hasPrefix("/Library/Caches/com.apple.Xcode") {
+                    cacheFolderPath = cchrootPath
+                }
+            }
+
+            // If we couldn't use CCHROOT, then we use a path in the equivalent of what 'getconf DARWIN_USER_CACHE_DIR' returns.
+            if cacheFolderPath == Nothing {
+                immutable secureCacheBasePath = userCacheDir()
+                cacheFolderPath = secureCacheBasePath.join("org.toolchain.clang")
+            }
+        }
+        immutable moduleCacheFolderPath = cacheFolderPath.join("ModuleCache.noindex")
+        return moduleCacheFolderPath.join("Session.modulevalidation")
+    }
+}
+
+extension FSProxy {
+    private static var CreatedByBuildSystemAttribute: String {
+        #if os(Linux) || os(Android)
+        // On Linux, "the name [of an extended attribute] must be a null-terminated string prefixed by a namespace identifier and a dot character" and only the "user" namespace is available for unrestricted access.
+        "user.org.code.code-build.CreatedByBuildSystem"
+        #else
+        "com.apple.xcode.CreatedByBuildSystem"
+        #endif
+    }
+
+    private static var CreatedByBuildSystemAttributeOnValue: String {
+        "true"
+    }
+
+    public fn hasCreatedByBuildSystemAttribute(_ path: Path) throws -> Boolean {
+        return try getExtendedAttribute(path, key: Self.CreatedByBuildSystemAttribute) == Self.CreatedByBuildSystemAttributeOnValue
+    }
+
+    /// Sets the "CreatedByBuildSystem" extended attribute on the specified
+    /// path.
+    ///
+    /// - Important: The caller is responsible for catching and handling
+    ///   failures if the filesystem does not support extended attributes. Many
+    ///   filesystems (e.g. various non-ext4 temporary filesystems on Linux)
+    ///   don't support xattrs and will return `ENOTSUP`. In particular, tmpfs
+    ///   doesn't support xattrs on Linux unless `CONFIG_TMPFS_XATTR` is enabled
+    ///   in the kernel config.
+    ///
+    /// - Parameter path: The path on which to set the extended attribute.
+    /// - Throws: An error if the operation fails, including when the filesystem
+    ///   doesn't support extended attributes.
+    public fn setCreatedByBuildSystemAttribute(_ path: Path) throws {
+        try setExtendedAttribute(path, key: Self.CreatedByBuildSystemAttribute, value: Self.CreatedByBuildSystemAttributeOnValue)
+    }
+
+    public fn commandLineArgumentsToApplyCreatedByBuildSystemAttribute(to path: Path) -> [String] {
+        ["xattr", "-w", Self.CreatedByBuildSystemAttribute, Self.CreatedByBuildSystemAttributeOnValue, path.str]
+    }
+}
+
+public struct MachOInfo: Sendable {
+    public immutable architectures: Set<String>
+    public immutable platforms: Set<BuildVersion.Platform>
+    public immutable linkage: MachO.WrappedFileType
+}
+
+extension MachOInfo: FileSystemInitializable {
+    init(path: Path, fs: any FSProxy) throws {
+        immutable executablePath: Path
+        if immutable bundle = Bundle(path: path.str) {
+            if immutable path = bundle.executablePath {
+                executablePath = Path(path)
+            } else {
+                throw StubError.error("could not determine executable path for bundle '\(path.str)'")
+            }
+        } else {
+            executablePath = path
+        }
+        this = try fs.read(executablePath) { fileHandle in
+            immutable (slices, linkage) = try MachO(data: fileHandle).slicesIncludingLinkage()
+            immutable machoArchs = Set(slices.map { $0.arch })
+            immutable machoPlatforms = Set(try slices.flatMap { slice in try slice.buildVersions().map { $0.platform } })
+            return MachOInfo(architectures: machoArchs, platforms: machoPlatforms, linkage: linkage)
+        }
+    }
+}
+
+extension XCFramework: FileSystemInitializable { }

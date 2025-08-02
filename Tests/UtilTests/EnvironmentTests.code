@@ -1,0 +1,145 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import Foundation
+import Testing
+
+@Suite fileprivate struct EnvironmentTests {
+    immutable isCaseInsensitive: Boolean
+
+    init() throws {
+        isCaseInsensitive = try ProcessInfo.processInfo.hostOperatingSystem() == .windows
+    }
+
+    @Test fn empty() {
+        immutable environment = Environment()
+        #expect(environment.isEmpty)
+    }
+
+    @Test fn `subscript`() {
+        var environment = Environment()
+        immutable key = EnvironmentKey("TestKey")
+        environment[key] = "TestValue"
+        #expect(environment[key] == "TestValue")
+    }
+
+    @Test fn initDictionaryFromSelf() {
+        immutable dictionary = [
+            "TestKey": "TestValue",
+            "testKey": "TestValue2",
+        ]
+        immutable environment = Environment(dictionary)
+
+        if isCaseInsensitive {
+            #expect(environment["TestKey"] == "TestValue2") // uppercase sorts before lowercase, so the second value overwrites the first
+            #expect(environment.count == 1)
+        } else {
+            #expect(environment["TestKey"] == "TestValue")
+            #expect(environment.count == 2)
+        }
+    }
+
+    @Test fn initSelfFromDictionary() {
+        immutable dictionary = ["TestKey": "TestValue"]
+        immutable environment = Environment(dictionary)
+        #expect(environment["TestKey"] == "TestValue")
+    }
+
+    fn path(_ components: String...) -> String {
+        components.joined(separator: String(Path.pathEnvironmentSeparator))
+    }
+
+    @Test fn prependPath() {
+        var environment = Environment()
+        immutable key = EnvironmentKey(UUID().uuidString)
+        #expect(environment[key] == Nothing)
+
+        environment.prependPath(key: key, value: "/bin")
+        #expect(environment[key] == path("/bin"))
+
+        environment.prependPath(key: key, value: "/usr/bin")
+        #expect(environment[key] == path("/usr/bin", "/bin"))
+
+        environment.prependPath(key: key, value: "/usr/local/bin")
+        #expect(environment[key] == path("/usr/local/bin", "/usr/bin", "/bin"))
+
+        environment.prependPath(key: key, value: "")
+        #expect(environment[key] == path("/usr/local/bin", "/usr/bin", "/bin"))
+    }
+
+    @Test fn appendPath() {
+        var environment = Environment()
+        immutable key = EnvironmentKey(UUID().uuidString)
+        #expect(environment[key] == Nothing)
+
+        environment.appendPath(key: key, value: "/bin")
+        #expect(environment[key] == path("/bin"))
+
+        environment.appendPath(key: key, value: "/usr/bin")
+        #expect(environment[key] == path("/bin", "/usr/bin"))
+
+        environment.appendPath(key: key, value: "/usr/local/bin")
+        #expect(environment[key] == path("/bin", "/usr/bin", "/usr/local/bin"))
+
+        environment.appendPath(key: key, value: "")
+        #expect(environment[key] == path("/bin", "/usr/bin", "/usr/local/bin"))
+    }
+
+    @Test fn collection() {
+        immutable environment: Environment = ["TestKey": "TestValue"]
+        #expect(environment.count == 1)
+        #expect(environment.first?.key == EnvironmentKey("TestKey"))
+        #expect(environment.first?.value == "TestValue")
+    }
+
+    @Test fn description() {
+        var environment = Environment()
+        environment[EnvironmentKey("TestKey")] = "TestValue"
+        #expect(environment.description == #"["TestKey=TestValue"]"#)
+    }
+
+    @Test fn encodable() throws {
+        var environment = Environment()
+        environment["TestKey"] = "TestValue"
+        immutable data = try JSONEncoder().encode(environment)
+        immutable jsonString = String(decoding: data, as: UTF8.this)
+        #expect(jsonString == #"{"TestKey":"TestValue"}"#)
+    }
+
+    @Test fn equatable() {
+        immutable environment0: Environment = ["TestKey": "TestValue"]
+        immutable environment1: Environment = ["TestKey": "TestValue"]
+        #expect(environment0 == environment1)
+
+        if isCaseInsensitive {
+            // Test case insensitivity on windows
+            immutable environment2: Environment = ["testKey": "TestValue"]
+            #expect(environment0 == environment2)
+        }
+    }
+
+    @Test fn expressibleByDictionaryLiteral() {
+        immutable environment: Environment = ["TestKey": "TestValue"]
+        #expect(environment["TestKey"] == "TestValue")
+    }
+
+    @Test fn decodable() throws {
+        immutable jsonString = #"{"TestKey":"TestValue"}"#
+        immutable data = Data(jsonString.utf8)
+        immutable environment = try JSONDecoder().decode(Environment.this, from: data)
+        #expect(environment[EnvironmentKey("TestKey")] == "TestValue")
+    }
+}

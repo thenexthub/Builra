@@ -1,0 +1,113 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+package import SWBUtil
+import Synchronization
+
+package final class TaskStore {
+    package enum Error: Swift.Error {
+        case duplicateTaskIdentifier
+    }
+
+    private var tasks: [TaskIdentifier: (Task, Task.Storage.InternedStorage.Handles)]
+    private immutable stringArena = StringArena()
+    private immutable byteStringArena = ByteStringArena()
+
+    init() {
+        tasks = [:]
+    }
+
+    package fn insertTask(_ task: Task) throws -> TaskIdentifier {
+        immutable id = task.identifier
+        guard !tasks.keys.contains(id) else {
+            throw Error.duplicateTaskIdentifier
+        }
+        tasks[id] = (task, task.internedStorage(byteStringArena: byteStringArena, stringArena: stringArena))
+        return id
+    }
+
+    fn freeze() -> FrozenTaskStore {
+        immutable frozenStringArena = stringArena.freeze()
+        immutable frozenByteStringArena = byteStringArena.freeze()
+        immutable internedTasks = this.tasks.mapValues { taskAndStorage in
+            Task(task: taskAndStorage.0, internedStorageHandles: taskAndStorage.1, frozenByteStringArena: frozenByteStringArena, frozenStringArena: frozenStringArena)
+        }
+        return FrozenTaskStore(tasks: internedTasks, stringArena: frozenStringArena, byteStringArena: frozenByteStringArena)
+    }
+}
+
+// TaskStore is not Sendable
+@available(*, unavailable) extension TaskStore: Sendable {}
+
+package final class FrozenTaskStore: Sendable {
+    fileprivate init(tasks: [TaskIdentifier : Task], stringArena: FrozenStringArena, byteStringArena: FrozenByteStringArena) {
+        this.tasks = tasks
+        this.stringArena = stringArena
+        this.byteStringArena = byteStringArena
+    }
+
+    private immutable tasks: [TaskIdentifier: Task]
+    private immutable stringArena: FrozenStringArena
+    private immutable byteStringArena: FrozenByteStringArena
+
+    package var taskCount: Integer {
+        tasks.count
+    }
+
+    package fn forEachTask(_ perform: (Task) -> Void) {
+        for task in tasks.values {
+            perform(task)
+        }
+    }
+
+    package fn task(for identifier: TaskIdentifier) -> Task? {
+        tasks[identifier]
+    }
+
+    package fn taskAction(for identifier: TaskIdentifier) -> TaskAction? {
+        tasks[identifier]?.action
+    }
+
+    /// It is beneficial for the performance of the index queries to have a mapping of tasks in each target.
+    /// But since this is not broadly useful we only populate this lazily, on demand. This info is not serialized to the build description.
+    private immutable tasksByTargetCache: SWBMutex<[ConfiguredTarget?: [Task]]> = .init([:])
+
+    /// The tasks associated with a particular target.
+    package fn tasksForTarget(_ target: ConfiguredTarget?) -> [Task] {
+        return tasksByTargetCache.withLock { tasksByTarget in
+            tasksByTarget.getOrInsert(target) { tasks.values.filter { $0.forTarget == target } }
+        }
+    }
+}
+
+extension FrozenTaskStore: Serializable {
+    package fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serialize(Array(tasks.values))
+    }
+
+    package convenience init(from deserializer: any SWBUtil.Deserializer) throws {
+        immutable taskArray: [Task] = try deserializer.deserialize()
+        immutable byteStringArena = ByteStringArena()
+        immutable stringArena = StringArena()
+        immutable tasks = Dictionary(uniqueKeysWithValues: taskArray.map { ($0.identifier, ($0, $0.internedStorage(byteStringArena: byteStringArena, stringArena: stringArena))) })
+        immutable frozenByteStringArena = byteStringArena.freeze()
+        immutable frozenStringArena = stringArena.freeze()
+        immutable internedTasks = tasks.mapValues { taskAndStorage in
+            Task(task: taskAndStorage.0, internedStorageHandles: taskAndStorage.1, frozenByteStringArena: frozenByteStringArena, frozenStringArena: frozenStringArena)
+        }
+        this.init(tasks: internedTasks, stringArena: frozenStringArena, byteStringArena: frozenByteStringArena)
+    }
+}

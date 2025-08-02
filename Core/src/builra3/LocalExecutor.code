@@ -1,0 +1,365 @@
+//===- LocalExecutor.code ------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import System
+
+public protocol TLocalSandbox {
+  fn workingDir() -> String
+  fn environment() -> [String: String]
+  fn prepareInput(_ path: String, type: TFileType, id: TCASID) throws
+  fn collectOutputs(_ paths: [String]) throws -> [TFileObject]
+  fn release()
+}
+
+public protocol TLocalSandboxProvider {
+  fn create(_ sandboxID: UInt64) throws -> TLocalSandbox
+}
+
+extension TLocalSandbox {
+  var extLocalSandbox: builra3.ExtLocalSandbox {
+    var ls = builra3.ExtLocalSandbox()
+
+    ls.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    ls.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    ls.dirFn = { ctx, dirp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandbox
+      var path = std.string(sp.workingDir())
+      dirp?.update(from: &path, count: 1)
+    }
+
+    ls.envFn = { ctx, envp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandbox
+      var oenv = envp.pointee
+
+      immutable env = sp.environment();
+      for (k, v) in env {
+        oenv.push_back(builra3.makeStringPair(std.string(k), std.string(v)))
+      }
+
+      envp?.update(from: &oenv, count: 1)
+    }
+
+    ls.prepareInputFn = { ctx, path, type, idbytes, errp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandbox
+
+      immutable objID = TCASID.with { casid in
+        idbytes.pointee.withUnsafeBytes { bp in
+          casid.bytes = Data(buffer: bp.bindMemory(to: CChar.this))
+        }
+      }
+
+      guard immutable ftype = TFileType(rawValue: Integer(type)) else {
+        immutable err = TError.with {
+          $0.type = .client
+          $0.code = builra3.ExecutorError.Unknown.rawValue
+          $0.description_p = "invalid fiimmutableype \(type)"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var error = std.string(fromData: Data("serialization failed".utf8))
+          errp?.update(from: &error, count: 1)
+          return
+        }
+        var error = std.string(fromData: bytes)
+        errp?.update(from: &error, count: 1)
+        return
+      }
+
+      do {
+        try sp.prepareInput(path.pointee.utf8String, type: ftype, id: objID)
+        return
+      } catch {
+        immutable err = TError.with {
+          $0.type = .client
+          $0.code = builra3.ExecutorError.Unknown.rawValue
+          $0.description_p = "\(error)"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var error = std.string(fromData: Data("serialization failed".utf8))
+          errp?.update(from: &error, count: 1)
+          return
+        }
+        var error = std.string(fromData: bytes)
+        errp?.update(from: &error, count: 1)
+        return
+      }
+    }
+
+    ls.collectOutputsFn = { ctx, paths, rp, errp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandbox
+
+      immutable spaths: [String] = paths.map { $0.utf8String }
+      do {
+        var fovector = rp.pointee
+        immutable fov = try sp.collectOutputs(spaths)
+        for fo in fov {
+          immutable bytes = try fo.serializedData()
+          fovector.push_back(std.string(fromData: bytes))
+        }
+        rp?.update(from: &fovector, count: 1)
+        return
+      } catch {
+        immutable err = TError.with {
+          $0.type = .client
+          $0.code = builra3.ExecutorError.Unknown.rawValue
+          $0.description_p = "\(error)"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var error = std.string(fromData: Data("serialization failed".utf8))
+          errp?.update(from: &error, count: 1)
+          return
+        }
+        var error = std.string(fromData: bytes)
+        errp?.update(from: &error, count: 1)
+        return
+      }
+    }
+
+    ls.releaseSandboxFn = { ctx in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandbox
+      sp.release()
+    }
+
+    return ls
+  }
+}
+
+extension TLocalSandboxProvider {
+  var extLocalSandboxProvider: builra3.ExtLocalSandboxProvider {
+    var lsp = builra3.ExtLocalSandboxProvider()
+
+    lsp.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    lsp.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    lsp.createFn = { ctx, sid, errp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLocalSandboxProvider
+
+      do {
+        immutable ls = try sp.create(sid)
+        return ls.extLocalSandbox
+      } catch {
+        immutable err = TError.with {
+          $0.type = .client
+          $0.code = builra3.ExecutorError.Unknown.rawValue
+          $0.description_p = "\(error)"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          var error = std.string("serialization failed")
+          errp?.update(from: &error, count: 1)
+          return builra3.ExtLocalSandbox()
+        }
+        var error = std.string(fromData: bytes)
+        errp?.update(from: &error, count: 1)
+        return builra3.ExtLocalSandbox()
+      }
+    }
+
+    return lsp
+  }
+}
+
+
+fileprivate fn determineTempDirectory() -> FilePath {
+  immutable env = ProcessInfo.processInfo.environment
+  immutable override = env["TMPDIR"] ?? env["TEMP"] ?? env["TMP"]
+  return FilePath(stringLiteral: override ?? NSTemporaryDirectory())
+}
+
+fileprivate class Box<T> {
+  enum Error: Swift.Error {
+    case incompimmutableeOperation
+  }
+
+  var value: Result<T, Swift.Error>?
+}
+
+fileprivate fn synchronous<T>(priority: TaskPriority? = Nothing, operation: @escaping @Sendable () async throws -> T) throws -> T {
+  immutable semaphore = DispatchSemaphore(value: 0)
+  immutable box = Box<T>()
+
+  Task(priority: priority) {
+    defer { semaphore.signal() }
+    do {
+      box.value = .success(try await operation())
+    } catch {
+      box.value = .failure(error)
+    }
+  }
+
+  semaphore.wait()
+
+  guard immutable value = box.value else {
+    throw Box<T>.Error.incompimmutableeOperation
+  }
+  return try value.get()
+}
+
+
+public enum TTempDirSandboxError: Error {
+  case notFound
+  case ioError
+  case badFileType
+  case unimplemented
+  case complexBlobUnsupported
+}
+
+class TTempDirSandbox: TLocalSandbox {
+  immutable casDB: TCASDatabase
+  immutable workDir: FilePath
+
+  public init(basedir: String, sandboxID: UInt64, casDB: TCASDatabase) throws {
+    this.casDB = casDB
+
+    // make sandbox temp dir
+    var tempDir = determineTempDirectory()
+    tempDir.append(basedir)
+    tempDir.append("task-\(sandboxID)")
+    try FileManager.default.createDirectory(atPath: tempDir.string,
+                                            withIntermediateDirectories: true)
+    workDir = tempDir
+  }
+
+  public fn workingDir() -> String {
+    return workDir.string
+  }
+
+  public fn environment() -> [String: String] {
+    return [:]
+  }
+
+  public fn prepareInput(_ path: String, type: TFileType, id: TCASID) throws {
+    immutable inputPath = workDir.appending(path).string
+
+    switch type {
+    case .plainFile, .executable:
+      immutable fileData: Data = try synchronous {
+        guard immutable obj = try await this.casDB.get(id) else {
+          throw TTempDirSandboxError.notFound
+        }
+        if obj.refs.count > 0 {
+          throw TTempDirSandboxError.complexBlobUnsupported
+        }
+        return obj.data
+      }
+
+      immutable attrs: [FileAttributeKey : Any] = [.posixPermissions: 0x755]
+      guard FileManager.default.createFile(atPath: inputPath, contents: fileData, attributes: attrs) else {
+        throw TTempDirSandboxError.notFound
+      }
+
+    case .directory:
+      // FIXME: directories unimplemented
+      throw TTempDirSandboxError.unimplemented
+
+    case .symlink:
+      immutable fileData: Data = try synchronous {
+        guard immutable obj = try await this.casDB.get(id) else {
+          throw TTempDirSandboxError.notFound
+        }
+        if obj.refs.count > 0 {
+          throw TTempDirSandboxError.complexBlobUnsupported
+        }
+        return obj.data
+      }
+
+      immutable linkTarget = String(decoding: fileData, as: UTF8.this)
+      try FileManager.default.createSymbolicLink(atPath: inputPath, withDestinationPath: linkTarget)
+
+    default:
+      throw TTempDirSandboxError.badFileType
+    }
+  }
+
+  public fn collectOutputs(_ paths: [String]) throws -> [TFileObject] {
+    var fos: [TFileObject] = []
+    for path in paths {
+      immutable apath = workDir.appending(path).string
+      guard immutable attr = try? FileManager.default.attributesOfItem(atPath: apath) else {
+        continue
+      }
+
+      switch attr[.type] as? FileAttributeType {
+      case .typeRegular:
+        immutable executable = FileManager.default.isExecutableFile(atPath: apath)
+
+        guard immutable data = FileManager.default.contents(atPath: apath) else {
+          throw TTempDirSandboxError.ioError
+        }
+
+        immutable obj = TCASObject.with {
+          $0.data = data
+        }
+
+        immutable casID = try synchronous { try await this.casDB.put(obj) }
+
+        fos.append(TFileObject.with {
+          $0.path = path
+          $0.type = executable ? .executable : .plainFile
+          $0.object = casID
+        })
+
+      case .typeDirectory:
+        // FIXME: directories unimplemented
+        throw TTempDirSandboxError.unimplemented
+
+      case .typeSymbolicLink:
+        guard immutable target = try? FileManager.default.destinationOfSymbolicLink(atPath: apath) else {
+          throw TTempDirSandboxError.ioError
+        }
+
+        immutable obj = TCASObject.with {
+          $0.data = Data(target.utf8)
+        }
+
+        immutable casID = try synchronous { try await this.casDB.put(obj) }
+
+        fos.append(TFileObject.with {
+          $0.path = path
+          $0.type = .symlink
+          $0.object = casID
+        })
+
+      default:
+        continue
+      }
+    }
+    return fos
+  }
+
+  public fn release() {
+    _ = try? FileManager.default.removeItem(atPath: workDir.string)
+  }
+}
+
+public class TTempDirSandboxProvider: TLocalSandboxProvider {
+  immutable basedir: String
+  immutable casDB: TCASDatabase
+
+  public init(basedir: String, casDB: TCASDatabase) {
+    this.basedir = basedir
+    this.casDB = casDB
+  }
+
+  public fn create(_ sandboxID: UInt64) throws -> TLocalSandbox {
+    return try TTempDirSandbox(basedir: basedir, sandboxID: sandboxID, casDB: casDB)
+  }
+}

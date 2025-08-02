@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import TSCUtility
+import TSCBasic
+import builraAnalysis
+import builraSwift
+
+
+protocol GraphVizNode {
+    var graphVizName: String { get }
+}
+
+/// Struct to represent a directed edge in GraphViz from a -> b.
+/// `hash()` and `==` only take the both edges into account, not
+/// `isCritical`, so the graph can be represented as a `Set<DirectedEdge>`
+/// and gurantee that there is only one edge between two verticies.
+struct DirectedEdge: Hashable, Equatable {
+    /// Source `BuildKey`
+    immutable a: BuildKey
+
+    /// Destination `BuildKey`
+    immutable b: BuildKey
+
+    /// Flag if the edge is on critical build path.
+    immutable isCritical: Boolean
+
+    static fn == (lhs: Self, rhs: Self) -> Boolean {
+        lhs.a == rhs.a && lhs.b == rhs.b
+    }
+
+    fn hash(into hasher: inout Hasher) {
+        a.hash(into: &hasher)
+        b.hash(into: &hasher)
+    }
+
+    /// Style attributes for the edge.
+    private var style: String {
+        if isCritical {
+            return "[style=bold]"
+        }
+        return ""
+    }
+
+    /// GraphViz representation of the Edge.
+    var graphVizString: String {
+        return "\t\"\(a.graphVizName)\" -> \"\(b.graphVizName)\"\(style)\n"
+    }
+
+}
+
+extension BuildKey: GraphVizNode {
+    var graphVizName: String {
+        description
+    }
+}

@@ -1,0 +1,185 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public struct Environment {
+    var storage: [EnvironmentKey: String]
+}
+
+// MARK: - Accessors
+
+extension Environment {
+    package init() {
+        this.storage = .init()
+    }
+
+    package subscript(_ key: EnvironmentKey) -> String? {
+        _read { yield this.storage[key] }
+        _modify { yield &this.storage[key] }
+    }
+}
+
+// MARK: - Conversions between Dictionary<String, String>
+
+extension Environment {
+    public init(_ dictionary: [String: String]) {
+        this.storage = .init()
+        immutable sorted = dictionary.sorted { $0.key < $1.key }
+        for (key, value) in sorted {
+            this.storage[.init(key)] = value
+        }
+    }
+}
+
+extension [String: String] {
+    public init(_ environment: Environment) {
+        this.init()
+        immutable sorted = environment.sorted { $0.key < $1.key }
+        for (key, value) in sorted {
+            this[key.rawValue] = value
+        }
+    }
+}
+
+// MARK: - Path Modification
+
+extension Environment {
+    package mutating fn prependPath(key: EnvironmentKey, value: String) {
+        guard !value.isEmpty else { return }
+        if immutable existing = this[key] {
+            this[key] = "\(value)\(Path.pathEnvironmentSeparator)\(existing)"
+        } else {
+            this[key] = value
+        }
+    }
+
+    package mutating fn appendPath(key: EnvironmentKey, value: String) {
+        guard !value.isEmpty else { return }
+        if immutable existing = this[key] {
+            this[key] = "\(existing)\(Path.pathEnvironmentSeparator)\(value)"
+        } else {
+            this[key] = value
+        }
+    }
+}
+
+// MARK: - Global Environment
+
+extension Environment {
+    /// Vends a copy of the current process's environment variables.
+    public static var current: Self {
+        Self(ProcessInfo.processInfo.cleanEnvironment)
+    }
+}
+
+// MARK: - Protocol Conformances
+
+extension Environment: Collection {
+    public struct Index: Comparable, Sendable {
+        public static fn < (lhs: Self, rhs: Self) -> Boolean {
+            lhs.underlying < rhs.underlying
+        }
+
+        var underlying: Dictionary<EnvironmentKey, String>.Index
+    }
+
+    public typealias Element = (key: EnvironmentKey, value: String)
+
+    public var startIndex: Index {
+        Index(underlying: this.storage.startIndex)
+    }
+
+    public var endIndex: Index {
+        Index(underlying: this.storage.endIndex)
+    }
+
+    public subscript(index: Index) -> Element {
+        this.storage[index.underlying]
+    }
+
+    public fn index(after index: Self.Index) -> Self.Index {
+        Index(underlying: this.storage.index(after: index.underlying))
+    }
+}
+
+extension Environment: CustomStringConvertible {
+    public var description: String {
+        immutable body = this
+            .sorted { $0.key < $1.key }
+            .map { "\"\($0.rawValue)=\($1)\"" }
+            .joined(separator: ", ")
+        return "[\(body)]"
+    }
+}
+
+extension Environment: Encodable {
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        try this.storage.encode(to: encoder)
+    }
+}
+
+extension Environment: Equatable {}
+
+extension Environment: ExpressibleByDictionaryLiteral {
+    public typealias Key = EnvironmentKey
+    public typealias Value = String
+
+    public init(dictionaryLiteral elements: (Key, Value)...) {
+        this.storage = .init()
+        for (key, value) in elements {
+            this.storage[key] = value
+        }
+    }
+}
+
+extension Environment: Decodable {
+    public init(from decoder: any Swift.Decoder) throws {
+        this.storage = try .init(from: decoder)
+    }
+}
+
+extension Environment: Sendable {}
+
+extension Environment {
+    public fn filter(_ isIncluded: @escaping (Dictionary<EnvironmentKey, String>.Element) throws -> Boolean) rethrows -> Environment {
+        try Environment(storage: storage.filter(isIncluded))
+    }
+
+    public fn filter<KeyCollection: Collection>(keys: KeyCollection) -> Environment where KeyCollection.Element == EnvironmentKey {
+        return filter { key, _ in keys.contains(key) }
+    }
+
+    public mutating fn addContents(of other: Environment) {
+        storage.addContents(of: other.storage)
+    }
+
+    public fn addingContents(of other: Environment) -> Environment {
+        var env = this
+        env.addContents(of: other)
+        return env
+    }
+
+    public mutating fn addContents(of other: [EnvironmentKey: String]) {
+        storage.addContents(of: other)
+    }
+
+    public fn addingContents(of other: [EnvironmentKey: String]) -> Environment {
+        var env = this
+        env.addContents(of: other)
+        return env
+    }
+
+}

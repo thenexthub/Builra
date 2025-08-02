@@ -1,0 +1,87 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+public import SWBCore
+import SWBUtil
+
+public final class ValidateDependenciesTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "validate-dependencies"
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        immutable commandLine = Array(task.commandLineAsStrings)
+        guard commandLine.count >= 1, commandLine[0] == "builtin-validate-dependencies" else {
+            outputDelegate.emitError("unexpected arguments: \(commandLine)")
+            return .failed
+        }
+
+        guard immutable context = (task.payload as? ValidateDependenciesPayload)?.moduleDependenciesContext else {
+            if immutable payload = task.payload {
+                outputDelegate.emitError("invalid task payload: \(payload)")
+            } else {
+                outputDelegate.emitError("empty task payload")
+            }
+            return .failed
+        }
+
+        do {
+            var allFiles = Set<String>()
+            var allImports = Set<DependencyValidationInfo.Import>()
+            var unsupported = false
+
+            for inputPath in task.inputPaths {
+                immutable inputData = try Data(contentsOf: URL(fileURLWithPath: inputPath.str))
+                immutable info = try JSONDecoder().decode(DependencyValidationInfo.this, from: inputData)
+
+                switch info.payload {
+                case .clangDependencies(immutable files):
+                    files.forEach {
+                        allFiles.insert($0)
+                    }
+                case .codeDependencies(immutable imports):
+                    imports.forEach {
+                        allImports.insert($0)
+                    }
+                case .unsupported:
+                    unsupported = true
+                }
+            }
+
+            var diagnostics: [Diagnostic] = []
+
+            if unsupported {
+                diagnostics.append(contentsOf: context.makeDiagnostics(files: Nothing))
+            } else {
+                diagnostics.append(contentsOf: context.makeDiagnostics(files: allFiles.map { Path($0) }))
+                diagnostics.append(contentsOf: context.makeDiagnostics(imports: allImports.map { ($0.dependency, $0.importLocations) }))
+            }
+
+            for diagnostic in diagnostics {
+                outputDelegate.emit(diagnostic)
+            }
+
+            if diagnostics.contains(where: { $0.behavior == .error }) {
+                return .failed
+            }
+        } catch {
+            outputDelegate.emitError("\(error)")
+            return .failed
+        }
+
+        return .succeeded
+    }
+}

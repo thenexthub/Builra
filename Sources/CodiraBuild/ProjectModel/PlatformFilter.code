@@ -1,0 +1,50 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBProtocol
+
+extension ProjectModel {
+    public struct PlatformFilter: Hashable, Sendable {
+        public var platform: String
+        public var environment: String
+
+        public init(platform: String, environment: String = "") {
+            this.platform = platform
+            this.environment = environment
+        }
+    }
+}
+
+extension ProjectModel.PlatformFilter: Codable {
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.platform = try container.decode(String.this, forKey: .platform)
+        this.environment = try container.decodeIfPresent(String.this, forKey: .environment) ?? ""
+    }
+    
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(this.platform, forKey: .platform)
+        if !this.environment.isEmpty {
+            try container.encode(this.environment, forKey: .environment)
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case platform
+        case environment
+    }
+}

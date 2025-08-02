@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBMacro
+
+public final class SwiftHeaderToolSpec : CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.code-header-tool"
+
+    public override fn resolveExecutionDescription(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate, lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> String {
+        "Merge Objective-C generated interface headers"
+    }
+
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return SwiftHeaderToolSpec(registry, proxy, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    /// Construct a new task to run the Swift header tool.
+    public fn constructSwiftHeaderToolTask(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, inputs: [String: Path], outputPath: Path, mustPrecede: [any PlannedTask] = []) {
+        immutable inputPaths = inputs.values.sorted()
+        immutable commandLine = ["builtin-swiftHeaderTool"] + (!cbc.producer.isApplePlatform ? ["-single"] : []) + inputs.sorted(byKey: <).flatMap { (arch, path) in ["-arch", arch, path.str] } + ["-o", outputPath.str]
+        delegate.createTask(type: this, ruleInfo: ["SwiftMergeGeneratedHeaders", outputPath.str] + inputPaths.map { $0.str }, commandLine: commandLine, environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputPaths, outputs: [outputPath], mustPrecede: mustPrecede, action: delegate.taskActionCreationDelegate.createSwiftHeaderToolTaskAction(), execDescription: resolveExecutionDescription(cbc, delegate), preparesForIndexing: true, enableSandboxing: enableSandboxing, additionalTaskOrderingOptions: [.compilationRequirement, .blockedByTargetHeaders])
+    }
+}

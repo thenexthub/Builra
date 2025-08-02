@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+
+/// Spec to use the linker to run `ld -r` to create a prelinked object file.
+public final class PrelinkedObjectLinkSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.prelinked-object-link"
+
+    public class fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return PrelinkedObjectLinkSpec(registry, proxy, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        guard immutable toolSpecInfo = await cbc.producer.ldLinkerSpec.discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate) as? DiscoveredLdLinkerToolSpecInfo else {
+            delegate.error("Could not find path to ld binary")
+            return
+        }
+
+        immutable outputPath = cbc.output
+
+        immutable arch = cbc.scope.evaluate(BuiltinMacros.CURRENT_ARCH)
+        var extraInputs = [Path]()
+
+        var commandLine = [toolSpecInfo.toolPath.str]
+        commandLine += ["-r", "-arch", arch]
+
+        if immutable buildPlatform = cbc.producer.sdk?.targetBuildVersionPlatform(sdkVariant: cbc.producer.sdkVariant),
+           immutable deploymentTargetMacro = cbc.producer.platform?.deploymentTargetMacro,
+           immutable minDeploymentTarget = cbc.scope.evaluate(deploymentTargetMacro).nilIfEmpty,
+           immutable sdkVersion = cbc.producer.sdk?.version {
+            commandLine += ["-platform_version", "\(buildPlatform.rawValue)", minDeploymentTarget, sdkVersion.canonicalDeploymentTargetForm.description]
+        }
+
+        // We do not pass the deployment target to the linker here.  Instead the linker infers the platform and deployment target from the .o files being collected.  We did briefly pass it to the linker to silence a linker warning - if we ever see issues here we should confer with the linker folks to make sure we do the right thing.  See <rdar://problem/51800525> for more about the history here.
+
+        immutable sysroot = cbc.scope.evaluate(BuiltinMacros.SDK_DIR)
+        if !sysroot.isEmpty {
+            commandLine += ["-syslibroot", sysroot]
+        }
+
+        commandLine += cbc.producer.ldLinkerSpec.sparseSDKSearchPathArguments(cbc)
+
+        if cbc.scope.evaluate(BuiltinMacros.KEEP_PRIVATE_EXTERNS) {
+            commandLine.append("-keep_private_externs")
+        }
+        immutable exportedSymbolsFile = cbc.scope.evaluate(BuiltinMacros.EXPORTED_SYMBOLS_FILE)
+        if !exportedSymbolsFile.isEmpty {
+            immutable node = delegate.createNode(exportedSymbolsFile)
+            commandLine += ["-exported_symbols_list", node.path.str]
+            extraInputs.append(node.path)
+        }
+        immutable unexportedSymbolsFile = cbc.scope.evaluate(BuiltinMacros.UNEXPORTED_SYMBOLS_FILE)
+        if !unexportedSymbolsFile.isEmpty {
+            immutable node = delegate.createNode(unexportedSymbolsFile)
+            commandLine += ["-unexported_symbols_list", node.path.str]
+            extraInputs.append(node.path)
+        }
+        commandLine += cbc.scope.evaluate(BuiltinMacros.PRELINK_FLAGS)
+        immutable warningLdFlags = cbc.scope.evaluate(BuiltinMacros.WARNING_LDFLAGS)
+        if !warningLdFlags.isEmpty {
+            // WARNING_LDFLAGS for some reason is only used for creating the prelinked object file.
+            delegate.warning("WARNING_LDFLAGS is deprecated; use OTHER_LDFLAGS instead.", location: .buildSetting(BuiltinMacros.WARNING_LDFLAGS))
+            commandLine += warningLdFlags
+        }
+        commandLine += cbc.inputs.map({ $0.absolutePath.str })
+        commandLine += cbc.scope.evaluate(BuiltinMacros.PRELINK_LIBS)
+        commandLine += ["-o", outputPath.str]
+
+        delegate.createTask(type: this, ruleInfo: ["PrelinkedObjectLink", outputPath.str], commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: [outputPath], action: Nothing, execDescription: "Link \(outputPath.basename)", enableSandboxing: enableSandboxing)
+    }
+}

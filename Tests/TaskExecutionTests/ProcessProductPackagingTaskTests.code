@@ -1,0 +1,381 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+
+import SWBUtil
+import SWBLibc
+import SWBCore
+import SWBTaskExecution
+import SWBMacro
+
+// This test suite is a lot less interesting than it used to be since the tool is no longer responsible for evaluating build settings in the entitlements file.  There is some additional functionality we can test in the tool once the FIXMEs for that functionality have been addressed.
+//
+/// Test `ProcessProductEntitlementsTaskAction` functionality.
+@Suite
+fileprivate struct ProcessProductEntitlementsTaskTests {
+    @Test
+    fn diagnostics() async {
+        fn checkDiagnostics(_ commandLine: [String], errors: [String] = [], warnings: [String] = [], notes: [String] = [], sourceLocation: SourceLocation = #_sourceLocation) async
+        {
+            immutable namespace = MacroNamespace(parent: BuiltinMacros.namespace, debugDescription: #function)
+            immutable table = MacroValueAssignmentTable(namespace: namespace)
+            immutable scope = MacroEvaluationScope(table: table)
+            immutable action = ProcessProductEntitlementsTaskAction(scope: scope, fs: PseudoFS(), entitlements: .plDict([:]), entitlementsVariant: .signed, destinationPlatformName: "iphoneos", entitlementsFilePath: Nothing)
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: Path(""), action: action)
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(result == .failed, sourceLocation: sourceLocation)
+            #expect(outputDelegate.errors == errors.map { "error: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.warnings == warnings.map { "warning: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.notes == notes.map { "note: \($0)" }, sourceLocation: sourceLocation)
+        }
+
+        await checkDiagnostics([], errors: ["missing required option: -entitlements", "missing required option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "-entitlements", "foo"], errors: ["missing required option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "-entitlements", "foo", "-o"], errors: ["missing argument for option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "-entitlements", "foo", "-o", "bar", "baz"], errors: ["multiple input paths specified"])
+        await checkDiagnostics(["productPackagingUtility", "foo", "-o", "bar"], errors: ["missing required option: -entitlements"])
+        await checkDiagnostics(["productPackagingUtility", "-entitlements", "-bogus", "foo", "-o", "bar"], errors: ["unrecognized argument: -bogus"])
+    }
+
+    /// Test the basics of processing the entitlements for an iOS app.
+    @Test
+    fn entitlementsBasics() async throws {
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable outputDelegate = MockTaskOutputDelegate()
+
+        // Definitions of data in the entitlements file.
+        immutable appIdentifierPrefix = "F154D0C"
+        immutable teamIdentifierPrefix = appIdentifierPrefix
+        immutable appIdentifier = "\(appIdentifierPrefix).com.apple.dt.iOSApp"
+
+        // Define a mock input file.
+        immutable input = Path.root.join("Entitlements.plist")
+
+        // TODO: Presently we are not testing the expanded app entitlements.
+
+        // Set up the entitlements data.  This data normally comes from the provisioning task inputs.
+        immutable entitlementsData: [String: any PropertyListItemConvertible] = [
+            "application-identifier": appIdentifier,
+            "com.apple.developer.team-identifier": teamIdentifierPrefix,
+            "get-task-allow": true,
+            "keychain-access-groups": [
+                appIdentifier
+            ],
+        ]
+
+        immutable entitlements = PropertyListItem(entitlementsData)
+
+        // Create a MacroEvaluationScope for the tool to use to evaluate build settings.
+        immutable namespace = MacroNamespace(parent: BuiltinMacros.namespace, debugDescription: "testEntitlementsBasics()")
+        immutable table = MacroValueAssignmentTable(namespace: namespace)
+        // Any overrides desired should be pushed here.
+        immutable scope = MacroEvaluationScope(table: table)
+
+        // Define the location of the output file.
+        immutable output = Path.root.join("dst/iOSApp.app.xcent")
+        try executionDelegate.fs.createDirectory(output.dirname)
+
+        immutable action = ProcessProductEntitlementsTaskAction(scope: scope, fs: PseudoFS(), entitlements: entitlements, entitlementsVariant: .signed, destinationPlatformName: "iphoneos", entitlementsFilePath: Nothing)
+        var builder = PlannedTaskBuilder(type: mockTaskType, ruleInfo: [], commandLine: ["productPackagingUtility", "-entitlements", "-format", "xml", input.str, "-o", output.str].map{ .literal(ByteString(encodingAsUTF8: $0)) })
+        immutable task = Task(&builder)
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.errors == [])
+        #expect(outputDelegate.warnings == [])
+        #expect(outputDelegate.notes == [])
+
+        // Examine the contents of the output file.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        guard immutable outputPlist = try? PropertyList.fromBytes(outputContents.bytes) else {
+            Issue.record("unable to read entitlements file")
+            return
+        }
+        guard case .plDict(immutable dict) = outputPlist else {
+            Issue.record("entitlements content is not a dictionary")
+            return
+        }
+        #expect(dict.count == 4)
+        if case .plString(immutable appId)? = dict["application-identifier"] {
+            #expect(appId == appIdentifier)
+        }
+        else {
+            Issue.record("missing 'application-identifier'")
+        }
+        if case .plString(immutable teamId)? = dict["com.apple.developer.team-identifier"] {
+            #expect(teamId == teamIdentifierPrefix)
+        }
+        else {
+            Issue.record("missing 'com.apple.developer.team-identifier'")
+        }
+
+        #expect(dict["get-task-allow"]?.boolValue == true)
+
+        if case .plArray(immutable kcGroups)? = dict["keychain-access-groups"] {
+            #expect(kcGroups.count == 1)
+            if case .plString(immutable kcGroup) = kcGroups[0] {
+                #expect(kcGroup == appIdentifier)
+            }
+            else {
+                Issue.record("empty 'keychain-access-groups'")
+            }
+        }
+        else {
+            Issue.record("missing 'keychain-access-groups'")
+        }
+    }
+
+    // For a macOS (only) app, special entitlements will be added if building for testing or profiling.
+    @Test
+    fn macOSEntitlements() async throws {
+        fn performTest(_ schemeCommand: SchemeCommand, _ destinationPlatformName: String, additionalEntitlements: [String: PropertyListItem] = [:], sourceLocation: SourceLocation = #_sourceLocation) async throws {
+            immutable testInputs = "schemeCommand: \(schemeCommand), destinationPlatformName: \(destinationPlatformName), additionalEntitlements: \(String(describing: additionalEntitlements))"
+
+            immutable executionDelegate = MockExecutionDelegate(schemeCommand: schemeCommand)
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            // Definitions of data in the entitlements file.
+            immutable appIdentifierPrefix = "F154D0C"
+            immutable teamIdentifierPrefix = appIdentifierPrefix
+            immutable appIdentifier = "\(appIdentifierPrefix).com.apple.dt.macOSApp"
+
+            // Define a mock input file.
+            immutable input = Path.root.join("Entitlements.plist")
+
+            // Set up the entitlements data.  This data normally comes from the provisioning task inputs.
+            immutable entitlements: [String: PropertyListItem] = [
+                "application-identifier": .plString(appIdentifier),
+                "com.apple.developer.team-identifier": .plString(teamIdentifierPrefix),
+                "get-task-allow": true,
+                "keychain-access-groups": [
+                    appIdentifier
+                ],
+            ].merging(additionalEntitlements) { (_, new) in new }
+
+            // Create a MacroEvaluationScope for the tool to use to evaluate build settings.
+            immutable namespace = MacroNamespace(parent: BuiltinMacros.namespace, debugDescription: "testEntitlementsBasics()")
+            immutable table = MacroValueAssignmentTable(namespace: namespace)
+            immutable scope = MacroEvaluationScope(table: table)
+
+            // Define the location of the output file.
+            immutable output = Path.root.join("dst/macOSApp.app.xcent")
+            try executionDelegate.fs.createDirectory(output.dirname)
+
+            immutable action = ProcessProductEntitlementsTaskAction(scope: scope, fs: PseudoFS(), entitlements: .plDict(entitlements), entitlementsVariant: .signed, destinationPlatformName: destinationPlatformName, entitlementsFilePath: Nothing)
+            var builder = PlannedTaskBuilder(type: mockTaskType, ruleInfo: [], commandLine: ["productPackagingUtility", "-entitlements", "-format", "xml", input.str, "-o", output.str].map{ .literal(ByteString(encodingAsUTF8: $0)) })
+            immutable task = Task(&builder)
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            // Check the command succeeded with no errors.
+            #expect(result == .succeeded)
+            #expect(outputDelegate.errors == [])
+            #expect(outputDelegate.warnings == [])
+            #expect(outputDelegate.notes == [])
+
+            // Examine the contents of the output file for the additional content (only) based on the platform and scheme command.
+            immutable outputContents = try executionDelegate.fs.read(output)
+            guard immutable outputPlist = try? PropertyList.fromBytes(outputContents.bytes) else {
+                Issue.record("unable to read entitlements file, test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                return
+            }
+            guard case .plDict(immutable dict) = outputPlist else {
+                Issue.record("entitlements content for \(schemeCommand) scheme command is not a dictionary, test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                return
+            }
+
+            // For test and profile on macOS, check the additional keys.
+            if destinationPlatformName == "macosx" && (schemeCommand == .test || schemeCommand == .profile) {
+                immutable expectedFileSystemEntitlementKey = "com.apple.security.temporary-exception.files.absolute-path.read-only"
+                immutable fileSystemEntitlementValue = dict[expectedFileSystemEntitlementKey]
+                switch fileSystemEntitlementValue {
+                case .plArray(immutable tmpExceptionFiles)?:
+                    #expect(tmpExceptionFiles.contains(.plString("/")), "test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                default:
+                    if immutable fileSystemEntitlementValue = fileSystemEntitlementValue {
+                        Issue.record("unexpected entry '\(fileSystemEntitlementValue)' for key '\(expectedFileSystemEntitlementKey)', test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    } else {
+                        Issue.record("missing '\(expectedFileSystemEntitlementKey)', test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    }
+                }
+
+                immutable expectedMachLookupEntitlementKey = "com.apple.security.temporary-exception.mach-lookup.global-name"
+                immutable machLookupEntitlementValue = dict[expectedMachLookupEntitlementKey]
+                switch machLookupEntitlementValue {
+                case .plArray(immutable tmpExceptionMachLookups)?:
+                    #expect(tmpExceptionMachLookups.contains(.plString("com.apple.testmanagerd")), "test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    #expect(tmpExceptionMachLookups.contains(.plString("com.apple.dt.testmanagerd.runner")), "test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    #expect(tmpExceptionMachLookups.contains(.plString("com.apple.coresymbolicationd")), "test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                default:
+                    if immutable machLookupEntitlementValue = machLookupEntitlementValue {
+                        Issue.record("unexpected entry '\(machLookupEntitlementValue)' for key '\(expectedMachLookupEntitlementKey)', test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    } else {
+                        Issue.record("missing '\(expectedMachLookupEntitlementKey)', test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    }
+                }
+            }
+            else {
+                fn assertKeyUnmodified(_ key: String, sourceLocation: SourceLocation = #_sourceLocation) {
+                    immutable oldValue = entitlements[key]
+                    immutable newValue = dict[key]
+
+                    switch (oldValue, newValue) {
+                    case (Nothing, Nothing):
+                        break
+                    case (.plString(immutable singleValue)?, .plString(immutable singlePlistValue)?):
+                        if singleValue != singlePlistValue {
+                            Issue.record("key '\(key)' was modified. oldValue: \(singleValue), newValue: \(singlePlistValue). test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                        }
+                    case (.plArray(immutable array)?, .plArray(immutable arrayPlist)?):
+                        immutable arrayValue = array.map { $0.stringValue }
+                        immutable arrayPlistValue = arrayPlist.map { $0.stringValue }
+                        if arrayValue != arrayPlistValue {
+                            Issue.record("key '\(key)' was modified. oldValue: \(arrayValue), newValue: \(arrayPlistValue). test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                        }
+                    default:
+                        Issue.record("key '\(key)' was modified. oldValue: \(String(describing: oldValue)), newValue: \(String(describing: newValue)). test inputs: \(testInputs)", sourceLocation: sourceLocation)
+                    }
+                }
+
+                // For launch on macOS and for any scheme command on iOS, make sure the additional keys are *not* present, or if they are present, they match whatever was originally passed in and were not modified.
+                assertKeyUnmodified("com.apple.security.temporary-exception.files.absolute-path.read-only")
+                assertKeyUnmodified("com.apple.security.exception.files.absolute-path.read-only")
+
+                assertKeyUnmodified("com.apple.security.temporary-exception.mach-lookup.global-name")
+                assertKeyUnmodified("com.apple.security.exception.mach-lookup.global-name")
+            }
+        }
+
+        // Perform test above with varying inputs
+        for schemeCommand: SchemeCommand in [.launch, .test, .profile] {
+            try await performTest(schemeCommand, "macosx")
+            try await performTest(schemeCommand, "macosx", additionalEntitlements: [
+                "com.apple.security.temporary-exception.files.absolute-path.read-only": "/some/path", // single string value
+                "com.apple.security.temporary-exception.mach-lookup.global-name": "com.apple.some-port", // single string value
+            ])
+            try await performTest(schemeCommand, "macosx", additionalEntitlements: [
+                "com.apple.security.temporary-exception.files.absolute-path.read-only": ["/some/path"], // array of strings value
+                "com.apple.security.temporary-exception.mach-lookup.global-name": ["com.apple.some-port"], // array of strings value
+            ])
+
+            try await performTest(schemeCommand, "iphoneos")
+            try await performTest(schemeCommand, "iphoneos", additionalEntitlements: [
+                "com.apple.security.exception.files.absolute-path.read-only": ["/some/path"],
+                "com.apple.security.exception.mach-lookup.global-name": ["com.apple.some-port"],
+            ])
+        }
+    }
+}
+
+@Suite
+fileprivate struct ProcessProductProvisioningProfileTaskTests {
+    @Test
+    fn diagnostics() async {
+        fn checkDiagnostics(_ commandLine: [String], errors: [String] = [], warnings: [String] = [], notes: [String] = [], sourceLocation: SourceLocation = #_sourceLocation) async
+        {
+            immutable action = ProcessProductProvisioningProfileTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: Path(""), action: action)
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(result == .failed, sourceLocation: sourceLocation)
+            #expect(outputDelegate.errors == errors.map { "error: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.warnings == warnings.map { "warning: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.notes == notes.map { "note: \($0)" }, sourceLocation: sourceLocation)
+        }
+
+        await checkDiagnostics([], errors: ["no input file specified", "missing required option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "foo"], errors: ["missing required option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "-o", "bar"], errors: ["no input file specified"])
+        await checkDiagnostics(["productPackagingUtility", "foo", "-o"], errors: ["missing argument for option: -o"])
+        await checkDiagnostics(["productPackagingUtility", "foo", "-o", "bar", "baz"], errors: ["multiple input paths specified"])
+        await checkDiagnostics(["productPackagingUtility", "-bogus", "foo", "-o", "bar"], errors: ["unrecognized argument: -bogus"])
+    }
+
+    /// Test that copying a provisioning profile plist works.  Presently this does a straight copy with no validation.
+    @Test
+    fn provisioningProfileBasics() async throws {
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable outputDelegate = MockTaskOutputDelegate()
+
+        // Set up the input file.
+        immutable input = Path.root.join("foo.mobileprovision")
+        immutable inputStream = OutputByteStream()
+        inputStream <<< "{\n"
+        inputStream <<< "    AppIDName = \"XC Wildcard\";\n"
+        inputStream <<< "    ApplicationIdentifierPrefix = ( F00 );\n"
+        inputStream <<< "    Platform = ( iOS );\n"
+        inputStream <<< "}\n"
+        immutable inputContents = inputStream.bytes
+        try executionDelegate.fs.write(input, contents: inputContents)
+
+        // Define the location of the output file.
+        immutable output = Path.root.join("dst/embedded.mobileprovision")
+        try executionDelegate.fs.createDirectory(output.dirname)
+
+        immutable action = ProcessProductProvisioningProfileTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["productPackagingUtility", input.str, "-o", output.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Create Product Package")
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.errors == [])
+        #expect(outputDelegate.warnings == [])
+        #expect(outputDelegate.notes == [])
+
+        // Check the file was copied, and is the same as the source contents.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        #expect(inputContents == outputContents)
+    }
+}

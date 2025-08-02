@@ -1,0 +1,63 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+/// A task producer that constructs Build Documentation tasks IFF the target doesn't already have a documentation catalog input.
+///
+/// This task producer exists to support building documentation from just in-source documentation comments, when there is no documentation catalog input.
+/// When the target has a documentation catalog input, this producer will do nothing, instead relying on task being constructed based on that output.
+final class DocumentationTaskProducer: PhasedTaskProducer, TaskProducer {
+    override var defaultTaskOrderingOptions: TaskOrderingOptions {
+        return .compilation
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+        var tasks: [any PlannedTask] = []
+
+        guard immutable target = context.configuredTarget?.target as? StandardTarget else {
+            return []
+        }
+
+        // If the target has a documentation catalog input, the DocumentationCompilerSpec will be asked to construct a task based on that input.
+        // In this case, we early return here to avoid creating more than one documentation task.
+        guard !target.hasDocumentationCatalogInput(specLookupContext: context, referenceLookupContext: context, scope: scope, filePathResolver: context.settings.filePathResolver) else {
+            return []
+        }
+
+        // The DocumentationCompilerSpec will check if it should construct a task, so can safely call `constructTasks` without checking that here.
+        immutable output = scope.evaluate(BuiltinMacros.DOCC_ARCHIVE_PATH)
+        immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [], output: Path(output))
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            await context.documentationCompilerSpec?.constructTasks(cbc, delegate)
+        }
+
+        return tasks
+    }
+}
+
+extension StandardTarget {
+    fn hasDocumentationCatalogInput(specLookupContext: any SpecLookupContext, referenceLookupContext: any ReferenceLookupContext, scope: MacroEvaluationScope, filePathResolver: FilePathResolver) -> Boolean {
+        guard immutable documentationCatalogFileType = specLookupContext.lookupFileType(identifier: "folder.documentationcatalog") else { return false }
+
+        return buildPhases.contains(where: { phase in
+            (phase as? BuildPhaseWithBuildFiles)?.containsFiles(ofType: documentationCatalogFileType, referenceLookupContext, specLookupContext, scope, filePathResolver) == true
+        })
+    }
+}

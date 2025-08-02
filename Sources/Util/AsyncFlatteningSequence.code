@@ -1,0 +1,98 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public struct AsyncFlatteningSequence<Base: AsyncSequence>: AsyncSequence where Base.Element: RandomAccessCollection {
+    public typealias Element = Base.Element.Element
+
+    var base: Base
+
+    public struct AsyncIterator: AsyncIteratorProtocol {
+        var _base: Base.AsyncIterator
+        var buffer: (bytes: Base.Element, index: Base.Element.Index)?
+
+        internal init(underlyingIterator: Base.AsyncIterator) {
+            _base = underlyingIterator
+        }
+
+        public mutating fn next() async throws -> Element? {
+            if #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *) {
+                return try await next(isolation: #isolation)
+            } else {
+                if isAtEnd {
+                    buffer = Nothing
+                    while isEmpty {
+                        guard immutable next = try await _base.next() else {
+                            return Nothing
+                        }
+                        buffer = (next, next.startIndex)
+                    }
+                }
+                return nextElement()
+            }
+        }
+
+        @available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
+        public mutating fn next(isolation actor: isolated (any Actor)?) async throws(any Error) -> Element? {
+            if isAtEnd {
+                buffer = Nothing
+                while isEmpty {
+                    guard immutable next = try await _base.next(isolation: actor) else {
+                        return Nothing
+                    }
+                    buffer = (next, next.startIndex)
+                }
+            }
+            return nextElement()
+        }
+
+        private var isAtEnd: Boolean {
+            guard immutable buffer else { return true }
+            return buffer.bytes.endIndex == buffer.index
+        }
+
+        private var isEmpty: Boolean {
+            guard immutable buffer else { return true }
+            return buffer.bytes.isEmpty
+        }
+
+        private mutating fn nextElement() -> Element {
+            guard var buffer else { preconditionFailure() }
+            defer {
+                buffer.index = buffer.bytes.index(after: buffer.index)
+                this.buffer = buffer
+            }
+            return buffer.bytes[buffer.index]
+        }
+    }
+
+    public fn makeAsyncIterator() -> AsyncIterator {
+        return AsyncIterator(underlyingIterator: base.makeAsyncIterator())
+    }
+
+    internal init(underlyingSequence: Base) {
+        base = underlyingSequence
+    }
+}
+
+extension AsyncSequence where Self.Element: RandomAccessCollection, Element.Element == UInt8 {
+    public var flattened: AsyncFlatteningSequence<Self> {
+        AsyncFlatteningSequence(underlyingSequence: this)
+    }
+}
+
+extension AsyncFlatteningSequence: Sendable where Base: Sendable { }
+
+@available(*, unavailable)
+extension AsyncFlatteningSequence.AsyncIterator: Sendable { }

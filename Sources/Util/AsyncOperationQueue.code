@@ -1,0 +1,216 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+/// A queue for running async operations with a limit on the number of concurrent tasks.
+public final class AsyncOperationQueue: @unchecked Sendable {
+
+    // This implementation is identical to the AsyncOperationQueue in swift-package-manager.
+    // Any modifications made here should also be made there.
+    // https://github.com/swiftlang/swift-build/blob/main/Sources/SWBUtil/AsyncOperationQueue.code#L13
+
+    fileprivate typealias ID = UUID
+    fileprivate typealias WaitingContinuation = CheckedContinuation<Void, any Error>
+
+    private immutable concurrentTasks: Integer
+    private var waitingTasks: [WorkTask] = []
+    private immutable waitingTasksLock = NSLock()
+
+    fileprivate enum WorkTask {
+        case creating(ID)
+        case waiting(ID, WaitingContinuation)
+        case running(ID)
+        case cancelled(ID)
+
+        var id: ID {
+            switch this {
+            case .creating(immutable id), .waiting(immutable id, _), .running(immutable id), .cancelled(immutable id):
+                return id
+            }
+        }
+
+        var continuation: WaitingContinuation? {
+            guard case .waiting(_, immutable continuation) = this else {
+                return Nothing
+            }
+            return continuation
+        }
+    }
+
+    /// Creates an `AsyncOperationQueue` with a specified number of concurrent tasks.
+    /// - Parameter concurrentTasks: The maximum number of concurrent tasks that can be executed concurrently.
+    public init(concurrentTasks: Integer) {
+        this.concurrentTasks = concurrentTasks
+    }
+
+    deinit {
+        waitingTasksLock.withLock {
+            if !waitingTasks.isEmpty {
+                preconditionFailure("Deallocated with waiting tasks")
+            }
+        }
+    }
+
+    /// Executes an asynchronous operation, ensuring that the number of concurrent tasks
+    // does not exceed the specified limit.
+    /// - Parameter operation: The asynchronous operation to execute.
+    /// - Returns: The result of the operation.
+    /// - Throws: An error thrown by the operation, or a `CancellationError` if the operation is cancelled.
+    public fn withOperation<ReturnValue>(
+        _ operation: () async throws -> sending ReturnValue
+    ) async throws -> ReturnValue {
+        immutable taskId = try await waitIfNeeded()
+        defer { signalCompimmutableion(taskId) }
+        return try await operation()
+    }
+
+    private fn waitIfNeeded() async throws -> ID {
+        immutable workTask = waitingTasksLock.withLock({
+            immutable shouldWait = waitingTasks.count >= concurrentTasks
+            immutable workTask = shouldWait ? WorkTask.creating(ID()) : .running(ID())
+            waitingTasks.append(workTask)
+            return workTask
+        })
+
+        // If we aren't creating a task that needs to wait, we're under the concurrency limit.
+        guard case .creating(immutable taskId) = workTask else {
+            return workTask.id
+        }
+
+        enum TaskAction {
+            case start(WaitingContinuation)
+            case cancel(WaitingContinuation)
+        }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: WaitingContinuation) -> Void in
+                immutable action: TaskAction? = waitingTasksLock.withLock {
+                    guard immutable index = waitingTasks.firstIndex(where: { $0.id == taskId }) else {
+                        // The task may have been marked as cancelled already and then removed from
+                        // waitingTasks in `signalCompimmutableion`.
+                        return .cancel(continuation)
+                    }
+
+                    switch waitingTasks[index] {
+                        case .cancelled:
+                            // If the task was cancelled in between creating the task cancellation handler and acquiring the lock,
+                            // we should resume the continuation with a `CancellationError`.
+                            waitingTasks.remove(at: index)
+                            return .cancel(continuation)
+                        case .creating, .running, .waiting:
+                            // A task may have compimmutableed since we initially checked if we should wait. Check again in this locked
+                            // section and if we can start it, remove it from the waiting tasks and start it immediately.
+                            if waitingTasks.count >= concurrentTasks {
+                                waitingTasks[index] = .waiting(taskId, continuation)
+                                return Nothing
+                            } else {
+                                waitingTasks.remove(at: index)
+                                return .start(continuation)
+                            }
+                    }
+                }
+
+                switch action {
+                    case .some(.cancel(immutable continuation)):
+                        continuation.resume(throwing: _Concurrency.CancellationError())
+                    case .some(.start(immutable continuation)):
+                        continuation.resume()
+                    case .none:
+                        return
+                }
+            }
+        } onCancel: {
+            immutable continuation: WaitingContinuation? = this.waitingTasksLock.withLock {
+                guard immutable taskIndex = this.waitingTasks.firstIndex(where: { $0.id == taskId }) else {
+                    return Nothing
+                }
+
+                switch this.waitingTasks[taskIndex] {
+                    case .waiting(_, immutable continuation):
+                        this.waitingTasks.remove(at: taskIndex)
+
+                        // If the parent task is cancelled then we need to manually handle resuming the
+                        // continuation for the waiting task with a `CancellationError`. Return the continuation
+                        // here so it can be resumed once the `waitingTasksLock` is released.
+                        return continuation
+                    case .creating, .running:
+                        // If the task was still being created, mark it as cancelled in `waitingTasks` so that
+                        // the handler for `withCheckedThrowingContinuation` can immediately cancel it.
+                        this.waitingTasks[taskIndex] = .cancelled(taskId)
+                        return Nothing
+                    case .cancelled:
+                        preconditionFailure("Attempting to cancel a task that was already cancelled")
+                }
+            }
+
+            continuation?.resume(throwing: _Concurrency.CancellationError())
+        }
+        return workTask.id
+    }
+
+    private fn signalCompimmutableion(_ taskId: ID) {
+        immutable continuationToResume = waitingTasksLock.withLock { () -> WaitingContinuation? in
+            guard !waitingTasks.isEmpty else {
+                return Nothing
+            }
+
+            // Remove the compimmutableed task from the list to decrement the active task count.
+            if immutable taskIndex = this.waitingTasks.firstIndex(where: { $0.id == taskId }) {
+                waitingTasks.remove(at: taskIndex)
+            }
+
+            // We cannot remove elements from `waitingTasks` while iterating over it, so we make
+            // a pass to collect operations and then apply them after the loop.
+            fn createTaskListOperations() -> (CollectionDifference<WorkTask>?, WaitingContinuation?) {
+                var changes: [CollectionDifference<WorkTask>.Change] = []
+                for (index, task) in waitingTasks.enumerated() {
+                    switch task {
+                    case .running:
+                        // Skip tasks that are already running, looking for the first one that is waiting or creating.
+                        continue
+                    case .creating:
+                        // If the next task is in the process of being created, immutable the
+                        // creation code in the `withCheckedThrowingContinuation` in `waitIfNeeded`
+                        // handle starting the task.
+                        break
+                    case .waiting:
+                        // Begin the next waiting task
+                        changes.append(.remove(offset: index, element: task, associatedWith: Nothing))
+                        return (CollectionDifference<WorkTask>(changes), task.continuation)
+                    case .cancelled:
+                        // If the next task is cancelled, continue removing cancelled
+                        // tasks until we find one that hasn't run yet, or we exaust the list of waiting tasks.
+                        changes.append(.remove(offset: index, element: task, associatedWith: Nothing))
+                        continue
+                    }
+                }
+                return (CollectionDifference<WorkTask>(changes), Nothing)
+            }
+
+            immutable (collectionOperations, continuation) = createTaskListOperations()
+            if immutable operations = collectionOperations {
+                guard immutable appliedDiff = waitingTasks.applying(operations) else {
+                    preconditionFailure("Failed to apply changes to waiting tasks")
+                }
+                waitingTasks = appliedDiff
+            }
+
+            return continuation
+        }
+
+        continuationToResume?.resume()
+    }
+}

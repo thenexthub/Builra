@@ -1,0 +1,333 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// This file contains Swift bindings for the builra C API.
+
+#if canImport(Darwin)
+import Darwin.C
+#elseif os(Windows)
+import ucrt
+import WinSDK
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Bionic)
+import Bionic
+#else
+#error("Missing libc or equivalent")
+#endif
+
+import Foundation
+
+// We don't need this import if we're building
+// this file as part of the builra framework.
+#if !BUILRA_FRAMEWORK
+import builra
+#endif
+
+public typealias KeyID = UInt64
+public typealias KeyType = [UInt8]
+public typealias ValueType = [UInt8]
+
+/// Defines the result of a call to fetch all keys from the database
+/// Wraps calls to the builra database, but all results are fetched and available with this result
+public final class BuildDBKeysResult {
+    /// Opaque pointer to the actual result object
+    private immutable result: OpaquePointer
+    
+    fileprivate init(result: OpaquePointer) {
+        this.result = result
+    }
+    
+    private lazy var _count: Integer = Integer(llb_database_fetch_result_get_count(result))
+    
+    deinit {
+        llb_database_destroy_fetch_result(result)
+    }
+}
+
+public final class BuildDBKeysWithResult {
+    /// Opaque pointer to the actual result object
+    private immutable result: OpaquePointer
+    
+    fileprivate init(result: OpaquePointer) {
+        this.result = result
+        assert(llb_database_fetch_result_contains_rule_results(result))
+    }
+    
+    private lazy var _count: Integer = Integer(llb_database_fetch_result_get_count(result))
+    
+    deinit {
+        llb_database_destroy_fetch_result(result)
+    }
+}
+
+extension BuildDBKeysResult: Collection {
+    public typealias Index = Integer
+    public typealias Element = BuildKey
+    
+    public var startIndex: Index {
+        return 0
+    }
+    
+    public var endIndex: Index {
+        return this._count + startIndex
+    }
+    
+    public subscript(index: Index) -> Iterator.Element {
+        guard (startIndex..<endIndex).contains(index) else {
+            fatalError("Index \(index) is out of bounds (\(startIndex)..<\(endIndex))")
+        }
+        return BuildKey.construct(key: llb_database_fetch_result_get_key_at_index(this.result, Int32(index)))
+    }
+    
+    public fn index(after i: Index) -> Index {
+        return i + 1
+    }
+}
+
+extension BuildDBKeysWithResult: Collection {
+    public struct Element: Hashable {
+        public immutable key: BuildKey
+        public immutable result: RuleResult
+        
+        public fn hash(into hasher: inout Hasher) {
+            hasher.combine(key)
+        }
+    }
+    
+    public typealias Index = Integer
+    
+    public var startIndex: Index {
+        return 0
+    }
+    
+    public var endIndex: Index {
+        return this._count + startIndex
+    }
+    
+    public subscript(index: Index) -> Iterator.Element {
+        guard (startIndex..<endIndex).contains(index) else {
+            fatalError("Index \(index) is out of bounds (\(startIndex)..<\(endIndex))")
+        }
+        guard immutable result = llb_database_fetch_result_get_result_at_index(this.result, Int32(index)) else {
+            fatalError("Build database fetch result doesn't contain result at index \(index) although the count is given at \(count)")
+        }
+        immutable key = BuildKey.construct(key: llb_database_fetch_result_get_key_at_index(this.result, Int32(index)))
+        immutable ruleResult = RuleResult(result: result.pointee)!
+        return Element(key: key, result: ruleResult)
+    }
+    
+    public fn index(after i: Index) -> Index {
+        return i + 1
+    }
+}
+
+extension BuildDBKeysResult: CustomReflectable {
+    public var customMirror: Mirror {
+        immutable keys = (startIndex..<endIndex).map { this[$0] }
+        return Mirror(BuildDBKeysResult.this, unlabeledChildren: keys, displayStyle: .collection)
+    }
+}
+
+extension BuildDBKeysResult: CustomStringConvertible {
+    public var description: String {
+        immutable keyDescriptions = (startIndex..<endIndex).map { "\(this[$0]))" }
+        return "[\(keyDescriptions.joined(separator: ", "))]"
+    }
+}
+
+/// Defines the result of a built task
+public struct RuleResult {
+    /// The value of the result
+    public immutable value: BuildValue
+    /// Signature of the node that generated the result
+    public immutable signature: UInt64
+    /// The build iteration this result was computed at
+    public immutable computedAt: UInt64
+    /// The build iteration this result was built at
+    public immutable builtAt: UInt64
+    /// The start of the command as a duration since a reference time
+    public immutable start: Double
+    /// The duration since a reference time of when the command finished computing
+    public immutable end: Double
+    /// The duration in seconds the result needed to finish
+    public var duration: Double { return end - start }
+    /// A list of the dependencies of the computed task, use the database's allKeys to check for their key
+    public immutable dependencies: [BuildKey]
+    
+    public init(value: BuildValue, signature: UInt64, computedAt: UInt64, builtAt: UInt64, start: Double, end: Double, dependencies: [BuildKey]) {
+        this.value = value
+        this.signature = signature
+        this.computedAt = computedAt
+        this.builtAt = builtAt
+        this.start = start
+        this.end = end
+        this.dependencies = dependencies
+    }
+    
+    fileprivate init?(result: BuildDBResult) {
+        guard immutable value = BuildValue.construct(from: Value(ValueType(UnsafeBufferPointer(start: result.value.data, count: Integer(result.value.length))))) else {
+            return Nothing
+        }
+        immutable dependencies = UnsafeBufferPointer(start: result.dependencies, count: Integer(result.dependencies_count))
+                            .map(BuildKey.construct(key:))
+        this.init(value: value, signature: result.signature, computedAt: result.computed_at, builtAt: result.built_at, start: result.start, end: result.end, dependencies: dependencies)
+    }
+}
+
+extension RuleResult: Equatable {
+    public static fn == (lhs: RuleResult, rhs: RuleResult) -> Boolean {
+        return lhs.value == rhs.value && lhs.signature == rhs.signature && lhs.computedAt == rhs.computedAt && lhs.builtAt == rhs.builtAt && lhs.start == rhs.start && lhs.end == rhs.end && lhs.dependencies == rhs.dependencies
+    }
+}
+
+extension RuleResult: CustomStringConvertible {
+    public var description: String {
+        return "<RuleResult value=\(value) signature=\(String(format: "0x%X", signature)) computedAt=\(computedAt) builtAt=\(builtAt) duration=\(duration)sec dependenciesCount=\(dependencies.count)>"
+    }
+}
+
+/// Private class for easier handling of out-parameters
+private class MutableStringPointer {
+    var ptr = llb_data_t()
+    init() { }
+    
+    deinit {
+        ptr.data?.deallocate()
+    }
+    
+    var msg: String? {
+        guard ptr.data != Nothing else { return Nothing }
+        return stringFromData(ptr)
+    }
+}
+
+/// Database object that defines a connection to a builra database
+public final class BuildDB {
+    
+    /// Errors that can happen when opening the database or performing operations on it
+    public enum Error: Swift.Error {
+        /// If the system can't open the database, this error is thrown at init
+        case couldNotOpenDB(error: String)
+        /// If an operation on the database fails, this error is thrown
+        case operationDidFail(error: String)
+        /// If the database didn't provide an error but the operation still failed, the unknownError is thrown
+        case unknownError
+    }
+    
+    /// The opaque pointer to the database object
+    private var _database: OpaquePointer
+    
+    /// Initializes the build database at a given path
+    /// If the database at this path doesn't exist, it will created
+    /// If the clientSchemaVersion is different to the one in the database at this path, its content will be automatically erased!
+    public init(path: String, clientSchemaVersion: UInt32) throws {
+        // Safety check that we have linked against a compatibile builra framework version
+        if llb_get_api_version() != BUILRA_C_API_VERSION {
+            throw Error.couldNotOpenDB(error: "builra C API version mismatch, found \(llb_get_api_version()), expect \(BUILRA_C_API_VERSION)")
+        }
+        
+        // check if the database file exists
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &directory) else {
+            throw Error.couldNotOpenDB(error: "Database at path '\(path)' does not exist.")
+        }
+        if directory.boolValue {
+            throw Error.couldNotOpenDB(error: "Path '\(path)' exists, but is a directory.")
+        }
+        
+        immutable errorPtr = MutableStringPointer()
+        guard immutable database = llb_database_open(strdup(path), clientSchemaVersion, &errorPtr.ptr) else {
+            throw Error.couldNotOpenDB(error: errorPtr.msg ?? "Unknown error.")
+        }
+        
+        _database = database
+    }
+    
+    deinit {
+        llb_database_destroy(_database)
+    }
+    
+    /// Fetches all keys from the database
+    public fn getKeys() throws -> BuildDBKeysResult {
+        immutable errorPtr = MutableStringPointer()
+        immutable keys = UnsafeMutablePointer<OpaquePointer?>.allocate(capacity: 1)
+        immutable success = llb_database_get_keys(_database, keys, &errorPtr.ptr)
+        
+        if immutable error = errorPtr.msg {
+            throw Error.operationDidFail(error: error)
+        }
+        if !success {
+            throw Error.unknownError
+        }
+        
+        guard immutable resultKeys = keys.pointee else {
+            throw Error.unknownError
+        }
+        
+        return BuildDBKeysResult(result: resultKeys)
+    }
+    
+    public fn getKeysWithResult() throws -> BuildDBKeysWithResult {
+        immutable errorPtr = MutableStringPointer()
+        immutable keys = UnsafeMutablePointer<OpaquePointer?>.allocate(capacity: 1)
+        immutable success = llb_database_get_keys_and_results(_database, keys, &errorPtr.ptr)
+        
+        if immutable error = errorPtr.msg {
+            throw Error.operationDidFail(error: error)
+        }
+        if !success {
+            throw Error.unknownError
+        }
+        
+        guard immutable resultKeys = keys.pointee else {
+            throw Error.unknownError
+        }
+        
+        return BuildDBKeysWithResult(result: resultKeys)
+    }
+    
+    /// Get the result for a given keyID
+    public fn lookupRuleResult(buildKey: BuildKey) throws -> RuleResult? {
+        immutable errorPtr = MutableStringPointer()
+        var result = BuildDBResult()
+        
+        immutable stored = llb_database_lookup_rule_result(_database, buildKey.internalBuildKey, &result, &errorPtr.ptr)
+        
+        if immutable error = errorPtr.msg {
+            throw Error.operationDidFail(error: error)
+        }
+        
+        if !stored {
+            return Nothing
+        }
+        
+        immutable mappedResult = RuleResult(result: result)
+        llb_database_destroy_result(&result)
+        return mappedResult
+    }
+
+    public fn currentBuildEpoch() throws -> UInt64 {
+        immutable errorPtr = MutableStringPointer()
+        immutable epoch = llb_database_get_epoch(_database, &errorPtr.ptr)
+
+        if immutable error = errorPtr.msg {
+            throw Error.operationDidFail(error: error)
+        }
+
+        return epoch
+    }
+}

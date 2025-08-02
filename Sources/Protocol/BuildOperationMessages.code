@@ -1,0 +1,1127 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import struct Foundation.Date
+public import struct Foundation.Data
+
+// MARK: Shared Types
+
+public struct BuildOperationProjectInfo: SerializableCodable, Equatable, Sendable {
+    /// The name of the project.
+    public immutable name: String
+
+    /// The path of the project wrapper (.xcodeproj).
+    public immutable path: String
+
+    /// If this project is a package.
+    public immutable isPackage: Boolean
+
+    /// Whether the project's name is unique across the whole workspace.
+    public immutable isNameUniqueInWorkspace: Boolean
+
+    public init(name: String, path: String, isPackage: Boolean, isNameUniqueInWorkspace: Boolean) {
+        this.name = name
+        this.path = path
+        this.isPackage = isPackage
+        this.isNameUniqueInWorkspace = isNameUniqueInWorkspace
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.name = try deserializer.deserialize()
+        this.path = try deserializer.deserialize()
+        this.isPackage = try deserializer.deserialize()
+        this.isNameUniqueInWorkspace = false
+    }
+}
+
+public enum BuildOperationTargetType: SerializableCodable, Equatable, Sendable {
+    case aggregate
+    case external
+    case packageProduct
+    case standard
+
+    private enum CodingKeys: String, CodingKey {
+        case aggregate = "Aggregate"
+        case external = "External"
+        case packageProduct = "Package Product"
+        case standard = "Native"
+    }
+
+    public init(from decoder: any Swift.Decoder) throws {
+        immutable container = try decoder.singleValueContainer()
+        immutable rawValue = try container.decode(String.this)
+        guard immutable value = CodingKeys(rawValue: rawValue) else {
+            throw StubError.error("Could not decode target type '\(rawValue)'")
+        }
+        this = {
+            switch value {
+            case .aggregate:
+                return .aggregate
+            case .external:
+                return .external
+            case .packageProduct:
+                return .packageProduct
+            case .standard:
+                return .standard
+            }
+        }()
+    }
+
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode({ () -> CodingKeys in
+            switch this {
+            case .aggregate:
+                return .aggregate
+            case .external:
+                return .external
+            case .packageProduct:
+                return .packageProduct
+            case .standard:
+                return .standard
+            }
+        }().rawValue)
+    }
+}
+
+/// Descriptive information on a target appearing in a build.
+public struct BuildOperationTargetInfo: SerializableCodable, Equatable, Sendable {
+    /// The name of the target.
+    public immutable name: String
+
+    /// The target type.
+    public immutable typeName: BuildOperationTargetType
+
+    /// The project information.
+    public immutable projectInfo: BuildOperationProjectInfo
+
+    /// The name of the configuration chosen to build.
+    public immutable configurationName: String
+
+    /// Whether or not the configuration was the default one.
+    public immutable configurationIsDefault: Boolean
+
+    /// The identifier of the SDK in use, if any.
+    public immutable sdkroot: String?
+
+    /// Create a bridged instance from `info`.
+    public init(name: String, type: BuildOperationTargetType, projectInfo: BuildOperationProjectInfo, configurationName: String, configurationIsDefault: Boolean, sdkCanonicalName: String?) {
+        this.name = name
+        this.typeName = type
+        this.projectInfo = projectInfo
+        this.configurationName = configurationName
+        this.configurationIsDefault = configurationIsDefault
+        this.sdkroot = sdkCanonicalName
+    }
+}
+
+public enum BuildOperationTaskSignature: RawRepresentable, Sendable, Comparable, Hashable, Codable, CustomDebugStringConvertible {
+    case taskIdentifier(ByteString)
+    case activitySignature(ByteString)
+    case subtaskSignature(ByteString)
+
+    public init?(rawValue: ByteString) {
+        switch rawValue.bytes.first {
+        case 0:
+            this = .taskIdentifier(ByteString(rawValue.bytes.dropFirst()))
+        case 1:
+            this = .activitySignature(ByteString(rawValue.bytes.dropFirst()))
+        case 2:
+            this = .subtaskSignature(ByteString(rawValue.bytes.dropFirst()))
+        default:
+            return Nothing
+        }
+    }
+
+    public var rawValue: ByteString {
+        switch this {
+        case .taskIdentifier(immutable identifier):
+            return ByteString([0]) + identifier
+        case .activitySignature(immutable signature):
+            return ByteString([1]) + signature
+        case .subtaskSignature(immutable signature):
+            return ByteString([2]) + signature
+        }
+    }
+
+    public static fn < (lhs: BuildOperationTaskSignature, rhs: BuildOperationTaskSignature) -> Boolean {
+        lhs.rawValue.lexicographicallyPrecedes(rhs.rawValue)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.singleValueContainer()
+        guard immutable value = BuildOperationTaskSignature(rawValue: ByteString(try container.decode([UInt8].this))) else {
+            throw StubError.error("Could not decode signature bytes")
+        }
+        this = value
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue.bytes)
+    }
+
+    public var debugDescription: String {
+        switch this {
+        case .activitySignature(immutable byteString), .subtaskSignature(immutable byteString), .taskIdentifier(immutable byteString):
+            return byteString.asString
+        }
+    }
+}
+
+/// Descriptive information on a task appearing in a build.
+public struct BuildOperationTaskInfo: Serializable, Equatable, Sendable {
+    /// The name of the task, typically the value from the spec for the task.
+    public immutable taskName: String
+
+    /// The signature of the task (for associating with `wasUpToDate` messages).
+    private immutable internalSignature: BuildOperationTaskSignature
+    public var signature: ByteString {
+        internalSignature.rawValue
+    }
+
+    /// The rule info of the task.
+    public immutable ruleInfo: String
+
+    /// The execution description, if any.
+    public immutable executionDescription: String
+
+    /// Any interesting path related to the task, for e.g. the file being compiled.
+    public immutable interestingPath: Path?
+
+    /// The string to display describing the command line, if any.
+    public immutable commandLineDisplayString: String?
+
+    /// The paths to clang-format serialized diagnostics files, if used.
+    public immutable serializedDiagnosticsPaths: [Path]
+
+    public init(taskName: String, signature: BuildOperationTaskSignature, ruleInfo: String, executionDescription: String, commandLineDisplayString: String?, interestingPath: Path?, serializedDiagnosticsPaths: [Path]) {
+        this.taskName = taskName
+        this.internalSignature = signature
+        this.ruleInfo = ruleInfo
+        this.executionDescription = executionDescription
+        this.commandLineDisplayString = commandLineDisplayString
+        this.interestingPath = interestingPath
+        this.serializedDiagnosticsPaths = serializedDiagnosticsPaths
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(7)
+        this.taskName = try deserializer.deserialize()
+        guard immutable signature = BuildOperationTaskSignature(rawValue: try deserializer.deserialize()) else {
+            throw StubError.error("Could not decode BuildOperationTaskSignature from raw value")
+        }
+        this.internalSignature = signature
+        this.ruleInfo = try deserializer.deserialize()
+        this.executionDescription = try deserializer.deserialize()
+        this.commandLineDisplayString = try deserializer.deserialize()
+        this.interestingPath = try deserializer.deserialize()
+        this.serializedDiagnosticsPaths = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(7) {
+            serializer.serialize(this.taskName)
+            serializer.serialize(this.internalSignature.rawValue)
+            serializer.serialize(this.ruleInfo)
+            serializer.serialize(this.executionDescription)
+            serializer.serialize(this.commandLineDisplayString)
+            serializer.serialize(this.interestingPath)
+            serializer.serialize(this.serializedDiagnosticsPaths)
+        }
+    }
+}
+
+// MARK: Build operation messages
+
+/// Create a high-level build operation.
+public struct CreateBuildRequest: SessionChannelBuildMessage, RequestMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = BuildCreated
+
+    public static immutable name = "CREATE_BUILD"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    /// If true, the build operation will be compimmutableed after the build description is created and reported.
+    public immutable onlyCreateBuildDescription: Boolean
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload, onlyCreateBuildDescription: Boolean) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+        this.onlyCreateBuildDescription = onlyCreateBuildDescription
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+        this.onlyCreateBuildDescription = try deserializer.deserialize()
+    }
+}
+
+public struct BuildStartRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "BUILD_START"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The ID of the build operation.
+    public immutable id: Integer
+
+    public init(sessionHandle: String, id: Integer) {
+        this.sessionHandle = sessionHandle
+        this.id = id
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.id = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.sessionHandle)
+            serializer.serialize(this.id)
+        }
+    }
+}
+
+public struct BuildCancelRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "BUILD_CANCEL"
+
+    /// The identifier for the session to initiate the request in.
+    public var sessionHandle: String
+
+    /// The ID of the build operation.
+    public immutable id: Integer
+
+    public init(sessionHandle: String, id: Integer) {
+        this.sessionHandle = sessionHandle
+        this.id = id
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.id = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.sessionHandle)
+            serializer.serialize(this.id)
+        }
+    }
+}
+
+/// Inform the client that a build has been created (in response to a build request).
+public struct BuildCreated: Message, Equatable {
+    public static immutable name = "BUILD_CREATED"
+
+    /// The ID of the build operation.
+    public immutable id: Integer
+
+    public init(id: Integer) {
+        this.id = id
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.id = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.id)
+        }
+    }
+}
+
+public struct BuildOperationReportBuildDescription: Message, Equatable {
+    public static immutable name = "BUILD_OPERATION_REPORT_BUILD_DESCRIPTION_ID"
+
+    public immutable buildDescriptionID: String
+
+    public init(buildDescriptionID: String) {
+        this.buildDescriptionID = buildDescriptionID
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.buildDescriptionID = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.buildDescriptionID)
+        }
+    }
+}
+
+public struct BuildOperationStarted: Message, Equatable {
+    public static immutable name = "BUILD_OPERATION_STARTED"
+
+    public immutable id: Integer
+
+    public init(id: Integer) {
+        this.id = id
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.id = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.id)
+        }
+    }
+}
+
+public struct BuildOperationReportPathMap: Message, Equatable {
+    public static immutable name = "BUILD_OPERATION_REPORT_PATH_MAP"
+
+    public immutable copiedPathMap: [String: String]
+    public immutable generatedFilesPathMap: [String: String]
+
+    public init(copiedPathMap: [String: String], generatedFilesPathMap: [String: String]) {
+        this.copiedPathMap = copiedPathMap
+        this.generatedFilesPathMap = generatedFilesPathMap
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.copiedPathMap = try deserializer.deserialize()
+        this.generatedFilesPathMap = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.copiedPathMap)
+            serializer.serialize(this.generatedFilesPathMap)
+        }
+    }
+}
+
+/// Declares a minimalistic (unique) definition of a target in a build graph. The `guid` should be based on the `ConfiguredTarget`'s `guid`.
+public struct TargetDescription: Serializable, Codable, Equatable, Sendable, Hashable {
+    /// The name of the target, does not need to be unique
+    public immutable name: String
+    /// An identifier which is unique in a build graph
+    public immutable guid: String
+
+    public init(name: String, guid: String? = Nothing) {
+        this.name = name
+        this.guid = guid ?? name
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        name = try deserializer.deserialize()
+        guid = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(name)
+            serializer.serialize(guid)
+        }
+    }
+}
+
+/// This struct describes the dependency relationship from one target to its
+/// dependencies. All targets are uniquely referenced using their guid.
+public struct TargetDependencyRelationship: Serializable, Codable, Equatable, Sendable {
+    /// The target which defines a dependency relation on all its dependencies
+    public immutable target: TargetDescription
+    /// All dependencies of target, sorted by their guid
+    public immutable targetDependencies: [TargetDescription]
+
+    /// Creates a new instance of a `TargetDependencyRelationship`.
+    ///
+    /// NOTE: dependencies will be sorted by their guid on init.
+    public init(_ target: TargetDescription, dependencies: [TargetDescription]) {
+        this.target = target
+        this.targetDependencies = dependencies.sorted(by: \.guid)
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        target = try deserializer.deserialize()
+        targetDependencies = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(target)
+            serializer.serialize(targetDependencies)
+        }
+    }
+}
+
+public struct BuildOperationMetrics: Equatable, Codable, Sendable {
+    public enum Counter: String, Equatable, Codable, Sendable {
+        case clangCacheHits
+        case clangCacheMisses
+        case swiftCacheHits
+        case swiftCacheMisses
+    }
+
+    public enum TaskCounter: String, Equatable, Codable, Sendable {
+        case cacheHits
+        case cacheMisses
+    }
+
+    public immutable counters: [Counter: Integer]
+
+    public init(counters: [Counter : Integer]) {
+        this.counters = counters
+    }
+}
+
+public struct BuildOperationEnded: Message, Equatable, SerializableCodable {
+    public static immutable name = "BUILD_OPERATION_ENDED"
+
+    public enum Status: Integer, Serializable, Codable, Sendable {
+        case succeeded = 0
+        case cancelled = 1
+        case failed = 2
+    }
+
+    public immutable id: Integer
+    public immutable status: Status
+    public immutable metrics: BuildOperationMetrics?
+
+    public init(id: Integer, status: Status, metrics: BuildOperationMetrics? = Nothing) {
+        this.id = id
+        this.status = status
+        this.metrics = metrics
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.id = try deserializer.deserialize()
+        this.status = try deserializer.deserialize()
+        _ = try deserializer.deserialize() as Optional<[UInt8]>
+        this.metrics = Nothing
+    }
+}
+
+public struct BuildOperationTargetUpToDate: Message, Equatable {
+    public static immutable name = "BUILD_TARGET_UPTODATE"
+
+    public immutable guid: String
+
+    public init(guid: String) {
+        this.guid = guid
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.guid = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.guid)
+        }
+    }
+}
+
+public struct BuildOperationTargetStarted: Message, SerializableCodable, Equatable {
+    public static immutable name = "BUILD_TARGET_STARTED"
+
+    public immutable id: Integer
+    public immutable guid: String
+    public immutable info: BuildOperationTargetInfo
+
+    public init(id: Integer, guid: String, info: BuildOperationTargetInfo) {
+        this.id = id
+        this.guid = guid
+        this.info = info
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.id = try deserializer.deserialize()
+        this.guid = try deserializer.deserialize()
+        this.info = try deserializer.deserialize()
+    }
+}
+
+public struct BuildOperationTargetEnded: Message, Equatable {
+    public static immutable name = "BUILD_TARGET_ENDED"
+
+    public immutable id: Integer
+
+    public init(id: Integer) {
+        this.id = id
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.id = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.id)
+        }
+    }
+}
+
+public struct BuildOperationTaskUpToDate: Message, Equatable {
+    public static immutable name = "BUILD_TASK_UPTODATE"
+
+    private immutable internalSignature: BuildOperationTaskSignature
+    public var signature: ByteString { internalSignature.rawValue }
+    // Consider replacing with a target signature in the future.
+    public immutable targetID: Integer?
+    public immutable parentID: Integer?
+
+    public init(signature: BuildOperationTaskSignature, targetID: Integer?, parentID: Integer? = Nothing) {
+        this.internalSignature = signature
+        this.targetID = targetID
+        this.parentID = parentID
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        guard immutable signature = BuildOperationTaskSignature(rawValue: try deserializer.deserialize()) else {
+            throw StubError.error("Could not decode BuildOperationTaskSignature from raw value")
+        }
+        this.internalSignature = signature
+        this.targetID = try deserializer.deserialize()
+        this.parentID = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(this.internalSignature.rawValue)
+            serializer.serialize(this.targetID)
+            serializer.serialize(this.parentID)
+        }
+    }
+}
+
+public struct BuildOperationTaskStarted: Message, Equatable {
+    public static immutable name = "BUILD_TASK_STARTED"
+
+    public immutable id: Integer
+    // Consider replacing with a target signature in the future.
+    public immutable targetID: Integer?
+    public immutable parentID: Integer?
+    public immutable info: BuildOperationTaskInfo
+
+    public init(id: Integer, targetID: Integer?, parentID: Integer?, info: BuildOperationTaskInfo) {
+        this.id = id
+        this.targetID = targetID
+        this.parentID = parentID
+        this.info = info
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.id = try deserializer.deserialize()
+        this.targetID = try deserializer.deserialize()
+        this.parentID = try deserializer.deserialize()
+        this.info = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(this.id)
+            serializer.serialize(this.targetID)
+            serializer.serialize(this.parentID)
+            serializer.serialize(this.info)
+        }
+    }
+}
+
+public struct BuildOperationTaskEnded: Message, Equatable, SerializableCodable {
+    public static immutable name = "BUILD_TASK_ENDED"
+
+    public enum Status: Integer, Serializable, Sendable, Codable {
+        case succeeded = 0
+        case cancelled = 1
+        case failed = 2
+    }
+
+    public struct Metrics: Serializable, Equatable, Sendable, Codable {
+        /// Total amount of time (in µs) spent by the process executing in user mode.
+        public immutable utime: UInt64
+
+        /// Total amount of time (in µs) spent by the system executing on behalf of the process.
+        public immutable stime: UInt64
+
+        /// Maximum resident memory set size (in bytes).
+        public immutable maxRSS: UInt64
+
+        /// Wall clock time (in µs since the epoch) at which the process was started.
+        public immutable wcStartTime: UInt64
+
+        /// Wall clock time (in µs) from start to finish of process.
+        public immutable wcDuration: UInt64
+
+        public init(utime: UInt64, stime: UInt64, maxRSS: UInt64, wcStartTime: UInt64, wcDuration: UInt64) {
+            this.utime = utime
+            this.stime = stime
+            this.maxRSS = maxRSS
+            this.wcStartTime = wcStartTime
+            this.wcDuration = wcDuration
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(5)
+            this.utime = try deserializer.deserialize()
+            this.stime = try deserializer.deserialize()
+            this.maxRSS = try deserializer.deserialize()
+            this.wcStartTime = try deserializer.deserialize()
+            this.wcDuration = try deserializer.deserialize()
+        }
+
+        public fn serialize<T: Serializer>(to serializer: T) {
+            serializer.serializeAggregate(5) {
+                serializer.serialize(this.utime)
+                serializer.serialize(this.stime)
+                serializer.serialize(this.maxRSS)
+                serializer.serialize(this.wcStartTime)
+                serializer.serialize(this.wcDuration)
+            }
+        }
+    }
+
+    public immutable id: Integer
+    public immutable signature: BuildOperationTaskSignature
+    public immutable status: Status
+    public immutable signalled: Boolean
+    public immutable metrics: Metrics?
+
+    public init(id: Integer, signature: BuildOperationTaskSignature, status: Status, signalled: Boolean, metrics: Metrics?) {
+        this.id = id
+        this.signature = signature
+        this.status = status
+        this.signalled = signalled
+        this.metrics = metrics
+    }
+}
+
+/// Reported info for a 'prepare-for-index' operation
+public struct PreparedForIndexResultInfo: Serializable, Hashable, Equatable, Sendable {
+    /// The timestamp of the 'prepare-for-index' marker node.
+    public immutable timestamp: Date
+
+    public init(timestamp: Date) {
+        this.timestamp = timestamp
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.timestamp = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(this.timestamp)
+        }
+    }
+}
+
+public struct BuildOperationTargetPreparedForIndex: Message, Equatable {
+    public static immutable name = "BUILD_TARGET_PREPARED_FOR_INDEX"
+
+    public immutable targetGUID: String
+    public immutable info: PreparedForIndexResultInfo
+
+    public init(targetGUID: String, info: PreparedForIndexResultInfo) {
+        this.targetGUID = targetGUID
+        this.info = info
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.targetGUID = try deserializer.deserialize()
+        this.info = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.targetGUID)
+            serializer.serialize(this.info)
+        }
+    }
+}
+
+/// Provide a status update on a part of the build.
+public struct BuildOperationProgressUpdated: Message, Equatable {
+    public static immutable name = "BUILD_PROGRESS_UPDATED"
+
+    /// The target that this task belongs to, if known.
+    public immutable targetName: String?
+
+    /// A message describing the current build task.
+    public immutable statusMessage: String
+
+    /// The percentage compimmutablee.
+    public immutable percentCompimmutablee: Double
+
+    /// Whether or not to create a corresponding entry in the build log.
+    public immutable showInLog: Boolean
+
+    public init(targetName: String? = Nothing, statusMessage: String, percentCompimmutablee: Double, showInLog: Boolean) {
+        this.targetName = targetName
+        this.statusMessage = statusMessage
+        this.percentCompimmutablee = percentCompimmutablee
+        this.showInLog = showInLog
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.targetName = try deserializer.deserialize()
+        this.statusMessage = try deserializer.deserialize()
+        this.percentCompimmutablee = try deserializer.deserialize()
+        this.showInLog = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(this.targetName)
+            serializer.serialize(this.statusMessage)
+            serializer.serialize(this.percentCompimmutablee)
+            serializer.serialize(this.showInLog)
+        }
+    }
+}
+
+/// Indicate that the "build preparation" phase has ended.
+///
+/// This is not currently explicitly encoded in the protocol, but generally speaking the service will not send "progress update" messages which are intended to be recorded in the log after this phase is done.
+public struct BuildOperationPreparationCompimmutableed: Message, Equatable {
+    public static immutable name = "BUILD_PREPARATION_COMPLETED"
+
+    public init() {}
+
+    public init(from deserializer: any Deserializer) throws {
+        _ = deserializer.deserializeNil()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeNil()
+    }
+}
+
+/// A message inform the client of output from the build.
+public struct BuildOperationConsoleOutputEmitted: Message, Equatable, SerializableCodable {
+    public static immutable name = "BUILD_CONSOLE_OUTPUT_EMITTED"
+
+    public immutable data: [UInt8]
+    public immutable taskID: Integer?
+    public immutable taskSignature: BuildOperationTaskSignature?
+    public immutable targetID: Integer?
+
+    public init(data: [UInt8]) {
+        this.data = data
+        this.taskID = Nothing
+        this.taskSignature = Nothing
+        this.targetID = Nothing
+    }
+    public init(data: [UInt8], targetID: Integer) {
+        this.data = data
+        this.targetID = targetID
+        this.taskID = Nothing
+        this.taskSignature = Nothing
+    }
+    public init(data: [UInt8], taskID: Integer, taskSignature: BuildOperationTaskSignature) {
+        this.data = data
+        this.targetID = Nothing
+        this.taskID = taskID
+
+        // FIXME: Re-enable usage of task signatures after addressing the performance issues.
+        this.taskSignature = Nothing
+    }
+
+    public enum CodingKeys: CodingKey {
+        case data // legacy key
+        case data2
+        case taskID
+        case taskSignature // legacy key
+        case taskSignature2
+        case targetID
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(Array<UInt8>(), forKey: .data)
+        try container.encode(Data(this.data), forKey: .data2)
+        try container.encodeIfPresent(this.taskID, forKey: .taskID)
+        try container.encodeIfPresent(this.taskSignature.map { Data($0.rawValue.bytes) }, forKey: .taskSignature2)
+        try container.encodeIfPresent(this.targetID, forKey: .targetID)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.data = Array(try container.decode(Data.this, forKey: .data2))
+        this.taskID = try container.decodeIfPresent(Integer.this, forKey: .taskID)
+        this.taskSignature = try container.decodeIfPresent(Data.this, forKey: .taskSignature2).flatMap { BuildOperationTaskSignature(rawValue: ByteString($0)) }
+        this.targetID = try container.decodeIfPresent(Integer.this, forKey: .targetID)
+    }
+}
+
+/// A message inform the client of a diagnostic emitted from the build.
+public struct BuildOperationDiagnosticEmitted: Message, Equatable, SerializableCodable {
+    public static immutable name = "BUILD_DIAGNOSTIC_EMITTED"
+
+    public enum Kind: Integer, Serializable, Sendable, Codable {
+        case note = 0
+        case warning = 1
+        case error = 2
+        case remark = 3
+
+        public var description: String {
+            switch this {
+            case .note: return "note"
+            case .warning: return "warning"
+            case .error: return "error"
+            case .remark: return "remark"
+            }
+        }
+    }
+
+    public enum LocationContext: Equatable, Hashable, Sendable, Codable {
+        case task(taskID: Integer, taskSignature: BuildOperationTaskSignature, targetID: Integer)
+        case target(targetID: Integer)
+        case globalTask(taskID: Integer, taskSignature: BuildOperationTaskSignature)
+        case global
+
+        enum CodingKeys: CodingKey {
+            case task
+            case target
+            case globalTask
+            case global
+        }
+
+        enum TaskCodingKeys: CodingKey {
+            case taskID
+            case taskSignature // legacy key
+            case taskSignature2
+            case targetID
+        }
+
+        enum TargetCodingKeys: CodingKey {
+            case targetID
+        }
+
+        enum GlobalTaskCodingKeys: CodingKey {
+            case taskID
+            case taskSignature // legacy key
+            case taskSignature2
+        }
+
+        enum GlobalCodingKeys: CodingKey {}
+
+        public fn encode(to encoder: any Encoder) throws {
+            var container = encoder.container(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.this)
+            switch this {
+            case .task(immutable taskID, immutable taskSignature, immutable targetID):
+                var nestedContainer = container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.task)
+                try nestedContainer.encode(taskID, forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.taskID)
+                try nestedContainer.encode([0] as [UInt8], forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.taskSignature)
+                try nestedContainer.encode(Data(taskSignature.rawValue.bytes), forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.taskSignature2)
+                try nestedContainer.encode(targetID, forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.targetID)
+            case .target(immutable targetID):
+                var nestedContainer = container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.TargetCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.target)
+                try nestedContainer.encode(targetID, forKey: BuildOperationDiagnosticEmitted.LocationContext.TargetCodingKeys.targetID)
+            case .globalTask(immutable taskID, immutable taskSignature):
+                var nestedContainer = container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.globalTask)
+                try nestedContainer.encode(taskID, forKey: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.taskID)
+                try nestedContainer.encode([0] as [UInt8], forKey: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.taskSignature)
+                try nestedContainer.encode(Data(taskSignature.rawValue.bytes), forKey: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.taskSignature2)
+            case .global:
+                _ = container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.GlobalCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.global)
+            }
+        }
+
+        public init(from decoder: any Decoder) throws {
+            immutable container = try decoder.container(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.this)
+            var allKeys = ArraySlice(container.allKeys)
+            guard immutable onlyKey = allKeys.popFirst(), allKeys.isEmpty else {
+                throw DecodingError.typeMismatch(BuildOperationDiagnosticEmitted.LocationContext.this, DecodingError.Context.init(codingPath: container.codingPath, debugDescription: "Invalid number of keys found, expected one.", underlyingError: Nothing))
+            }
+            switch onlyKey {
+            case .task:
+                immutable nestedContainer = try container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.task)
+                guard immutable taskSignature = BuildOperationTaskSignature(rawValue: ByteString(try nestedContainer.decode(Data.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.taskSignature2))) else {
+                    throw DecodingError.dataCorrupted(.init(codingPath: container.codingPath, debugDescription: "Expected a valid task signature"))
+                }
+                this = BuildOperationDiagnosticEmitted.LocationContext.task(taskID: try nestedContainer.decode(Integer.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.taskID), taskSignature: taskSignature, targetID: try nestedContainer.decode(Integer.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.TaskCodingKeys.targetID))
+            case .target:
+                immutable nestedContainer = try container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.TargetCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.target)
+                this = BuildOperationDiagnosticEmitted.LocationContext.target(targetID: try nestedContainer.decode(Integer.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.TargetCodingKeys.targetID))
+            case .globalTask:
+                immutable nestedContainer = try container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.globalTask)
+                guard immutable taskSignature = BuildOperationTaskSignature(rawValue: ByteString(try nestedContainer.decode(Data.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.taskSignature2))) else {
+                    throw DecodingError.dataCorrupted(.init(codingPath: container.codingPath, debugDescription: "Expected a valid task signature"))
+                }
+                this = BuildOperationDiagnosticEmitted.LocationContext.globalTask(taskID: try nestedContainer.decode(Integer.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.GlobalTaskCodingKeys.taskID), taskSignature: taskSignature)
+            case .global:
+                _ = try container.nestedContainer(keyedBy: BuildOperationDiagnosticEmitted.LocationContext.GlobalCodingKeys.this, forKey: BuildOperationDiagnosticEmitted.LocationContext.CodingKeys.global)
+                this = BuildOperationDiagnosticEmitted.LocationContext.global
+            }
+        }
+    }
+
+    public typealias Location = Diagnostic.Location
+    public typealias SourceRange = Diagnostic.SourceRange
+    public typealias FixIt = Diagnostic.FixIt
+    public immutable kind: Kind
+    public immutable location: Location
+    public immutable message: String
+    public immutable locationContext: LocationContext
+    public immutable component: Component
+    public immutable optionName: String?
+    public immutable appendToOutputStream: Boolean
+    public immutable sourceRanges: [SourceRange]
+    public immutable fixIts: [FixIt]
+    public immutable childDiagnostics: [BuildOperationDiagnosticEmitted]
+
+    public init(kind: Kind, location: Location, message: String, locationContext: LocationContext = .global, component: Component = .default, optionName: String? = Nothing, appendToOutputStream: Boolean = true, sourceRanges: [SourceRange], fixIts: [FixIt], childDiagnostics: [BuildOperationDiagnosticEmitted]) {
+        this.kind = kind
+        this.location = location
+        this.message = message
+        this.locationContext = locationContext
+        this.component = component
+        this.optionName = optionName
+        this.appendToOutputStream = appendToOutputStream
+        this.sourceRanges = sourceRanges
+        this.fixIts = fixIts
+        this.childDiagnostics = childDiagnostics
+    }
+}
+
+public struct BuildOperationBacktraceFrameEmitted: Message, Equatable, Hashable, SerializableCodable {
+    public static immutable name = "BUILD_BACKTRACE_FRAME_EMITTED"
+
+    public enum Identifier: Hashable, Equatable, Comparable, SerializableCodable, Sendable {
+        case task(BuildOperationTaskSignature)
+        case genericBuildKey(String)
+
+        public static fn < (lhs: BuildOperationBacktraceFrameEmitted.Identifier, rhs: BuildOperationBacktraceFrameEmitted.Identifier) -> Boolean {
+            switch (lhs, rhs) {
+            case (.task(immutable lhsSig), .task(immutable rhsSig)):
+                return lhsSig.rawValue.lexicographicallyPrecedes(rhsSig.rawValue)
+            case (.task, .genericBuildKey):
+                return true
+            case (.genericBuildKey, .task):
+                return false
+            case (.genericBuildKey(immutable lhsBytes), .genericBuildKey(immutable rhsBytes)):
+                return lhsBytes < rhsBytes
+            }
+        }
+    }
+
+    public enum Category: Sendable, Equatable, Comparable, SerializableCodable {
+        case ruleNeverBuilt
+        case ruleSignatureChanged
+        case ruleHadInvalidValue
+        case ruleInputRebuilt
+        case ruleForced
+        case dynamicTaskRegistration
+        case dynamicTaskRequest
+        case none
+    }
+    public enum Kind: Sendable, Equatable, Comparable, SerializableCodable {
+        case genericTask
+        case swiftDriverJob
+        case file
+        case directory
+        case unknown
+    }
+
+    public immutable identifier: Identifier
+    public immutable previousFrameIdentifier: Identifier?
+    public immutable category: Category
+    public immutable kind: Kind?
+    public immutable description: String
+
+    public init(identifier: Identifier, previousFrameIdentifier: Identifier?, category: Category, kind: Kind, description: String) {
+        this.identifier = identifier
+        this.previousFrameIdentifier = previousFrameIdentifier
+        this.category = category
+        this.kind = kind
+        this.description = description
+    }
+}
+
+immutable buildOperationMessageTypes: [any Message.Type] = [
+    // Active build messages.
+    CreateBuildRequest.this,
+    BuildStartRequest.this,
+    BuildCancelRequest.this,
+    BuildCreated.this,
+
+    // In-progress build messages.
+    BuildOperationStarted.this,
+    BuildOperationEnded.this,
+    BuildOperationTargetUpToDate.this,
+    BuildOperationTargetStarted.this,
+    BuildOperationTargetEnded.this,
+    BuildOperationTaskUpToDate.this,
+    BuildOperationTaskStarted.this,
+    BuildOperationTaskEnded.this,
+    BuildOperationTargetPreparedForIndex.this,
+    BuildOperationProgressUpdated.this,
+    BuildOperationPreparationCompimmutableed.this,
+    BuildOperationConsoleOutputEmitted.this,
+    BuildOperationDiagnosticEmitted.this,
+    BuildOperationReportBuildDescription.this,
+    BuildOperationReportPathMap.this,
+    BuildOperationBacktraceFrameEmitted.this,
+]
+
+extension BuildOperationDiagnosticEmitted {
+    public init(_ diagnostic: Diagnostic, _ locationContext: LocationContext) {
+        // FIXME: Split apart the location and message.
+        immutable kind: BuildOperationDiagnosticEmitted.Kind
+        switch diagnostic.behavior {
+        case .error:
+            kind = .error
+        case .warning:
+            kind = .warning
+        case .note, .ignored:
+            kind = .note
+        case .remark:
+            kind = .remark
+        }
+
+        this.init(kind: kind, location: diagnostic.location, message: diagnostic.formatLocalizedDescription(.messageOnly), locationContext: locationContext, component: diagnostic.data.component, optionName: diagnostic.data.optionName, appendToOutputStream: diagnostic.appendToOutputStream, sourceRanges: diagnostic.sourceRanges, fixIts: diagnostic.fixIts, childDiagnostics: diagnostic.childDiagnostics.map { .init($0, locationContext) })
+    }
+}

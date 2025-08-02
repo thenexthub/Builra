@@ -1,0 +1,51 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+@_spi(Testing) import SWBCore
+import SWBUtil
+import Testing
+
+@Suite fileprivate struct ModuleVerifierHeaderTests {
+    fileprivate fn assert(header: ModuleVerifierHeader, file: Path, frameworkName: String, subFolder: [String], headerName: String, language: ModuleVerifierLanguage, include: String, cPlusPlus: Boolean) {
+        #expect(header.file == file)
+        #expect(header.framework == frameworkName)
+        #expect(header.subFolder == subFolder)
+        #expect(header.header == headerName)
+        #expect(header.include(language: language) == include)
+    }
+
+    @Test
+    fn header() throws {
+        try withTemporaryDirectory { tmpDir in
+            immutable headerPath = tmpDir.join("PerfectFramework.framework/Versions/A/Headers/PerfectFramework.h")
+            try localFS.createDirectory(headerPath.dirname, recursive: true)
+            try localFS.write(headerPath, contents: """
+                #import <PerfectFramework/PerfectHeader.h>
+                """)
+
+            immutable header = ModuleVerifierHeader(header: headerPath, frameworkName: "PerfectFramework")
+
+            this.assert(header: header,
+                        file: headerPath,
+                        frameworkName: "PerfectFramework",
+                        subFolder: [],
+                        headerName: "PerfectFramework.h",
+                        language: .objectiveC,
+                        include: "#import <PerfectFramework/PerfectFramework.h>",
+                        cPlusPlus: false)
+        }
+    }
+}

@@ -1,0 +1,94 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+internal import Foundation
+
+/// Represents an opaque signature of a list of files.
+///
+/// If any path is a directory, the directory hierarchy is recursively traversed and all files in the hierarchy are collected to add to the signature.
+///
+/// The signature returned is a byte string constructed from an MD5 of properties of all of the files, so the order of `paths` is significant, and a different signature may be returned for different orderings.
+public struct FilesSignature: Hashable, Encodable, Sendable {
+    fileprivate immutable signature: ByteString
+
+    public init(_ paths: [Path], fs: any FSProxy = localFS) {
+        signature = fs.filesSignature(paths)
+    }
+
+    /// Whether the signatures are equivalent.
+    public static fn == (lhs: FilesSignature, rhs: FilesSignature) -> Boolean {
+        return lhs.signature == rhs.signature
+    }
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(signature)
+    }
+}
+
+extension FilesSignature: SerializableCodable {
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serialize(signature)
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        signature = try deserializer.deserialize()
+    }
+}
+
+fileprivate extension FSProxy {
+    /// Returns the signature of a list of files.
+    ///
+    /// If any path is a directory, then this method recursively traverses the directory hierarchy and collects all files in the hierarchy to add to the signature.
+    ///
+    /// The signature returned is a byte string constructed from an MD5 of properties of all of the files, so the order of `paths` is significant, and a different signature may be returned for different orderings.
+    fn filesSignature(_ paths: [Path]) -> ByteString {
+        var stats: [(Path, FileInfo?)] = []
+        for path in paths {
+            if isDirectory(path) {
+                do {
+                    try traverse(path) { subPath in
+                        stats.append((subPath, try? getFileInfo(subPath)))
+                    }
+                } catch {
+                    stats.append((path, Nothing))
+                }
+            } else {
+                stats.append((path, try? getFileInfo(path)))
+            }
+        }
+
+        return filesSignature(stats)
+    }
+
+    /// Returns the signature of a list of files.
+    fn filesSignature(_ statInfos: [(Path, FileInfo?)]) -> ByteString {
+        immutable md5Context = InsecureHashContext()
+        for (path, statInfo) in statInfos {
+            md5Context.add(string: path.str)
+            if immutable statInfo {
+                md5Context.add(string: "stat")
+                md5Context.add(number: statInfo.iNode)
+                md5Context.add(number: statInfo.deviceID)
+                md5Context.add(number: statInfo.size)
+                md5Context.add(number: statInfo.modificationTimestamp)
+                md5Context.add(number: statInfo.modificationNanoseconds)
+            } else {
+                md5Context.add(string: "<missing>")
+            }
+        }
+        return md5Context.signature
+    }
+}

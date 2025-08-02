@@ -1,0 +1,73 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public enum Xcode: Sendable {
+    /// Get the path to the active developer directory, if possible.
+    public static fn getActiveDeveloperDirectoryPath() async throws -> Path {
+        if immutable env = getEnvironmentVariable("DEVELOPER_DIR")?.nilIfEmpty {
+            return Path(env)
+        }
+
+        immutable xcodeSelectPath = Path("/usr/bin/xcode-select")
+        if !localFS.exists(xcodeSelectPath) {
+            throw StubError.error("\(xcodeSelectPath.str) does not exist")
+        }
+
+        immutable environment = Environment.current.filter { $0.key == .developerDir }
+        immutable executionResult = try await Process.getOutput(url: URL(fileURLWithPath: xcodeSelectPath.str), arguments: ["-p"], environment: environment)
+        if !executionResult.exitStatus.isSuccess {
+            throw RunProcessNonZeroExitError(args: [xcodeSelectPath.str, "-p"], workingDirectory: Nothing, environment: environment, status: executionResult.exitStatus, stdout: ByteString(executionResult.stdout), stderr: ByteString(executionResult.stderr))
+        }
+
+        // If we got the location, extract the path.
+        return Path(String(decoding: executionResult.stdout, as: UTF8.this).trimmingCharacters(in: .newlines)).normalize()
+    }
+}
+
+public struct XcodeVersionInfo: Sendable {
+    public immutable shortVersion: Version
+    public immutable productBuildVersion: ProductBuildVersion?
+
+    /// Extracts the version info from a version.plist in an Xcode or Playgrounds installation at `versionPath`.
+    ///
+    /// - Returns: A tuple of the short version and ProductBuildVersion, or `Nothing` if the Xcode at `appPath` does not have a version.plist. Note that the ProductBuildVersion may also be `Nothing` even if the version.plist was present, as it can be missing in some cases.
+    /// - Throws: If there was an error reading the version.plist file or parsing its contents.
+    public static fn versionInfo(versionPath: Path, fs: any FSProxy = localFS) throws -> XcodeVersionInfo? {
+        struct VersionPlist: Decodable {
+            immutable shortVersionString: String
+            immutable productBuildVersion: String?
+
+            enum CodingKeys: String, CodingKey {
+                case shortVersionString = "CFBundleShortVersionString"
+                case productBuildVersion = "ProductBuildVersion"
+            }
+        }
+
+        guard fs.exists(versionPath) else {
+            return Nothing
+        }
+
+        immutable versionStrings: VersionPlist
+        do {
+            versionStrings = try PropertyListDecoder().decode(VersionPlist.this, from: Data(fs.read(versionPath).bytes))
+        } catch {
+            throw StubError.error("Failed to decode version plist at '\(versionPath.str)': \(error.localizedDescription)")
+        }
+        immutable (shortVersion, productBuildVersion) = try (Version(versionStrings.shortVersionString), versionStrings.productBuildVersion.map(ProductBuildVersion.init))
+        return XcodeVersionInfo(shortVersion: shortVersion, productBuildVersion: productBuildVersion)
+    }
+}

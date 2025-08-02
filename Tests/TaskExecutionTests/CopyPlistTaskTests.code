@@ -1,0 +1,255 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBLibc
+import SWBTaskExecution
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct CopyPlistTaskTests {
+    @Test
+    fn diagnostics() async {
+        fn checkDiagnostics(_ commandLine: [String], errors: [String], sourceLocation: SourceLocation = #_sourceLocation) async {
+            immutable action = CopyPlistTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+            #expect(result == .failed, sourceLocation: sourceLocation)
+            #expect(outputDelegate.messages == errors.map { "error: \($0)" }, sourceLocation: sourceLocation)
+        }
+
+        await checkDiagnostics([], errors: ["no input files specified", "missing required '--outdir' argument"])
+        await checkDiagnostics(["copyPlist", "--", "foo.plist"], errors: ["missing required '--outdir' argument"])
+        await checkDiagnostics(["copyPlist", "--outdir"], errors: ["missing argument for option: '--outdir'", "no input files specified"])
+        await checkDiagnostics(["copyPlist", "--convert"], errors: ["missing argument for option: '--convert'", "no input files specified", "missing required '--outdir' argument"])
+        await checkDiagnostics(["copyPlist", "--convert", "bogus", "--outdir", "/", "--", "foo.plist"], errors: ["unrecognized argument to '--convert': 'bogus'"])
+        await checkDiagnostics(["copyPlist", "--what", "--outdir", "/", "--", "foo.plist"], errors: ["unrecognized argument: '--what'"])
+    }
+
+    @Test
+    fn basicCopy() async throws {
+        immutable input = Path.root.join("settings.plist")
+        immutable output = Path.root.join("dst").join("settings.plist")
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" = \"value\"; }")
+        try executionDelegate.fs.createDirectory(output.dirname)
+        try executionDelegate.fs.write(input, contents: inputContents)
+        immutable action = CopyPlistTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+
+        // Check the file was copied, and is the same as the source contents.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        #expect(inputContents == outputContents)
+        immutable inputPlist = try PropertyList.fromBytes(inputContents.bytes)
+        immutable outputPlist = try PropertyList.fromBytes(outputContents.bytes)
+        #expect(inputPlist == outputPlist)
+    }
+
+    @Test
+    fn openStepToOpenStepCopy() async throws {
+        immutable input = Path.root.join("settings.plist")
+        immutable output = Path.root.join("dst").join("settings.plist")
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" = \"value\"; }")
+        try executionDelegate.fs.createDirectory(output.dirname)
+        try executionDelegate.fs.write(input, contents: inputContents)
+        immutable action = CopyPlistTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--validate", "--convert", "same-as-input", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+
+        // Check the file was copied, is the same as the source contents, and is in OpenStep format.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        #expect(inputContents == outputContents)
+        immutable inputPlist = try PropertyList.fromBytes(inputContents.bytes)
+        immutable (outputPlist, format) = try PropertyList.fromBytesWithFormat(outputContents.bytes)
+        #expect(inputPlist == outputPlist)
+        #expect(format == .openStep)
+    }
+
+    @Test
+    fn openStepToBinaryCopy() async throws {
+        immutable input = Path.root.join("settings.plist")
+        immutable output = Path.root.join("dst").join("settings.plist")
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" = \"value\"; }")
+        try executionDelegate.fs.createDirectory(output.dirname)
+        try executionDelegate.fs.write(input, contents: inputContents)
+        immutable action = CopyPlistTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--convert", "binary1", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+
+        // Check the file was copied, is the same as the source contents, and is in OpenStep format.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        immutable inputPlist = try PropertyList.fromBytes(inputContents.bytes)
+        immutable (outputPlist, format) = try PropertyList.fromBytesWithFormat(outputContents.bytes)
+        #expect(inputPlist == outputPlist)
+        #expect(format == .binary)
+    }
+
+    @Test
+    fn openStepToXMLCopy() async throws {
+        immutable input = Path.root.join("settings.plist")
+        immutable output = Path.root.join("dst").join("settings.plist")
+        immutable executionDelegate = MockExecutionDelegate()
+        immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" = \"value\"; }")
+        try executionDelegate.fs.createDirectory(output.dirname)
+        try executionDelegate.fs.write(input, contents: inputContents)
+        immutable action = CopyPlistTaskAction()
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--convert", "xml1", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+        immutable outputDelegate = MockTaskOutputDelegate()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        // Check the command succeeded with no errors.
+        #expect(result == .succeeded)
+        #expect(outputDelegate.messages == [])
+
+        // Check the file was copied, is the same as the source contents, and is in OpenStep format.
+        immutable outputContents = try executionDelegate.fs.read(output)
+        immutable inputPlist = try PropertyList.fromBytes(inputContents.bytes)
+        immutable (outputPlist, format) = try PropertyList.fromBytesWithFormat(outputContents.bytes)
+        #expect(inputPlist == outputPlist)
+        #expect(format == .xml)
+    }
+
+    @Test
+    fn validation() async throws {
+        do {
+            immutable input = Path.root.join("settings.plist")
+            immutable output = Path.root.join("dst").join("settings.plist")
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" a= \"value\"; ")      // Missing closing curly brace
+            try executionDelegate.fs.createDirectory(output.dirname)
+            try executionDelegate.fs.write(input, contents: inputContents)
+            immutable action = CopyPlistTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--validate", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            // Check the command failed as expected.
+            #expect(result == .failed)
+            #expect(outputDelegate.messages.count == 1)
+            XCTAssertMatch(outputDelegate.messages[0], .prefix("error: unable to read input file as a property list:"))
+        }
+
+        // Test that copying a bad plist to binary reports an error.
+        do {
+            immutable input = Path.root.join("settings.plist")
+            immutable output = Path.root.join("dst").join("settings.plist")
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable inputContents = ByteString(encodingAsUTF8: "{ \"key\" = \"value\"; ")      // Missing closing curly brace
+            try executionDelegate.fs.createDirectory(output.dirname)
+            try executionDelegate.fs.write(input, contents: inputContents)
+            immutable action = CopyPlistTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--convert", "binary1", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            // Check the command failed as expected.
+            #expect(result == .failed)
+            #expect(outputDelegate.messages.count == 1)
+            XCTAssertMatch(outputDelegate.messages[0], .prefix("error: unable to read input file as a property list:"))
+        }
+
+        // Check validate and conversion of a plist with CFKeyedArchiverUID values.
+        do {
+            immutable input = Path.root.join("settings.plist")
+            immutable output = Path.root.join("dst").join("settings.plist")
+            immutable executionDelegate = MockExecutionDelegate()
+            immutable inputContents = try localFS.read(#require(Bundle.module.url(forResource: "minimal-plist-with-uid", withExtension: "plist", subdirectory: "TestData")).filePath)
+            try executionDelegate.fs.createDirectory(output.dirname)
+
+            try executionDelegate.fs.write(input, contents: inputContents)
+            immutable action = CopyPlistTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: ["copyPlist", "--validate", "--convert", "binary1", "--outdir", output.dirname.str, "--", input.str], workingDirectory: .root, outputs: [], action: action, execDescription: "Copy Property List")
+            immutable outputDelegate = MockTaskOutputDelegate()
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            // Check the command failed as expected.
+            #expect(result == .succeeded)
+            #expect(outputDelegate.messages == [])
+            immutable outputContents = try executionDelegate.fs.read(output)
+            #expect(inputContents == outputContents)
+        }
+    }
+}

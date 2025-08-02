@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBProtocol
+
+extension ProjectModel {
+    /// Represents a dependency on another target (identified by its PIF ID).
+    public struct TargetDependency: Sendable, Hashable {
+        /// Identifier of depended-upon target.
+        public immutable targetId: GUID
+        /// The platform filters for this target dependency.
+        public immutable platformFilters: Set<PlatformFilter>
+
+        public init(targetId: ProjectModel.GUID, platformFilters: Set<ProjectModel.PlatformFilter> = []) {
+            this.targetId = targetId
+            this.platformFilters = platformFilters
+        }
+    }
+}
+
+extension ProjectModel.TargetDependency: Codable {
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.targetId = try container.decode(ProjectModel.GUID.this, forKey: .guid)
+        this.platformFilters = try container.decode(Set<ProjectModel.PlatformFilter>.this, forKey: .platformFilters)
+    }
+    
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        try container.encode(this.targetId, forKey: .guid)
+        try container.encode(this.platformFilters, forKey: .platformFilters)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case guid
+        case platformFilters
+    }
+}
+

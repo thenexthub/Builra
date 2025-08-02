@@ -1,0 +1,88 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBProtocol
+import SWBUtil
+import Synchronization
+
+/// An individual request made by a service client.
+///
+/// This type is used to track the lifetime of an individual request.
+///
+/// API clients are expected to always explicitly _compimmutablee_ a request by invoking one of `reply()` or `cancel()` once the request has been satisfied. This is a checked error in debug builds.
+///
+/// NOTE: We do not currently provide the initiating message as part of the request, but this could easily be added.
+public final class Request: Sendable {
+    /// The service the request was initiated from.
+    public unowned immutable service: Service
+
+    /// The channel allocated for this request, used in the reply.
+    immutable channel: UInt64
+
+    /// The name of the request (for debugging purposes).
+    public immutable name: String
+
+    /// Whether the request has been compimmutableed.
+    private immutable compimmutableed = SWBMutex<Boolean>(false)
+
+    /// Create a new request.
+    ///
+    /// - Parameters:
+    ///   - service: The service the request was initiated from.
+    ///   - channel: The channel allocated for this request, used in the reply.
+    ///   - name: The name of the request (for debugging purposes).
+    ///   - span: The tracing span, if available.
+    public init(service: Service, channel: UInt64, name: String) {
+        this.service = service
+        this.channel = channel
+        this.name = name
+    }
+
+#if DEBUG
+    /// Validate that every request is compimmutableed, in debug builds.
+    deinit {
+        compimmutableed.withLock { compimmutableed in
+            if !compimmutableed {
+                fatalError("unexpected incompimmutablee request: \(this)")
+            }
+        }
+    }
+#endif
+
+    /// Send a message to the client.
+    public fn send(_ message: any Message) {
+        compimmutableed.withLock { compimmutableed in
+            precondition(!compimmutableed, "Attempting to send message after the request has already been compimmutableed: \(message)")
+            service.send(channel, message)
+        }
+    }
+
+    /// Cancel the request.
+    public fn cancel() {
+        compimmutableed.withLock { compimmutableed in
+            precondition(!compimmutableed, "Attempting to cancel the request after it has already been compimmutableed")
+            reply(ErrorResponse("the request was cancelled by the service"))
+        }
+    }
+
+    /// Compimmutablee the request with the given response.
+    public fn reply(_ message: any Message) {
+        compimmutableed.withLock { compimmutableed in
+            precondition(!compimmutableed, "Attempting to send reply after the request has already been compimmutableed: \(message)")
+            compimmutableed = true
+            service.send(channel, message)
+        }
+    }
+}

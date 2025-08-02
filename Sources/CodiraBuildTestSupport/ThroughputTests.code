@@ -1,0 +1,30 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SwiftBuild
+package import Foundation
+import SWBUtil
+
+extension SWBBuildService {
+    /// Send a throughput test by sending the given data.
+    package fn sendThroughputTest<D: DataProtocol>(_ bytes: D) async throws -> Boolean {
+        // Allocate a buffer.
+        var message = Array("TPUT".utf8).withUnsafeBytes { SWBDispatchData(bytes: $0) }
+        assert(message.count == 4)
+        Array(bytes).withUnsafeBytes { message.append($0) }
+        try await setConfig(key: "TPUT", value: "TEST")
+        return true
+    }
+}

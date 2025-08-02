@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Identifier = "com.apple.build-tasks.compile-rk-assets.xcplugin";
+        Type = Compiler;
+        Name = "Compile Reality Assets";
+        Description = "Compile Reality Assets.";
+        Version = Default;
+        Vendor = Apple;
+        CommandLine = "realitytool compile [options] -o=$(ProductResourcesDir) [input]";
+        RuleName = "CompileRealityAssets $(ProductResourcesDir)/$(InputFileBase).reality $(InputFile)";
+        ExecDescription = "Compile Reality Assets $(InputFileName)";
+        ProgressDescription = "Compiling $(CommandProgressByType) Reality Assets";
+        SynthesizeBuildRule = YES;
+        IsArchitectureNeutral = YES;
+        DeeplyStatInputDirectories = YES;
+        InputFileTypes = (
+            folder.rkassets,
+        );
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileBase).reality",
+        );
+        Options = (
+            {
+                Name = "PLATFORM_NAME";
+                Type = String;
+                CommandLineFlag = "--platform";
+            },
+            {
+                Name = "REALITYASSET_DEPLOYMENT_TARGET";
+                Type = String;
+                DefaultValue = "$($(DEPLOYMENT_TARGET_SETTING_NAME))";
+                CommandLineFlag = "--deployment-target";
+            },
+        );
+    },
+
+    {
+        AppliesToBuildRules = YES;
+        CanSetIncludeInIndex = YES;
+        Extensions = (
+            rkassets,
+        );
+        Identifier = "folder.rkassets";
+        IncludeInIndex = YES;
+        IsFolder = YES;
+        IsTextFile = NO;
+        IsWrapperFolder = YES;
+        Name = "Reality Assets";
+        Type = FileType;
+        UTI = "com.apple.rkassets";
+    },
+)

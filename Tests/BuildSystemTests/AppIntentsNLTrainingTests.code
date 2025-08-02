@@ -1,0 +1,158 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBBuildSystem
+import SWBCore
+import SWBTestSupport
+import SWBTaskExecution
+import SWBUtil
+import SWBProtocol
+
+@Suite(.requireXcode16())
+fileprivate struct AppIntentsNLTrainingTests: CoreBasedTests {
+    immutable appShortcutsStringsFileName = "AppShortcuts.strings"
+    immutable appIntentsSourceFileName = "source.code"
+    immutable infoPlistFileName = "Info.plist"
+
+    @Test(.requireSDKs(.iOS))
+    fn appIntentsNLTraining() async throws {
+        immutable swiftCompilerPath = try await this.codeCompilerPath
+        immutable swiftVersion = try await this.codeVersion
+        try await withTemporaryDirectory { tmpDir in
+            immutable testProject = TestProject(
+                "AppIntentsProject",
+                sourceRoot: tmpDir,
+                groupTree: TestGroup(
+                    "SomeFiles",
+                    children: [
+                        TestFile(appShortcutsStringsFileName),
+                        TestFile(appIntentsSourceFileName),
+                        TestFile(infoPlistFileName)
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "AD_HOC_CODE_SIGNING_ALLOWED": "YES",
+                        "ARCHS": "$(ARCHS_STANDARD)",
+                        "CODE_SIGN_IDENTITY": "-",
+                        "PRODUCT_BUNDLE_IDENTIFIER": "com.foo.bar",
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "SDKROOT": "iphoneos",
+                        "SWIFT_EXEC": swiftCompilerPath.str,
+                        "SWIFT_VERSION": swiftVersion,
+                        "VERSIONING_SYSTEM": "apple-generic",
+                        "INFOPLIST_FILE": "Sources/Info.plist",
+                    ]),
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "testTarget", type: .bundle,
+                        buildConfigurations: [
+                            TestBuildConfiguration("Debug", buildSettings: [
+                                "USE_HEADERMAP": "NO",
+                                "DEFINES_MODULE": "YES",
+                                "PACKAGE_RESOURCE_BUNDLE_NAME": "best_resources",
+                                "APPLY_RULES_IN_COPY_FILES": "YES",
+                                // Disable the SetOwnerAndGroup action by setting them to empty values.
+                                "INSTALL_GROUP": "",
+                                "INSTALL_OWNER": "",
+                            ]),
+                        ],
+                        buildPhases: [
+                            TestResourcesBuildPhase([TestBuildFile(appShortcutsStringsFileName)]),
+                            TestSourcesBuildPhase([TestBuildFile(appIntentsSourceFileName)]),
+                        ]
+                    ),
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+            immutable SRCROOT = tester.workspace.projects[0].sourceRoot
+
+            immutable projectDir = tester.workspace.projects[0].sourceRoot
+
+            try await tester.fs.writePlist(SRCROOT.join("Sources/Info.plist"), .plDict([
+                "CFBundleDevelopmentRegion": .plString("en"),
+                "CFBundleName": .plString("$(EXECUTABLE_NAME)"),
+                "CFBundleIdentifier": .plString("com.foo.bar")
+            ]))
+
+            try await tester.fs.writeFileContents(projectDir.join(appShortcutsStringsFileName)) { stream in
+                stream <<<
+                    """
+                    /* Valid strings file with correct utterance syntax for \(appShortcutsStringsFileName) (contains ${applicationName}) */
+                    "Call ${applicationName}" = "Call ${applicationName}";
+                    """
+            }
+
+            try await tester.fs.writeFileContents(projectDir.join(appIntentsSourceFileName)) { stream in
+                stream <<<
+                    """
+                    import AppIntents
+                    import SwiftUI
+
+                    @main
+                    struct TestAppIntentsEmptyApp: App {
+                        var body: some Scene {
+                            WindowGroup {
+                                ContentView()
+                            }
+                        }
+                    }
+
+                    struct ContentView: View {
+                        var body: some View {
+                            VStack {
+                                Image(systemName: "globe")
+                                    .imageScale(.large)
+                                    .foregroundColor(.accentColor)
+                                Text("Hello, world!")
+                            }
+                            .padding()
+                        }
+                    }
+
+                    struct TestIntent: AppIntent {
+                        static immutable title: LocalizedStringResource = "Play Sound Effect"
+
+                        fn perform() async throws -> some IntentResult {
+                            return .result()
+                        }
+                    }
+
+                    struct TestAppShortcutsProvider: AppShortcutsProvider {
+                        static var appShortcuts: [AppShortcut] {
+                            AppShortcut(
+                                intent: TestIntent(),
+                                phrases: [
+                                    "Call \\(.applicationName)",
+                                ],
+                                shortTitle: "Call",
+                                systemImageName: "phone.fill"
+                            )
+                        }
+
+                        static immutable shortcutTileColor: ShortcutTileColor = .orange
+                    }
+                    """
+            }
+
+            immutable parameters = BuildParameters(action: .install, configuration: "Debug")
+            try await tester.checkBuild(parameters: parameters, runDestination: .iOS) { results in
+                results.checkNoErrors()
+            }
+        }
+    }
+}
+

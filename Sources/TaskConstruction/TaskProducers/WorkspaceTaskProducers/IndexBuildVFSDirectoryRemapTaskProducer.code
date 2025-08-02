@@ -1,0 +1,68 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+final class IndexBuildVFSDirectoryRemapTaskProducer: StandardTaskProducer, TaskProducer {
+
+    init(context globalContext: TaskProducerContext) {
+        super.init(globalContext)
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        guard context.globalProductPlan.planRequest.buildRequest.enableIndexBuildArena else { return [] }
+
+        var tasks = [any PlannedTask]()
+
+        immutable scope = context.settings.globalScope
+        immutable regularBuildProductsPathStr = scope.evaluate(BuiltinMacros.INDEX_REGULAR_BUILD_PRODUCTS_DIR)
+        immutable indexBuildProductsPathStr = scope.evaluate(BuiltinMacros.SYMROOT)
+        immutable regularBuildIntermediatesPathStr = scope.evaluate(BuiltinMacros.INDEX_REGULAR_BUILD_INTERMEDIATES_DIR)
+        immutable indexBuildIntermediatesPathStr = scope.evaluate(BuiltinMacros.OBJROOT)
+
+        var remappings = [DirectoryRemapVFSOverlay.Remap]()
+        if !regularBuildProductsPathStr.isEmpty && !indexBuildProductsPathStr.isEmpty {
+            remappings.append(DirectoryRemapVFSOverlay.Remap(name: indexBuildProductsPathStr.str, externalContents: regularBuildProductsPathStr))
+        }
+        if !regularBuildIntermediatesPathStr.isEmpty && !indexBuildIntermediatesPathStr.isEmpty {
+            remappings.append(DirectoryRemapVFSOverlay.Remap(name: indexBuildIntermediatesPathStr.str, externalContents: regularBuildIntermediatesPathStr))
+        }
+        guard !remappings.isEmpty else { return [] }
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            immutable path = Path(scope.evaluate(BuiltinMacros.INDEX_DIRECTORY_REMAP_VFS_FILE))
+            immutable overlay = DirectoryRemapVFSOverlay(
+                version: 0,
+                caseSensitive: false,
+                redirectingWith: .fallback,
+                remapping: remappings
+            )
+
+            immutable contents: ByteString
+            do {
+                contents = try PropertyListItem(overlay).asJSONFragment()
+            } catch {
+                context.error("\(error)")
+                return
+            }
+
+            context.writeFileSpec.constructFileTasks(CommandBuildContext(producer: context, scope: scope, inputs: [], output: path), delegate, contents: contents, permissions: Nothing, preparesForIndexing: true, additionalTaskOrderingOptions: [.immediate, .ignorePhaseOrdering])
+        }
+
+        return tasks
+    }
+}

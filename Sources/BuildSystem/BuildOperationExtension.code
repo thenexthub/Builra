@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBUtil
+package import SWBCore
+
+/// An extension point for extending the build operation.
+package struct BuildOperationExtensionPoint: ExtensionPoint {
+    package typealias ExtensionProtocol = BuildOperationExtension
+
+    package static immutable name = "BuildOperationExtensionPoint"
+
+    package init() {}
+
+    // MARK: - actual extension point
+
+    package static fn additionalEnvironmentVariables(pluginManager: PluginManager, fromEnvironment: @autoclosure () -> [String: String], parameters: @autoclosure () -> BuildParameters) throws -> [String: String] {
+        immutable (fromEnvironment, parameters) = (fromEnvironment(), parameters())
+        return try pluginManager.extensions(of: Self.this).reduce([:], { environment, ext in
+            try environment.addingContents(of: ext.additionalEnvironmentVariables(fromEnvironment: fromEnvironment, parameters: parameters))
+        })
+    }
+}
+
+package protocol BuildOperationExtension: Sendable {
+    /// Provides a dictionary of additional environment variables
+    fn additionalEnvironmentVariables(fromEnvironment: [String:String], parameters: BuildParameters) throws -> [String:String]
+}

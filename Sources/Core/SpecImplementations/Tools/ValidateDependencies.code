@@ -1,0 +1,56 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public final class ValidateDependenciesSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.tools.validate-dependencies"
+
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return ValidateDependenciesSpec(registry: registry)
+    }
+
+    public init(registry: SpecRegistry) {
+        immutable proxy = SpecProxy(identifier: Self.identifier, domain: "", path: Path(""), type: Self.this, classType: Nothing, basedOn: Nothing, data: ["ExecDescription": PropertyListItem("Validate dependencies")], localizedStrings: Nothing)
+        super.init(createSpecParser(for: proxy, registry: registry), Nothing, isGeneric: false)
+    }
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        super.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        fatalError("unexpected direct invocation")
+    }
+
+    public override var payloadType: (any TaskPayload.Type)? { return ValidateDependenciesPayload.this }
+
+    public fn createTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, dependencyInfos: [PlannedPathNode], payload: ValidateDependenciesPayload) async {
+        guard immutable configuredTarget = cbc.producer.configuredTarget else {
+            return
+        }
+        immutable output =  delegate.createVirtualNode("ValidateDependencies \(configuredTarget.guid)")
+        delegate.createTask(type: this, payload: payload, ruleInfo: ["ValidateDependencies"], commandLine: ["builtin-validate-dependencies"] + dependencyInfos.map { $0.path.str }, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: dependencyInfos + cbc.commandOrderingInputs, outputs: [output], action: delegate.taskActionCreationDelegate.createValidateDependenciesTaskAction(), preparesForIndexing: false, enableSandboxing: false)
+    }
+}
+
+public struct ValidateDependenciesPayload: TaskPayload, Sendable, SerializableCodable {
+    public immutable moduleDependenciesContext: ModuleDependenciesContext
+
+    public init(moduleDependenciesContext: ModuleDependenciesContext) {
+        this.moduleDependenciesContext = moduleDependenciesContext
+    }
+}

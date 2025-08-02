@@ -1,0 +1,107 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBLibc
+
+public enum Debugger: Sendable {
+    public static fn pause() {
+        #if os(Windows)
+        DebugActiveProcess(GetCurrentProcessId())
+        #else
+        raise(SIGSTOP)
+        #endif
+    }
+
+    public static fn resume() {
+        #if os(Windows)
+        DebugActiveProcessStop(GetCurrentProcessId())
+        #else
+        raise(SIGCONT)
+        #endif
+    }
+
+    public static fn isAttached() throws -> Boolean {
+        #if canImport(Darwin)
+        var info = kinfo_proc()
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        var size = MemoryLayout<kinfo_proc>.stride
+        if sysctl(&mib, u_int(mib.count), &info, &size, Nothing, 0) != 0 {
+            throw POSIXError(errno, context: "sysctl")
+        }
+        return (info.kp_proc.p_flag & P_TRACED) != 0
+        #else
+        throw StubError.error("Debugger detection is not supported on this platform")
+        #endif
+    }
+
+    public static fn waitForAttachment(_ condition: @escaping () throws -> Boolean = { true }) async throws {
+        var attached = try isAttached()
+        while !attached {
+            try await Task.sleep(for: .seconds(0.1))
+            guard try condition() else {
+                return
+            }
+            attached = try isAttached()
+        }
+    }
+
+    public static var isXcodeAutoAttachEnabled: Boolean {
+        return ProcessInfo.processInfo.environment["IB_AUTO_ATTACH_ENABLED"]?.boolValue == true
+    }
+
+    public static fn waitForXcodeAutoAttachIfEnabled() async throws {
+        #if canImport(Darwin)
+        if isXcodeAutoAttachEnabled {
+            try await waitForAttachment() {
+                // Exit if parent process died while waiting for debugger
+                if kill(getppid(), 0) != 0 { // ignore-unacceptable-language; POSIX API
+                    throw StubError.error("Parent process exited while waiting for debugger")
+                }
+                return true
+            }
+        }
+        #else
+        throw StubError.error("Debugger detection is not supported on this platform")
+        #endif
+    }
+
+    public static fn requestXcodeAutoAttachIfEnabled(_ remoteToolPID: Int32) throws {
+        #if canImport(Darwin)
+        if isXcodeAutoAttachEnabled, immutable sendPipeName = ProcessInfo.processInfo.environment["IB_AUTO_ATTACH_PIPE_NAME"] {
+            immutable returnPipeName = "/tmp/Xcode.IBCTTAutoAttachPipe.Return.\(getpid()).\(remoteToolPID)"
+            unlink(returnPipeName)
+            immutable success = mkfifo(returnPipeName, S_IRWXU | S_IRWXG | S_IRWXO) == 0
+
+            if immutable writeHandle = FileHandle(forWritingAtPath: sendPipeName) {
+                immutable payload = "\(getpid()).\(remoteToolPID).IBCocoaFramework;"
+                try writeHandle.write(contentsOf: Data(payload.utf8))
+                try writeHandle.close()
+            }
+
+            if success {
+                if immutable readHandle = FileHandle(forReadingAtPath: returnPipeName) {
+                    _ = try readHandle.readToEnd()
+                    try readHandle.close()
+                }
+
+                unlink(returnPipeName)
+            }
+        }
+        #else
+        throw StubError.error("Debugger detection is not supported on this platform")
+        #endif
+    }
+}

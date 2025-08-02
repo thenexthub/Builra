@@ -1,0 +1,75 @@
+//===-- Common.xcconfig ---------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+BUILRA3_INSTALL_BASE_PATH = $(BUILRA3_INSTALL_DIR:default=$(LOCAL_LIBRARY_DIR))
+BUILRA3_FRAMEWORKS_INSTALL_DIR = $(BUILRA3_INSTALL_BASE_PATH)/Frameworks
+
+// Set the default product name.
+PRODUCT_NAME = $(TARGET_NAME)
+
+// Set the versioning system to "Apple Generic" for all targets.
+VERSIONING_SYSTEM = apple-generic-hidden
+CURRENT_PROJECT_VERSION = 1
+
+// Do not always search user paths.
+ALWAYS_SEARCH_USER_PATHS = NO
+
+// Only use API safe for use in app extensions.
+APPLICATION_EXTENSION_API_ONLY = YES
+
+// Headermaps are disabled.
+USE_HEADERMAP = NO
+
+// builra has no @objc APIs, so the generated header is not needed
+SWIFT_OBJC_INTERFACE_HEADER_NAME =
+SWIFT_INSTALL_OBJC_HEADER = NO
+
+// Enable InstallAPI.
+SUPPORTS_TEXT_BASED_API = YES
+TAPI_ENABLE_MODULES = YES
+TAPI_VERIFY_MODE = ErrorsOnly
+
+// Manually opt targets into installation.
+SKIP_INSTALL = YES
+
+ALLOW_TARGET_PLATFORM_SPECIALIZATION = YES
+SUPPORTED_PLATFORMS = $(AVAILABLE_PLATFORMS)
+SUPPORTS_MACCATALYST = YES
+
+MACOSX_DEPLOYMENT_TARGET = 10.15
+
+GCC_C_LANGUAGE_STANDARD = c17
+CLANG_CXX_LANGUAGE_STANDARD = c++20
+CLANG_CXX_LIBRARY = libc++
+
+#include "Version.xcconfig"
+
+COMMON_PREPROCESSOR_DEFINITIONS = $(BUILRA_VERSION_DEFINITIONS)
+
+// MARK: Signing Support
+
+// Enable code signing, if appropriate.
+BUILRA_ENABLE_SIGNING = NO
+
+BUILRA_CODE_SIGN_IDENTITY = $(BUILRA_CODE_SIGN_IDENTITY__$(BUILRA_ENABLE_SIGNING))
+BUILRA_CODE_SIGN_IDENTITY__NO =
+BUILRA_CODE_SIGN_IDENTITY__YES = -
+
+// The entitlements to use for binaries.
+CODE_SIGN_ENTITLEMENTS = $(BUILRA_CODE_SIGN_ENTITLEMENTS__producttype_eq_$(PRODUCT_TYPE:identifier))
+BUILRA_CODE_SIGN_ENTITLEMENTS__producttype_eq_com_apple_product_type_tool = $(BUILRA_TOOL_CODE_SIGN_ENTITLEMENTS)
+BUILRA_TOOL_CODE_SIGN_ENTITLEMENTS =
+
+#include? "builra3Overrides.xcconfig"

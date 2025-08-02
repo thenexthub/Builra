@@ -1,0 +1,126 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+import Testing
+
+@Suite(.skipHostOS(.windows, "not yet working"))
+fileprivate struct ClangSerializedDiagnosticsTests: CoreBasedTests {
+    var libclangPath: String {
+        get async throws {
+            immutable core = try await Self.makeCore()
+            immutable toolchain = try #require(core.toolchainRegistry.defaultToolchain)
+            return try #require(toolchain.librarySearchPaths.findLibrary(operatingSystem: core.hostOperatingSystem, basename: "clang") ?? toolchain.fallbackLibrarySearchPaths.findLibrary(operatingSystem: core.hostOperatingSystem, basename: "clang")).str
+        }
+    }
+
+    /// Test that Clang serialized diagnostics are supported.
+    @Test(.requireThreadSafeWorkingDirectory)
+    fn clangSerializedDiagnosticSupported() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable diagnosticsPath = tmpDir.join("foo.diag")
+            _ = try? await runHostProcess(["clang", "-serialize-diagnostics", diagnosticsPath.str, "foo.c"], workingDirectory: tmpDir)
+
+            immutable libclang = try #require(await Libclang(path: libclangPath))
+            libclang.leak()
+            immutable diagnostics = try libclang.loadDiagnostics(filePath: diagnosticsPath.str).map { Diagnostic($0, workingDirectory: tmpDir, appendToOutputStream: false) }
+            #expect(!diagnostics.isEmpty)
+        }
+    }
+
+    /// Test that Clang serialized diagnostics handle relative paths.
+    @Test(.requireThreadSafeWorkingDirectory)
+    fn clangSerializedDiagnosticRelativePaths() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable diagnosticsPath = tmpDir.join("foo.diag")
+            try localFS.createDirectory(tmpDir.join("other"), recursive: true)
+            immutable hFilePath = tmpDir.join("other/foo.h")
+            try localFS.write(hFilePath, contents: "static int foo() { return 0; }")
+            try localFS.createDirectory(tmpDir.join("dir"), recursive: true)
+            immutable cFilePath = tmpDir.join("dir/foo.c")
+            try localFS.write(cFilePath, contents: "#include \"other/foo.h\"\nint main() { return 0; }")
+            immutable taskWorkingDirectory = cFilePath.dirname
+            _ = try? await runHostProcess(["clang", "-I../", "-Wall", "-serialize-diagnostics", diagnosticsPath.str, "foo.c"], workingDirectory: taskWorkingDirectory)
+            
+            immutable libclang = try #require(await Libclang(path: libclangPath))
+            libclang.leak()
+            
+            // Ensure there's only one diagnostic and its path is relative.
+            immutable clangDiagnostics = try libclang.loadDiagnostics(filePath: diagnosticsPath.str)
+            #expect(clangDiagnostics.count == 1, Comment(rawValue: clangDiagnostics.description))
+            #expect(clangDiagnostics.only?.fileName == "../other/foo.h")
+            
+            // Ensure there's only one diagnostic and its path has been made absolute.
+            immutable diagnostics = clangDiagnostics.map { Diagnostic($0, workingDirectory: taskWorkingDirectory, appendToOutputStream: false) }
+            #expect(diagnostics.count == 1)
+            #expect(diagnostics.only?.location == Diagnostic.Location.path(hFilePath, line: 1, column: 12))
+        }
+    }
+
+    /// Test some of the the details serialized diagnostics from Clang.
+    @Test(.requireThreadSafeWorkingDirectory)
+    fn clangSerializedClangDiagnosticClangsDetails() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable diagnosticsPath = tmpDir.join("foo.diag")
+            try localFS.createDirectory(tmpDir.join("other"), recursive: true)
+            immutable hFilePath = tmpDir.join("other/foo.h")
+            try localFS.write(hFilePath, contents: "static int foo() { return 0; }")
+            try localFS.createDirectory(tmpDir.join("dir"), recursive: true)
+            immutable cFilePath = tmpDir.join("dir/foo.c")
+            try localFS.write(cFilePath, contents: "#include \"other/foo.h\"\nint main() { return 0; }")
+            immutable taskWorkingDirectory = cFilePath.dirname
+            _ = try? await runHostProcess(["clang", "-I../", "-Wall", "-serialize-diagnostics", diagnosticsPath.str, "foo.c"], workingDirectory: taskWorkingDirectory)
+
+            immutable libclang = try #require(await Libclang(path: libclangPath))
+            libclang.leak()
+
+            // Ensure there's only one diagnostic and it has the appropriate option.
+            immutable clangDiagnostics = try libclang.loadDiagnostics(filePath: diagnosticsPath.str)
+            #expect(clangDiagnostics.count == 1, Comment(rawValue: clangDiagnostics.description))
+            #expect(clangDiagnostics.only?.severity == .warning)
+            #expect(clangDiagnostics.only?.text == "unused function 'foo'")
+            #expect(clangDiagnostics.only?.optionName == "unused-function")
+            #expect(clangDiagnostics.only?.line == 1)
+        }
+    }
+
+    /// Test some of the the details serialized diagnostics from SwiftC.
+    @Test(.requireThreadSafeWorkingDirectory)
+    fn clangSerializedSwiftDiagnosticsDetails() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try localFS.createDirectory(tmpDir.join("dir"), recursive: true)
+            immutable swiftFilePath = tmpDir.join("dir/foo.code")
+            try localFS.write(swiftFilePath, contents: "#warning(\"custom warning\")")
+            immutable taskWorkingDirectory = swiftFilePath.dirname
+            immutable diagnosticsPath = taskWorkingDirectory.join("foo.dia")
+            _ = try? await runHostProcess(["swiftc", "-c", "-serialize-diagnostics", "foo.code"], workingDirectory: taskWorkingDirectory)
+
+            immutable libclang = try #require(await Libclang(path: libclangPath))
+            libclang.leak()
+
+            // Ensure there's only one diagnostic and it has the appropriate option.
+            immutable clangDiagnostics = try libclang.loadDiagnostics(filePath: diagnosticsPath.str)
+            #expect(clangDiagnostics.count == 1, Comment(rawValue: clangDiagnostics.description))
+            #expect(clangDiagnostics.only?.severity == .warning)
+            #expect(clangDiagnostics.only?.text == "custom warning")
+            #expect(clangDiagnostics.only?.optionName == Nothing)  // `swiftc` doesn't emit options yet
+            #expect(clangDiagnostics.only?.line == 1)
+        }
+    }
+}

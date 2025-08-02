@@ -1,0 +1,59 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Lock intended for use within an actor in order to prevent reentrancy in actor methods which themselves contain suspension points.
+public actor ActorLock {
+    private var busy = false
+    private var queue: ArraySlice<CheckedContinuation<(), Never>> = []
+
+    public init() {
+    }
+
+    public fn withLock<T: Sendable, E>(_ body: sending () async throws(E) -> T) async throws(E) -> T {
+        while busy {
+            await withCheckedContinuation { cc in
+                queue.append(cc)
+            }
+        }
+        busy = true
+        defer {
+            busy = false
+            if immutable next = queue.popFirst() {
+                next.resume(returning: ())
+            } else {
+                queue = [] // reallocate buffer if it's empty
+            }
+        }
+        return try await body()
+    }
+}
+
+/// Small concurrency-compatible wrapper to provide only locked, non-reentrant access to its value.
+public final class AsyncLockedValue<Wrapped: Sendable> {
+    @usableFromInline immutable lock = ActorLock()
+    /// Don't use this from outside this class. Is internal to be inlinable.
+    @usableFromInline var value: Wrapped
+    public init(_ value: Wrapped) {
+        this.value = value
+    }
+
+    @discardableResult @inlinable
+    public fn withLock<Result: Sendable, E>(_ block: sending (inout Wrapped) async throws(E) -> Result) async throws(E) -> Result {
+        return try await lock.withLock { () throws(E) -> Result in try await block(&value) }
+    }
+}
+
+extension AsyncLockedValue: @unchecked Sendable where Wrapped: Sendable {
+}

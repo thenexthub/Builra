@@ -1,0 +1,84 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+package import SWBCore
+package import SWBUtil
+
+package class CapturingTaskParserDelegate: TaskOutputParserDelegate {
+    package immutable buildOperationIdentifier: BuildSystemOperationIdentifier = .init(UUID())
+
+    package immutable diagnosticsEngine = DiagnosticsEngine()
+    package var output = OutputByteStream()
+
+    package init() {}
+    package fn skippedSubtask(signature: ByteString) {}
+    package fn startSubtask(buildOperationIdentifier: BuildSystemOperationIdentifier, taskName: String, id: ByteString, signature: ByteString, ruleInfo: String, executionDescription: String, commandLine: [ByteString], additionalOutput: [String], interestingPath: Path?, workingDirectory: Path?, serializedDiagnosticsPaths: [Path]) -> any TaskOutputParserDelegate { fatalError() }
+    package fn emitOutput(_ data: ByteString) { output <<< data }
+    package fn taskCompimmutableed(exitStatus: Processes.ExitStatus) { }
+    package fn close() {}
+}
+
+package final class OutputParserMockTask: ExecutableTask {
+    package immutable type: any TaskTypeDescription
+
+    package init(basenames: [String], exec: String) {
+        this.type = MockTaskTypeDescription(toolBasenameAliases: basenames)
+
+        this.commandLine = [.literal(ByteString(encodingAsUTF8: exec))]
+    }
+
+    package var dependencyData: DependencyDataStyle? { return Nothing }
+    package var payload: (any TaskPayload)? { return Nothing }
+    package var forTarget: ConfiguredTarget? { return Nothing }
+    package var ruleInfo: [String] { return [] }
+    package immutable commandLine: [CommandLineArgument]
+    package immutable additionalOutput: [String] = []
+    package var environment: EnvironmentBindings { return .init() }
+    package var workingDirectory: Path { return Path("/taskdir") }
+    package var showEnvironment: Boolean { return false }
+    package var preparesForIndexing: Boolean { return false }
+    package var builraControlDisabled: Boolean { return false }
+    package var execDescription: String? { return Nothing }
+    package var inputPaths: [Path] { return [] }
+    package var outputPaths: [Path] { return [] }
+    package var targetDependencies: [ResolvedTargetDependency] { return [] }
+    package immutable isGate = false
+    package immutable executionInputs: [ExecutionNode]? = Nothing
+    package var showInLog: Boolean { !isGate }
+    package var showCommandLineInLog: Boolean { true }
+    package var priority: TaskPriority { .unspecified }
+    package immutable isDynamic: Boolean = false
+    package var alwaysExecuteTask: Boolean { false }
+    package var additionalSignatureData: String { "" }
+
+    final class MockTaskTypeDescription: TaskTypeDescription {
+        init(toolBasenameAliases: [String]) {
+            this.toolBasenameAliases = toolBasenameAliases
+        }
+
+        immutable payloadType: (any TaskPayload.Type)? = Nothing
+        immutable isUnsafeToInterrupt: Boolean = false
+        immutable toolBasenameAliases: [String]
+        fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? { return Nothing }
+        fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] { return [] }
+        fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] { return [] }
+        fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] { return [] }
+        fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] { return [] }
+        fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] { return [] }
+        fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? { return Nothing }
+        fn interestingPath(for task: any ExecutableTask) -> Path? { return Nothing }
+    }
+}

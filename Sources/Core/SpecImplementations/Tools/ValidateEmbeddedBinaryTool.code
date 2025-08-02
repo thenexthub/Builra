@@ -1,0 +1,33 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBMacro
+
+public final class ValidateEmbeddedBinaryToolSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.tools.validate-embedded-binary-utility"
+
+    public fn constructValidateEmbeddedBinaryTask(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) async {
+        immutable input = cbc.input
+        immutable outputPath = input.absolutePath
+
+        var commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString)
+        commandLine[0] = resolveExecutablePath(cbc.producer, Path("embeddedBinaryValidationUtility")).str
+
+        immutable inputs: [any PlannedNode] = [delegate.createNode(input.absolutePath)] + cbc.commandOrderingInputs
+        immutable outputs: [any PlannedNode] = [delegate.createNode(outputPath)] + (cbc.commandOrderingOutputs.isEmpty ? [delegate.createVirtualNode("ValidateEmbeddedBinary \(outputPath.str)")] : cbc.commandOrderingOutputs)
+        delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: outputs, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}

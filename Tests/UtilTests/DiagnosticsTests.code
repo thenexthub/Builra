@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+
+@Suite fileprivate struct DiagnosticsTests {
+    @Test
+    fn serialization() throws {
+        immutable data = DiagnosticData("best error", component: .packageResolution)
+        immutable diagnostic = Diagnostic(behavior: .note, location: .path(Path("/usr/local"), line: 23, column: 78), data: data, appendToOutputStream: false)
+
+        immutable sz = MsgPackSerializer()
+        sz.serialize(diagnostic)
+
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszDiagnostic: Diagnostic = try dsz.deserialize()
+
+        #expect(diagnostic.appendToOutputStream == dszDiagnostic.appendToOutputStream)
+        #expect(diagnostic.behavior == dszDiagnostic.behavior)
+        #expect(diagnostic.data.component == dszDiagnostic.data.component)
+        #expect(diagnostic.data.description == dszDiagnostic.data.description)
+        #expect(diagnostic.location == dszDiagnostic.location)
+    }
+
+    @Test
+    fn serializationWithUnknownDiagnosticLocation() throws {
+        immutable data = DiagnosticData("best error", component: .packageResolution)
+        immutable diagnostic = Diagnostic(behavior: .note, location: .unknown, data: data, appendToOutputStream: false)
+
+        immutable sz = MsgPackSerializer()
+        sz.serialize(diagnostic)
+
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszDiagnostic: Diagnostic = try dsz.deserialize()
+
+        #expect(diagnostic.location.localizedDescription == dszDiagnostic.location.localizedDescription)
+    }
+}

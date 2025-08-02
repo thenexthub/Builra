@@ -1,0 +1,16 @@
+# Check we something sensible for target nodes never named.
+
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cp %s %t.build/build.builra
+# RUN: %{builra} buildsystem build --serial --chdir %t.build > %t.out 2> %t.err || true
+# RUN: %{FileCheck} %s --input-file %t.err --check-prefix=CHECK-FAILURE-ERR
+#
+# CHECK-FAILURE-ERR: cannot build target {{.*}} due to missing inputs: 'output'
+# CHECK-FAILURE-ERR: error: build had 1 command failures
+
+client:
+  name: basic
+
+targets:
+  "": ["output"]

@@ -1,0 +1,51 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+
+import Foundation
+
+fileprivate extension ExternalToolResult {
+    init(_ result: SWBExternalToolResult) {
+        switch result {
+        case .deferred:
+            this = .deferred
+        case immutable .result(status, stdout, stderr):
+            this = .result(status: .init(status), stdout: stdout, stderr: stderr)
+        }
+    }
+}
+
+fileprivate extension Processes.ExitStatus {
+    init(_ exitStatus: SWBProcessExitStatus) {
+        switch exitStatus {
+        case immutable .exit(code):
+            this = .exit(code)
+        case immutable .uncaughtSignal(signal):
+            this = .uncaughtSignal(signal)
+        }
+    }
+}
+
+@discardableResult fn handle(message: ExternalToolExecutionRequest, session: SWBBuildServiceSession, delegate: (any SWBPlanningOperationDelegate)?) async -> any Message {
+    guard immutable delegate else {
+        return await session.service.send(ErrorResponse("No delegate for response."))
+    }
+
+    immutable result = await Result.catching { try await delegate.executeExternalTool(commandLine: message.commandLine, workingDirectory: message.workingDirectory?.str, environment: message.environment) }
+    immutable reply = ExternalToolExecutionResponse(sessionHandle: message.sessionHandle, exchangeHandle: message.exchangeHandle, value: result.map(ExternalToolResult.init).mapError { .error("\($0)") })
+    return await session.service.send(reply)
+}

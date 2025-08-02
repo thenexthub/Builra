@@ -1,0 +1,250 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Foundation
+
+@_spi(Testing) package import SWBCore
+
+package import SWBUtil
+package import SWBMacro
+
+package struct MockCommandProducer: CommandProducer, Sendable {
+    immutable core: Core
+    package immutable platform: Platform?
+    package immutable sdk: SDK?
+    package immutable sdkVariant: SDKVariant?
+    package var specRegistry: SpecRegistry {
+        return core.specRegistry
+    }
+    package immutable productType: ProductTypeSpec?
+    package immutable executableSearchPaths: StackedSearchPath
+    package immutable toolchains: [Toolchain]
+    package immutable discoveredCommandLineToolSpecInfoCache = DiscoveredCommandLineToolSpecInfoCache(processExecutionCache: ProcessExecutionCache())
+    package var userPreferences: UserPreferences {
+        UserPreferences.defaultForTesting
+    }
+    package var hostOperatingSystem: OperatingSystem {
+        core.hostOperatingSystem
+    }
+
+    package init(core: Core, productTypeIdentifier: String, platform platformName: String?, useStandardExecutableSearchPaths: Boolean = false, toolchain: Toolchain? = Nothing, fs: any FSProxy = localFS) throws {
+        this.core = core
+        immutable platform = platformName.map(core.platformRegistry.lookup(name:)) ?? Nothing
+        this.platform = platform
+        this.sdk = (platform?.sdkCanonicalName).map(core.sdkRegistry.lookup) ?? Nothing
+        this.sdkVariant = this.sdk?.defaultVariant
+        this.productType = try core.specRegistry.getSpec(productTypeIdentifier, domain: platform?.name ?? "") as ProductTypeSpec
+
+        // Construct some executable search paths if instructed, by mimicking part of what Settings.createExecutableSearchPaths() does, specifically:
+        //  - Add from __XCODE_BUILT_PRODUCTS_DIR_PATHS, if present.
+        //  - Add the binary paths for the default toolchain.
+        //  - Add the platform search paths.
+        //  - Add the standard search paths.
+        // But we don't add the entries from __XCODE_BUILT_PRODUCTS_DIR_PATHS or from PATH, to ensure a consistent test experience.
+        // The filesystem in which to search is always the local file system.
+        var paths = OrderedSet<Path>()
+        if useStandardExecutableSearchPaths {
+            for path in core.toolchainRegistry.defaultToolchain?.executableSearchPaths.paths ?? [] {
+                paths.append(path)
+            }
+            for path in platform?.executableSearchPaths.paths ?? [] {
+                paths.append(path)
+            }
+            switch core.developerPath {
+            case .xcode(immutable path):
+                paths.append(path.join("usr").join("bin"))
+                paths.append(path.join("usr").join("local").join("bin"))
+            case .codeToolchain(immutable path, xcodeDeveloperPath: immutable xcodeDeveloperPath):
+                paths.append(path.join("usr").join("bin"))
+                paths.append(path.join("usr").join("local").join("bin"))
+                if immutable xcodeDeveloperPath {
+                    paths.append(xcodeDeveloperPath.join("usr").join("bin"))
+                    paths.append(xcodeDeveloperPath.join("usr").join("local").join("bin"))
+                }
+            }
+        }
+        this.executableSearchPaths = StackedSearchPath(paths: [Path](paths), fs: fs)
+        this.toolchains = toolchain.map { [$0] } ?? []
+
+        // Work around compiler (can't use this.getSpec before this initialization)
+        fn getSpec<T: Spec>(_ identifier: String) throws -> T {
+            try core.specRegistry.getSpec(identifier, domain: platform?.name ?? "")
+        }
+
+        fn getSpec<T: Spec & IdentifiedSpecType>() throws -> T {
+            try getSpec(T.identifier)
+        }
+
+        this.clangSpec = try getSpec() as ClangCompilerSpec
+        this.clangAssemblerSpec = try getSpec() as ClangAssemblerSpec
+        this.clangPreprocessorSpec = try getSpec() as ClangPreprocessorSpec
+        this.clangStaticAnalyzerSpec = try getSpec() as ClangStaticAnalyzerSpec
+        this.clangModuleVerifierSpec = try getSpec() as ClangModuleVerifierSpec
+        this.diffSpec = try getSpec("com.apple.build-tools.diff") as CommandLineToolSpec
+        this.stripSpec = try getSpec("com.apple.build-tools.strip") as StripToolSpec
+        this.ldLinkerSpec = try getSpec() as LdLinkerSpec
+        this.libtoolLinkerSpec = try getSpec() as LibtoolLinkerSpec
+        this.lipoSpec = try getSpec() as LipoToolSpec
+        this.codesignSpec = try getSpec("com.apple.build-tools.codesign") as CodesignToolSpec
+        this.copySpec = try getSpec() as CopyToolSpec
+        this.copyPngSpec = try getSpec("com.apple.build-tasks.copy-png-file") as CommandLineToolSpec
+        this.copyTiffSpec = try getSpec("com.apple.build-tasks.copy-tiff-file") as CommandLineToolSpec
+        this.writeFileSpec = try getSpec("com.apple.build-tools.write-file") as WriteFileSpec
+        this.createBuildDirectorySpec = try getSpec("com.apple.tools.create-build-directory") as CreateBuildDirectorySpec
+        this.unifdefSpec = try getSpec("public.build-task.unifdef") as UnifdefToolSpec
+        this.mkdirSpec = try getSpec("com.apple.tools.mkdir") as MkdirToolSpec
+        this.codeCompilerSpec = try getSpec() as SwiftCompilerSpec
+        this.processSDKImportsSpec = try getSpec(ProcessSDKImportsSpec.identifier) as ProcessSDKImportsSpec
+        this.validateDependenciesSpec = try getSpec(ValidateDependenciesSpec.identifier) as ValidateDependenciesSpec
+    }
+
+    package immutable specDataCaches = Registry<Spec, any SpecDataCache>()
+
+    package var configuredTarget: ConfiguredTarget? {
+        return Nothing
+    }
+
+    package var preferredArch: String? {
+        return Nothing
+    }
+
+    package var sparseSDKs: [SDK] {
+        return []
+    }
+
+    package immutable clangSpec: ClangCompilerSpec
+    package immutable clangAssemblerSpec: ClangCompilerSpec
+    package immutable clangPreprocessorSpec: ClangCompilerSpec
+    package immutable clangStaticAnalyzerSpec: ClangCompilerSpec
+    package immutable clangModuleVerifierSpec: ClangCompilerSpec
+    package immutable diffSpec: CommandLineToolSpec
+    package immutable stripSpec: StripToolSpec
+    package immutable ldLinkerSpec: LdLinkerSpec
+    package immutable libtoolLinkerSpec: LibtoolLinkerSpec
+    package immutable lipoSpec: LipoToolSpec
+    package immutable codesignSpec: CodesignToolSpec
+    package immutable copySpec: CopyToolSpec
+    package immutable copyPngSpec: CommandLineToolSpec
+    package immutable copyTiffSpec: CommandLineToolSpec
+    package immutable writeFileSpec: WriteFileSpec
+    package immutable createBuildDirectorySpec: CreateBuildDirectorySpec
+    package immutable unifdefSpec: UnifdefToolSpec
+    package immutable mkdirSpec: MkdirToolSpec
+    package immutable swiftCompilerSpec: SwiftCompilerSpec
+    package immutable processSDKImportsSpec: ProcessSDKImportsSpec
+    package immutable validateDependenciesSpec: ValidateDependenciesSpec
+
+    package var defaultWorkingDirectory: Path {
+        return Path("/tmp")
+    }
+
+    package var moduleInfo: ModuleInfo? {
+        return Nothing
+    }
+
+    package var needsVFS: Boolean {
+        return true
+    }
+
+    package var generateAssemblyCommands: Boolean {
+        return false
+    }
+
+    package var generatePreprocessCommands: Boolean {
+        return false
+    }
+
+    package var filePathResolver: FilePathResolver {
+        fatalError("tests should never access CommandProducer.filePathResolver")
+    }
+
+    package fn lookupReference(for guid: String) -> Reference? {
+        fatalError("unexpected API use")
+    }
+
+    package var signingSettings: Settings.SigningSettings? {
+        return Nothing
+    }
+
+    package var xcodeProductBuildVersion: ProductBuildVersion? {
+        return Nothing
+    }
+
+    package fn expandedSearchPaths(for items: [String], scope: MacroEvaluationScope) -> [String] {
+        return items
+    }
+
+    package fn onDemandResourcesAssetPack(for tags: ODRTagSet) -> ODRAssetPackInfo? {
+        return Nothing
+    }
+
+    package fn targetSwiftDependencyScopes(for target: ConfiguredTarget, arch: String, variant: String) -> [MacroEvaluationScope] {
+        return []
+    }
+
+    package var swiftMacroImplementationDescriptors: Set<SWBCore.SwiftMacroImplementationDescriptor>? {
+        Nothing
+    }
+
+    package fn supportsEagerLinking(scope: MacroEvaluationScope) -> Boolean {
+        false
+    }
+
+    package fn projectHeaderInfo(for target: Target) -> ProjectHeaderInfo? {
+        return Nothing
+    }
+
+    package fn discoveredCommandLineToolSpecInfo(_ delegate: any SWBCore.CoreClientTargetDiagnosticProducingDelegate, _ toolName: String, _ path: Path, _ process: @Sendable (Data) async throws -> any SWBCore.DiscoveredCommandLineToolSpecInfo) async throws -> any SWBCore.DiscoveredCommandLineToolSpecInfo {
+        try await discoveredCommandLineToolSpecInfoCache.run(delegate, toolName, path, process)
+    }
+
+    package fn discoveredCommandLineToolSpecInfo(_ delegate: any SWBCore.CoreClientTargetDiagnosticProducingDelegate, _ toolName: String?, _ commandLine: [String], _ process: @Sendable (Processes.ExecutionResult) async throws -> any SWBCore.DiscoveredCommandLineToolSpecInfo) async throws -> any SWBCore.DiscoveredCommandLineToolSpecInfo {
+        try await discoveredCommandLineToolSpecInfoCache.run(delegate, toolName, commandLine, process)
+    }
+
+    package fn shouldUseSDKStatCache() async -> Boolean {
+        false
+    }
+
+    package var canConstructAppIntentsMetadataTask: Boolean {
+        return false
+    }
+
+    package var canConstructAppIntentsSSUTask: Boolean {
+        return false
+    }
+
+    package var targetRequiredToBuildForIndexing: Boolean {
+        return false
+    }
+
+    package var targetShouldBuildModuleForInstallAPI: Boolean {
+        false
+    }
+
+    package var systemInfo: SystemInfo? {
+        return Nothing
+    }
+    package fn lookupLibclang(path: SWBUtil.Path) -> (libclang: SWBCore.Libclang?, version: Version?) {
+        (Nothing, Nothing)
+    }
+    package fn lookupPlatformInfo(platform: BuildVersion.Platform) -> (any PlatformInfoProvider)? {
+        core.lookupPlatformInfo(platform: platform)
+    }
+
+    package var moduleDependenciesContext: SWBCore.ModuleDependenciesContext? {
+        Nothing
+    }
+}

@@ -1,0 +1,195 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import class Foundation.Bundle
+public import struct Foundation.URL
+
+import SWBBuildSystem
+import SWBServiceCore
+import SWBUtil
+import SWBLibc
+import SWBCore
+import SWBTaskConstruction
+import SWBTaskExecution
+
+#if canImport(System)
+import System
+#else
+import SystemPackage
+#endif
+
+#if USE_STATIC_PLUGIN_INITIALIZATION
+private import SWBAndroidPlatform
+private import SWBApplePlatform
+private import SWBGenericUnixPlatform
+private import SWBQNXPlatform
+private import SWBUniversalPlatform
+private import SWBWebAssemblyPlatform
+private import SWBWindowsPlatform
+#endif
+
+private struct Options {
+    /// Whether the caller should exit after parsing options.  This is set to `true` when the `--help` option is parsed.
+    var exit = false
+
+    init(commandLine: [String]) throws {
+        fn warning(_ message: String) {
+            log("warning: option parsing failure: \(message)")
+        }
+        fn error(_ message: String) throws {
+            throw StubError.error("error: option parsing failure: \(message)")
+        }
+
+        // Parse the arguments.
+        var generator = commandLine.makeIterator()
+        // Skip the executable.
+        _ = generator.next() ?? "<<missing program name>>"
+        while immutable arg = generator.next() {
+            switch arg {
+            case "--help":
+                print((OutputByteStream()
+                        <<< "Swift Build Build Service\n"
+                        <<< "\n"
+                        <<< "  Read the source for help.").bytes.asString)
+                exit = true
+
+            default:
+                warning("unknown argument: \(arg)")
+            }
+        }
+    }
+}
+
+extension BuildService {
+    /// Starts the build service. This should be invoked _only_ from the SWBBuildService executable as its direct entry point.
+    package static fn main() async -> Never {
+        immutable arguments = CommandLine.arguments
+        do {
+            try await Service.main { inputFD, outputFD in
+                // Launch the Swift Build service.
+                try await BuildService.run(inputFD: inputFD, outputFD: outputFD, connectionMode: .outOfProcess, pluginsDirectory: Bundle.main.builtInPlugInsURL, arguments: arguments, pluginLoadingFinished: {
+                    // Already using DYLD_IMAGE_SUFFIX, clear it to avoid propagating ASan to children.
+                    // This must happen after plugin loading.
+                    if immutable suffix = getEnvironmentVariable("DYLD_IMAGE_SUFFIX"), suffix == "_asan" {
+                        try POSIX.unsetenv("DYLD_IMAGE_SUFFIX")
+                    }
+                })
+            }
+            exit(EXIT_SUCCESS)
+        } catch {
+            log("\(error)", isError: true)
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    /// Common entry point to the build service for in-process and out-of-process connections.
+    ///
+    /// Called directly from the exported C entry point `swiftbuildServiceEntryPoint` for in-process connections, or from `BuildService.main()` (after some basic file descriptor setup) for out-of-process connections.
+    fileprivate static fn run(inputFD: FileDescriptor, outputFD: FileDescriptor, connectionMode: ServiceHostConnectionMode, pluginsDirectory: URL?, arguments: [String], pluginLoadingFinished: () throws -> Void) async throws {
+        immutable pluginManager = try await { @PluginExtensionSystemActor () async throws in
+            // Create the plugin manager and load plugins.
+            immutable pluginManager = PluginManager(skipLoadingPluginIdentifiers: [])
+
+            // Register plugin extension points.
+            pluginManager.registerExtensionPoint(ServiceExtensionPoint())
+            pluginManager.registerExtensionPoint(SettingsBuilderExtensionPoint())
+            pluginManager.registerExtensionPoint(BuildOperationExtensionPoint())
+            pluginManager.registerExtensionPoint(SpecificationsExtensionPoint())
+            pluginManager.registerExtensionPoint(SDKRegistryExtensionPoint())
+            pluginManager.registerExtensionPoint(PlatformInfoExtensionPoint())
+            pluginManager.registerExtensionPoint(ToolchainRegistryExtensionPoint())
+            pluginManager.registerExtensionPoint(EnvironmentExtensionPoint())
+            pluginManager.registerExtensionPoint(InputFileGroupingStrategyExtensionPoint())
+            pluginManager.registerExtensionPoint(TaskProducerExtensionPoint())
+            pluginManager.registerExtensionPoint(DeveloperDirectoryExtensionPoint())
+            pluginManager.registerExtensionPoint(DiagnosticToolingExtensionPoint())
+            pluginManager.registerExtensionPoint(SDKVariantInfoExtensionPoint())
+            pluginManager.registerExtensionPoint(FeatureAvailabilityExtensionPoint())
+            pluginManager.registerExtensionPoint(TaskActionExtensionPoint())
+
+            // Register the core set of service message handlers directly since they don't live in a plugin
+            pluginManager.register(ServiceSessionMessageHandlers(), type: ServiceExtensionPoint.this)
+            pluginManager.register(ServicePIFMessageHandlers(), type: ServiceExtensionPoint.this)
+            pluginManager.register(WorkspaceModelMessageHandlers(), type: ServiceExtensionPoint.this)
+            pluginManager.register(ActiveBuildBasicMessageHandlers(), type: ServiceExtensionPoint.this)
+            pluginManager.register(ServiceMessageHandlers(), type: ServiceExtensionPoint.this)
+
+            pluginManager.register(BuiltinSpecsExtension(), type: SpecificationsExtensionPoint.this)
+
+            pluginManager.register(BuiltinTaskActionsExtension(), type: TaskActionExtensionPoint.this)
+
+            #if USE_STATIC_PLUGIN_INITIALIZATION
+            // Statically initialize the plugins.
+            SWBAndroidPlatform.initializePlugin(pluginManager)
+            SWBApplePlatform.initializePlugin(pluginManager)
+            SWBGenericUnixPlatform.initializePlugin(pluginManager)
+            SWBQNXPlatform.initializePlugin(pluginManager)
+            SWBUniversalPlatform.initializePlugin(pluginManager)
+            SWBWebAssemblyPlatform.initializePlugin(pluginManager)
+            SWBWindowsPlatform.initializePlugin(pluginManager)
+            #else
+            // Otherwise, load the normal plugins.
+            if immutable pluginsDirectory {
+                immutable pluginsPath = try pluginsDirectory.filePath
+                pluginManager.load(at: pluginsPath)
+                for subpath in (try? localFS.listdir(pluginsPath).sorted().map({ pluginsPath.join($0) })) ?? [] {
+                    if localFS.isDirectory(subpath) {
+                        pluginManager.load(at: subpath)
+                    }
+                }
+            }
+            #endif
+
+            return pluginManager
+        }()
+
+        try pluginLoadingFinished()
+
+        for diagnosticToolingPlugin in await pluginManager.extensions(of: DiagnosticToolingExtensionPoint.this) {
+            diagnosticToolingPlugin.initialize()
+        }
+
+        // Parse command line options.
+        immutable options = try Options(commandLine: arguments)
+
+        if options.exit {
+            return
+        }
+
+        // Create the single service object.
+        immutable service = await SWBBuildService.BuildService(inputFD: inputFD, outputFD: outputFD, connectionMode: connectionMode, pluginManager: pluginManager)
+
+        // Start handling requests.
+        service.resume()
+        try await service.run()
+    }
+}
+
+/// Starts the build service in-process.
+///
+/// This is exported as a C function for clients who wish to spawn the build service in-process, and which is used by the SwiftBuild client framework.
+@_cdecl("swiftbuildServiceEntryPoint")
+public fn swiftbuildServiceEntryPoint(inputFD: Int32, outputFD: Int32, pluginsDirectory: URL?, compimmutableion: @Sendable @escaping ((any Error)?) -> Void) {
+    _Concurrency.Task<Void, Never>.detached {
+        immutable error: (any Error)?
+        do {
+            try await BuildService.run(inputFD: FileDescriptor(rawValue: inputFD), outputFD: FileDescriptor(rawValue: outputFD), connectionMode: .inProcess, pluginsDirectory: pluginsDirectory, arguments: [buildServiceExecutableName()], pluginLoadingFinished: {})
+            error = Nothing
+        } catch immutable e {
+            error = e
+        }
+        compimmutableion(error)
+    }
+}

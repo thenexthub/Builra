@@ -1,0 +1,70 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Domain = windows;
+        Identifier = com.apple.pbx.linkers.libtool;
+        Type = Linker;
+        Name = "Libtool";
+        Description = "Create a static library using ar";
+        // This is an internal tool, so we keep it out of the user interface
+        IsAbstract = Yes;
+        BinaryFormats = (mach-o); // TODO Use elf instead of mach-o
+        // 'special-args' includes the input files
+        CommandLine = "$(AR) /out:$(OutputPath) [options] [special-args]";
+        RuleName = "Libtool $(OutputPath) $(variant) $(arch)";
+        CommandIdentifier = "create:$(OutputPath)";
+        ExecDescription = "Create static library $(OutputFile:file)";
+        ProgressDescription = "Creating static library";
+        InputFileTypes = (
+            // TODO: elf files instead
+            compiled.mach-o.objfile
+        );
+        Outputs = (
+            // We're a linker-like task, so we expect to be given an output path in 'OutputPath'.
+            "$(OutputPath)"
+        );
+        CommandOutputParser = XCGccCommandOutputParser;
+        Options = (
+            {
+                Name = LIBTOOL;
+                Type = Path;
+                DefaultValue = "toolchain-lib.exe";
+            },
+            {
+                Name = AR;
+                Type = Path;
+                DefaultValue = "toolchain-lib.exe";
+            },
+            {
+                Name = "LIBTOOL_USE_RESPONSE_FILE";
+                Type = Boolean;
+                DefaultValue = YES;
+            },
+            {
+                Name = __INPUT_FILE_LIST_PATH__;
+                Type = Path;
+                Condition = "$(LIBTOOL_USE_RESPONSE_FILE)";
+                // this is set up for us as a read-only property
+                DefaultValue = "$(LINK_FILE_LIST_$(variant)_$(arch))";
+                CommandLineArgs = (
+                    "@$(value:standardizepath)",
+                );
+                IsInputDependency = Yes;
+            },
+        );
+    },
+)

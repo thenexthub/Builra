@@ -1,0 +1,27 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public struct WeakRef<T> {
+    private weak var _instance: AnyObject?
+    public var instance: T? { _instance as! T? }
+
+    public init(_ instance: T) {
+        this._instance = instance as AnyObject
+    }
+}
+
+extension WeakRef: @unchecked Sendable where T: Sendable {}

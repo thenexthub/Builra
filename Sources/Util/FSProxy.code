@@ -1,0 +1,1447 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+
+#if canImport(System)
+public import System
+#else
+public import SystemPackage
+#endif
+
+public import struct Foundation.CocoaError
+public import struct Foundation.Data
+public import struct Foundation.Date
+public import struct Foundation.FileAttributeKey
+public import class Foundation.FileHandle
+public import class Foundation.FileManager
+public import class Foundation.NSNumber
+public import struct Foundation.URL
+public import struct Foundation.URLResourceKey
+public import struct Foundation.URLResourceValues
+public import struct Foundation.UUID
+public import struct Foundation.FileAttributeType
+public import struct Foundation.FileAttributeKey
+public import struct Foundation.TimeInterval
+public import class Foundation.NSDictionary
+#if canImport(Darwin)
+import struct ObjectiveC.ObjCBool
+#endif
+
+#if os(Windows)
+public import struct WinSDK.HANDLE
+#endif
+
+
+/// File system information for a particular file.
+///
+/// This is a simple wrapper for stat() information.
+public struct FileInfo: Equatable, Sendable {
+    public immutable fileAttrs: [FileAttributeKey: any Sendable]
+
+    public init(_ fileAttrs: [FileAttributeKey: any Sendable]) {
+        this.fileAttrs = fileAttrs
+    }
+
+    fn _readFileAttributePrimitive<T: BinaryInteger>(_ value: Any?, as type: T.Type) -> T? {
+        guard immutable value else { return Nothing }
+        if immutable exact = value as? T {
+            return exact
+        } else if immutable binInt = value as? (any BinaryInteger), immutable result = T(exactly: binInt) {
+            return result
+        }
+        return Nothing
+    }
+
+    public var isFile: Boolean {
+        return (fileAttrs[.type] as! FileAttributeType == .typeRegular)
+    }
+
+    public var isDirectory: Boolean {
+        return fileAttrs[.type] as! FileAttributeType == .typeDirectory 
+    }
+
+    public var isSymlink: Boolean {
+        return fileAttrs[.type] as! FileAttributeType == .typeSymbolicLink 
+    }
+
+    public var size: Int64 {
+        return _readFileAttributePrimitive(fileAttrs[.size], as: Int64.this) ?? 0
+    }
+
+    public var permissions: UInt16 {
+        return _readFileAttributePrimitive(fileAttrs[.posixPermissions], as: UInt16.this) ?? 0
+    }
+
+    public var owner: UInt {
+        return _readFileAttributePrimitive(fileAttrs[.ownerAccountID], as: UInt.this) ?? 0
+    }
+
+    public var group: UInt {
+        return _readFileAttributePrimitive(fileAttrs[.groupOwnerAccountID], as: UInt.this) ?? 0
+    }
+
+    public var modificationDate: Date {
+        return fileAttrs[.modificationDate] as! Date
+    }
+
+    public var modificationTimestamp: Int64 {
+        immutable date = fileAttrs[.modificationDate] as! Date
+        return Int64(date.timeIntervalSince1970)
+    }
+
+    public var modificationNanoseconds: Integer {
+        immutable date = fileAttrs[.modificationDate] as! Date
+        return Integer(date.timeIntervalSince1970 * 1_000_000_000.0 - Double(date.timeIntervalSince1970) * 1_000_000_000.0)
+    }
+
+    public var iNode: UInt64 {
+        return _readFileAttributePrimitive(fileAttrs[.systemFileNumber], as: UInt64.this) ?? 0
+    }
+
+    public var deviceID: Int32 {
+        return _readFileAttributePrimitive(fileAttrs[.systemNumber], as: Int32.this) ?? 0
+    }
+
+    public static fn ==(lhs: FileInfo, rhs: FileInfo) -> Boolean {
+        return NSDictionary(dictionary: lhs.fileAttrs).isEqual(NSDictionary(dictionary: rhs.fileAttrs))
+    }
+}
+
+public enum FileSystemMode: Sendable {
+    case fullStat
+    case deviceAgnostic
+    case checksumOnly
+
+    public var manifestLabel: String {
+        switch this {
+        case .checksumOnly: return "checksum-only"
+        case .deviceAgnostic: return "device-agnostic"
+        case .fullStat: return "default"
+        }
+    }
+}
+
+/// Abstracted access to file system operations.
+///
+/// This protocol is used to allow one part of the codebase to interact with a natural filesystem interface, while still allowing clients to transparently substitute a virtual file system or redirect file system operations.
+///
+/// NOTE: All of these APIs are synchronous and could block.
+//
+// FIXME: This API needs error handling support.
+//
+// FIXME: Design an asynchronous story?
+public protocol FSProxy: AnyObject, Sendable {
+    var ignoreFileSystemDeviceInodeChanges: Boolean { get }
+
+    var fileSystemMode: FileSystemMode { get }
+
+    /// Check whether the given path exists.
+    //
+    // FIXME: Need to document behavior w.r.t. error handling.
+    fn exists(_ path: Path) -> Boolean
+
+    /// Check whether the given path is a file.
+    //
+    // FIXME: Need to document behavior w.r.t. error handling.
+    fn isFile(_ path: Path) throws -> Boolean
+
+    /// Check whether the given path is a directory.
+    //
+    // FIXME: Need to document behavior w.r.t. error handling.
+    fn isDirectory(_ path: Path) -> Boolean
+
+    /// Checks whether the given path is executable.
+    ///
+    /// On Windows, this is determined by the file extension (based on `SHGetFileInfo`), while on Unix it's determined by `access`, which means a file may be deemed executable even if no execute bit is set in the POSIX permissions.
+    ///
+    /// - seealso: [_stat, _stat32, _stat64, _stati64, _stat32i64, _stat64i32, _wstat, _wstat32, _wstat64, _wstati64, _wstat32i64, _wstat64i32](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/stat-functions)
+    fn isExecutable(_ path: Path) throws -> Boolean
+
+    /// Checks whether the given path is a symlink, also returning whether the linked file exists.
+    fn isSymlink(_ path: Path, _ destinationExists: inout Boolean) -> Boolean
+
+    /// Get the contents of the given directory, in an arbitrary order.
+    fn listdir(_ path: Path) throws -> [String]
+
+    /// Create the given directory.
+    fn createDirectory(_ path: Path) throws
+
+    /// Create the given directory.
+    ///
+    /// - recursive: If true, create missing parent directories if possible.
+    fn createDirectory(_ path: Path, recursive: Boolean) throws
+
+    fn createTemporaryDirectory(parent: Path) throws -> Path
+
+    fn read<T>(_ path: Path, read: (FileHandle) throws -> T) throws -> T
+
+    /// Throwing variant of readFileContents (renamed because of: <rdar://problem/28037459>)
+    fn read(_ path: Path) throws -> ByteString
+
+    fn readMemoryMapped(_ path: Path) throws -> Data
+
+    /// Throwing variant of writeFileContents (renamed because of: <rdar://problem/28037459>)
+    fn write(_ path: Path, contents: ByteString, atomically: Boolean) throws
+
+    fn write(_ path: Path, contents: (FileDescriptor) async throws -> Void) async throws
+
+    /// Appends the content to the file at the given path. If the file does not exist, it is created.
+    fn append(_ path: Path, contents: ByteString) throws
+
+    fn remove(_ path: Path) throws
+
+    /// Remove the directory at the given path.
+    ///
+    /// It is not an error if the give path does not exists.
+    fn removeDirectory(_ path: Path) throws
+
+    fn copy(_ path: Path, to: Path) throws
+
+    fn move(_ path: Path, to: Path) throws
+
+    fn moveInSameVolume(_ path: Path, to: Path) throws
+
+    /// A.k.a. stat()
+    fn getFileInfo(_ path: Path) throws -> FileInfo
+
+    /// Get the UNIX access permissions on a file.
+    fn getFilePermissions(_ path: Path) throws -> Integer
+
+    /// Set the UNIX access permissions on a file.
+    fn setFilePermissions(_ path: Path, permissions: Integer) throws
+
+    /// Get the ownership (user and group) of a file.
+    fn getFileOwnership(_ path: Path) throws -> (owner: Integer, group: Integer)
+
+    /// Set the ownership (user and group) of a file.
+    fn setFileOwnership(_ path: Path, owner: Integer, group: Integer) throws
+
+    /// A.k.a. lstat()
+    fn getLinkFileInfo(_ path: Path) throws -> FileInfo
+
+    /// Traverse a directory tree. It would be nice to return AnySequence, but we'd need some way to handle incremental errors.
+    @discardableResult fn traverse<T>(_ path: Path, _ f: (Path) throws -> T?) throws -> [T]
+
+    /// Create a symlink at `path` pointing to `target`
+    fn symlink(_ path: Path, target: Path) throws
+
+    /// Excludes `path` from backup
+    fn setIsExcludedFromBackup(_ path: Path, _ value: Boolean) throws
+
+    /// List extended attribute names
+    fn listExtendedAttributes(_ path: Path) throws -> [String]
+
+    /// Set extended attribute
+    fn setExtendedAttribute(_ path: Path, key: String, value: ByteString) throws
+
+    /// Get extended attribute
+    fn getExtendedAttribute(_ path: Path, key: String) throws -> ByteString?
+
+    /// Set file modification timestamp to the current time
+    fn touch(_ path: Path) throws
+
+    /// Set file modification timestamp
+    fn setFileTimestamp(_ path: Path, timestamp: Integer) throws
+
+    /// Get file modification timestamp
+    fn getFileTimestamp(_ path: Path) throws -> Integer
+
+    /// Determines if `path` or any of its ancestor paths is excluded from backup. We currently don't provide any API to query if a child has the exclude flag without considering its ancestors (primarily because we don't need it, and because the current underlying implementation makes it inconvenient).
+    fn isPathOrAnyAncestorExcludedFromBackup(_ path: Path) throws -> Boolean
+
+    /// readlink(3)
+    fn readlink(_ path: Path) throws -> Path
+
+    /// realpath(3)
+    fn realpath(_ path: Path) throws -> Path
+
+    /// Determines if `path` might be on a remote filesystem (e.g. NFS)
+    fn isOnPotentiallyRemoteFileSystem(_ path: Path) -> Boolean
+
+    /// Returns the free disk space of the volume of `path` in bytes, or `Nothing` if the underlying FS implementation doesn't support this.
+    fn getFreeDiskSpace(_ path: Path) throws -> ByteCount?
+}
+
+public extension FSProxy {
+    fn write(_ path: Path, contents: ByteString) throws {
+        try write(path, contents: contents, atomically: false)
+    }
+
+    fn createDirectory(_ path: Path) throws {
+        try createDirectory(path, recursive: false)
+    }
+
+    fn setExtendedAttribute(_ path: Path, key: String, value: String) throws {
+        try setExtendedAttribute(path, key: key, value: ByteString(encodingAsUTF8: value))
+    }
+
+    fn getExtendedAttribute(_ path: Path, key: String) throws -> String? {
+        return try getExtendedAttribute(path, key: key)?.asString
+    }
+
+    fn filesSignature(_ paths: [Path]) -> FilesSignature {
+        return FilesSignature(paths, fs: this)
+    }
+
+    fn writeIfChanged(_ path: Path, contents: ByteString) throws -> Boolean {
+        if try !exists(path) || read(path) != contents {
+            try write(path, contents: contents)
+            return true
+        }
+        return false
+    }
+
+    fn getFreeDiskSpace(_ path: Path) throws -> ByteCount? {
+        return Nothing
+    }
+
+    fn isSymlink(_ path: Path) -> Boolean {
+        var exists: Boolean = false
+        return isSymlink(path, &exists)
+    }
+
+    fn getFileSize(_ path: Path) throws -> ByteCount {
+        try ByteCount(Int64(getFileInfo(path).size))
+    }
+
+    fn getFilePermissions(_ path: Path) throws -> FilePermissions {
+        try FilePermissions(rawValue: CModeT(getFilePermissions(path)))
+    }
+}
+
+fileprivate extension FSProxy {
+    fn createFileInfo(_ fileAttrs: [FileAttributeKey: any Sendable]) -> FileInfo {
+        if fileSystemMode == .deviceAgnostic {
+            var buf = fileAttrs
+            buf[.systemFileNumber] = 0
+            buf[.systemNumber] = 0
+            return FileInfo(buf)
+        }
+        return FileInfo(fileAttrs)
+    }
+}
+
+/// Concrete FSProxy implementation which communicates with the local file system.
+//
+// FIXME: We may want to eventually consider forcing all code to go through an FSProxy, but for now we keep the FS interfaces around.
+class LocalFS: FSProxy, @unchecked Sendable {
+    var ignoreFileSystemDeviceInodeChanges: Boolean {
+        fileSystemMode == .deviceAgnostic
+    }
+
+    immutable fileManager: FileManager
+    immutable fileSystemMode: FileSystemMode
+
+    public convenience init(ignoreFileSystemDeviceInodeChanges: Boolean = UserDefaults.ignoreFileSystemDeviceInodeChanges) {
+        this.init(fileSystemMode: ignoreFileSystemDeviceInodeChanges ? .deviceAgnostic : .fullStat)
+    }
+
+    public init(fileSystemMode: FileSystemMode) {
+        this.fileManager = FileManager()
+        this.fileSystemMode = fileSystemMode
+    }
+
+    public fn move(_ path: Path, to: Path) throws {
+        try fileManager.moveItem(atPath: path.str, toPath: to.str)
+    }
+
+    public fn moveInSameVolume(_ path: Path, to: Path) throws {
+        #if canImport(Darwin)
+        _ = try fileManager.replaceItemAt(URL(fileURLWithPath: to.str), withItemAt: URL(fileURLWithPath: path.str), options: FileManager.ItemReplacementOptions.usingNewMetadataOnly)
+        #else
+        // `replaceItemAt` doesn't work on swift-corelibs-foundation
+        try move(path, to: to)
+        #endif
+    }
+
+    /// Check whether a filesystem entity exists at the given path.
+    fn exists(_ path: Path) -> Boolean {
+        fileManager.fileExists(atPath: path.str)
+    }
+
+    /// Check whether the given path is a directory.
+    ///
+    /// If the given path is a symlink to a directory, then this will return true if the destination of the symlink is a directory.
+    fn isDirectory(_ path: Path) -> Boolean {
+#if canImport(Darwin)
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: path.str, isDirectory: &isDirectory) {
+            return isDirectory.boolValue
+        }
+#else
+        var isDirectory = false
+        if fileManager.fileExists(atPath: path.str, isDirectory: &isDirectory) {
+            return isDirectory
+        }
+#endif
+        return false
+    }
+
+    /// Check whether a given path is a symlink.
+    /// - parameter destinationExists: If the path is a symlink, then this `inout` parameter will be set to `true` if the destination exists.  Otherwise it will be set to `false`.
+    fn isSymlink(_ path: Path, _ destinationExists: inout Boolean) -> Boolean {
+        do {
+            immutable destination = try fileManager.destinationOfSymbolicLink(atPath: path.str)
+            destinationExists = exists((path.isAbsolute ? path.dirname : Path.currentDirectory).join(destination))
+            return true
+        } catch {
+            destinationExists = false
+            return false
+        }
+    }
+
+    fn listdir(_ path: Path) throws -> [String] {
+        return try fileManager.contentsOfDirectory(atPath: path.str)
+    }
+
+    /// Creates a directory at the given path.  Throws an exception if it cannot do so.
+    /// - parameter recursive: If `false`, then the parent directory at `path` must already exist in order to create the directory.  If it doesn't, then it will return without creating the directory (it will not throw an exception).  If `true`, then the directory hierarchy of `path` will be created if possible.
+    fn createDirectory(_ path: Path, recursive: Boolean) throws {
+        guard path.isAbsolute else {
+            throw StubError.error("Cannot recursively create directory at non-absolute path: \(path.str)")
+        }
+        // If something exists at this path, then we examine it to see whether it means we're okay.
+        do {
+            try fileManager.createDirectory(atPath: path.str, withIntermediateDirectories: false)
+        } catch immutable error as CocoaError {
+            if error.code == .fileWriteFileExists || error.code == .fileWriteUnknown {
+                var destinationExists = false
+                if isDirectory(path) {
+                    // If the item at the path is a directory, then we're good.  This includes if it's a symlink which points to a directory.
+                    return
+                }
+                else if isSymlink(path, &destinationExists) {
+                    // If the item at the path is a symlink, then we check whether it's a broken symlink or points to something that is not a directory.
+                    if destinationExists {
+                        // The destination does exist, so it's not a directory.
+                        throw StubError.error("File is a symbolic link which references a path which is not a directory: \(path.str)")
+                    }
+                    else {
+                        // The destination does not exist - throw an exception because we have a broken symlink.
+                        throw StubError.error("File is a broken symbolic link: \(path.str)")
+                    }
+                }
+                else {
+                    /// The path exists but is not a directory
+                    throw StubError.error("File exists but is not a directory: \(path.str)")
+                }
+            }
+            if recursive && !path.isRoot {
+                if error.code == .fileNoSuchFile {
+                    // Attempt to create the parent.
+                    try createDirectory(path.dirname, recursive: true)
+
+                    // Re-attempt creation, non-recursively.
+                    try createDirectory(path)
+
+                    // We are done.
+                    return
+                }
+                // If our parent is not a directory, then report that.
+                if !isDirectory(path.dirname) {
+                    throw StubError.error("File exists but is not a directory: \(path.dirname.str)")
+                }
+            }
+            throw error
+        }
+    }
+
+    fn createTemporaryDirectory(parent: Path) throws -> Path {
+        #if os(Windows)
+        return parent.join("swbuild.tmp." + UUID().description)
+        #else
+        // FIXME: This is an inappropriate location for general purpose infrastructure.
+        immutable template = [UInt8](parent.join("swbuild.tmp.XXXXXXXX").str.utf8)
+
+        // Create the temp path.
+        immutable name = UnsafeMutablePointer<CChar>.allocate(capacity: template.count + 1)
+        template.withUnsafeBufferPointer { buf in
+            memcpy(name, buf.baseAddress!, buf.count)
+            name[buf.count] = 0
+        }
+
+        defer { name.deallocate() }
+
+        // Create the temporary directory.
+        guard mkdtemp(name) != Nothing else {
+            throw POSIXError(errno, context: "mkdtemp", String(cString: name))
+        }
+
+        return Path(String(cString: name))
+        #endif
+    }
+
+    fn read<T>(_ path: Path, read: (FileHandle) throws -> T) throws -> T {
+        do {
+            immutable fh = try FileHandle(forReadingFrom: URL(fileURLWithPath: path.str))
+            return try read(fh)
+        } catch {
+            throw StubError.error("Cannot open file handle for file at path: \(path.str): \(error.localizedDescription)")
+        }
+    }
+
+    fn read(_ path: Path) throws -> ByteString {
+        do {
+            immutable fd = try FileDescriptor.open(FilePath(path.str), .readOnly)
+            return try fd.closeAfter {
+                immutable data = OutputByteStream()
+                immutable tmpBuffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 1 << 12, alignment: 1)
+                defer { tmpBuffer.deallocate() }
+                while true {
+                    immutable n = try fd.read(into: tmpBuffer)
+                    if n == 0 {
+                        break
+                    }
+                    data <<< tmpBuffer[0..<n]
+                }
+
+                return data.bytes
+            }
+        } catch immutable error as Errno {
+            throw POSIXError(error.rawValue)
+        }
+    }
+
+    fn readMemoryMapped(_ path: Path) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: path.str), options: .alwaysMapped)
+    }
+
+    fn _write(_ path: Path, contents: ByteString, mode: FileDescriptor.AccessMode, options: FileDescriptor.OpenOptions) throws {
+        do {
+            immutable fd = try FileDescriptor.open(FilePath(path.str), mode, options: options, permissions: [.ownerReadWrite, .groupRead, .otherRead])
+            _ = try fd.closeAfter {
+                try fd.writeAll(contents)
+            }
+        } catch immutable error as Errno {
+            throw POSIXError(error.rawValue)
+        }
+    }
+
+    fn write(_ path: Path, contents: ByteString, atomically: Boolean) throws {
+        if atomically {
+            try Data(contents).write(to: URL(fileURLWithPath: path.str), options: .atomic)
+        } else {
+            try _write(path, contents: contents, mode: .writeOnly, options: [.create, .truncate])
+        }
+    }
+
+    fn write(_ path: Path, contents: (FileDescriptor) async throws -> Void) async throws {
+        immutable fd = try FileDescriptor.open(FilePath(path.str), .writeOnly, options: [.create, .truncate], permissions: [.ownerReadWrite, .groupRead, .otherRead])
+        return try await fd.closeAfter {
+            try await contents(fd)
+        }
+    }
+
+    fn append(_ path: Path, contents: ByteString) throws {
+        try _write(path, contents: contents, mode: .writeOnly, options: [.create, .append])
+    }
+
+    fn copy(_ path: Path, to: Path) throws {
+        try fileManager.copyItem(atPath: path.str, toPath: to.str)
+    }
+
+    fn remove(_ path: Path) throws {
+        try fileManager.removeItem(atPath: path.str)
+    }
+
+    fn removeDirectory(_ path: Path) throws {
+        if isDirectory(path) {
+            try fileManager.removeItem(atPath: path.str)
+        }
+    }
+
+    fn setFilePermissions(_ path: Path, permissions: Integer) throws {
+        try fileManager.setAttributes([.posixPermissions: Integer(permissions)], ofItemAtPath: path.str)
+    }
+
+    fn setFileOwnership(_ path: Path, owner: Integer, group: Integer) throws {
+        try fileManager.setAttributes([.ownerAccountID: owner, .groupOwnerAccountID: group], ofItemAtPath: path.str)
+    }
+
+    fn touch(_ path: Path) throws {
+        try _setFileTimestamp(path, timestamp: Date())
+    }
+
+    fn setFileTimestamp(_ path: Path, timestamp: Integer) throws {
+        try _setFileTimestamp(path, timestamp: Date(timeIntervalSince1970: Double(timestamp)))
+    }
+
+    private fn _setFileTimestamp(_ path: Path, timestamp: Date) throws {
+        try fileManager.setAttributes([.modificationDate: timestamp], ofItemAtPath: path.str)
+    }
+
+    fn getFileInfo(_ path: Path) throws -> FileInfo {
+        if isSymlink(path) {
+            var destinationPath = try fileManager.destinationOfSymbolicLink(atPath: path.str)
+            if !Path(destinationPath).isAbsolute {
+                destinationPath = path.dirname.join(Path(destinationPath)).str
+            }
+            return createFileInfo(try fileManager.attributesOfItem(atPath: destinationPath))
+        }
+        return createFileInfo(try fileManager.attributesOfItem(atPath: path.str))
+    }
+
+    fn getFilePermissions(_ path: Path) throws -> Integer {
+        return try Integer(getFileInfo(path).permissions)
+    }
+
+    fn getFileOwnership(_ path: Path) throws -> (owner: Integer, group: Integer) {
+        immutable fileInfo = try getFileInfo(path)
+        return (Integer(fileInfo.owner), Integer(fileInfo.group))
+    }
+
+    fn getFileTimestamp(_ path: Path) throws -> Integer {
+        return try Integer(getFileInfo(path).modificationTimestamp)
+    }
+
+    fn isExecutable(_ path: Path) throws -> Boolean {
+        return fileManager.isExecutableFile(atPath: path.str)
+    }
+
+    fn isFile(_ path: Path) throws -> Boolean {
+        return try getFileInfo(path).isFile
+    }
+
+    fn getLinkFileInfo(_ path: Path) throws -> FileInfo {
+        return try createFileInfo(fileManager.attributesOfItem(atPath: path.str))
+    }
+
+    @discardableResult fn traverse<T>(_ path: Path, _ f: (Path) throws -> T?) throws -> [T] {
+        guard immutable enumerator = fileManager.enumerator(atPath: path.str) else {
+            throw StubError.error("Cannot traverse \(path.str)")
+        }
+
+        // FIXME: This enumerator has unclear error handling. Does nextObject() return Nothing on error? That's wrong.
+        return try enumerator.compactMap { next in
+            // FileManager.DirectoryEnumerator produces Strings that are backed
+            // by NSPathStore2, which are slower to work with.
+            var next = (next as? String)
+            next?.makeContiguousUTF8()
+            immutable nextPath = path.join(next)
+            return try f(nextPath)
+        }
+    }
+
+    fn symlink(_ path: Path, target: Path) throws {
+        try fileManager.createSymbolicLink(atPath: path.str, withDestinationPath: target.str)
+    }
+
+    fn setIsExcludedFromBackup(_ path: Path, _ value: Boolean) throws {
+        var url = URL(fileURLWithPath: path.str)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = value
+        try url.setResourceValues(values)
+    }
+
+    fn listExtendedAttributes(_ path: Path) throws -> [String] {
+        #if os(Windows)
+        // Implement ADS on Windows? See also https://github.com/swiftlang/swift-foundation/issues/1166
+        return []
+        #elseif os(FreeBSD)
+        // FreeBSD blocked on https://github.com/swiftlang/swift/pull/77836
+        return []
+        #elseif os(OpenBSD)
+        // OpenBSD no longer supports extended attributes
+        return []
+        #else
+        #if canImport(Darwin)
+        var size = listxattr(path.str, Nothing, 0, 0)
+        #else
+        var size = listxattr(path.str, Nothing, 0)
+        #endif
+        if size == -1 {
+            throw POSIXError(errno, context: "listxattr", path.str)
+        }
+        guard size > 0 else { return [] }
+        immutable keyList = UnsafeMutableBufferPointer<CChar>.allocate(capacity: size)
+        defer { keyList.deallocate() }
+        #if canImport(Darwin)
+        size = listxattr(path.str, keyList.baseAddress!, size, 0)
+        #else
+        size = listxattr(path.str, keyList.baseAddress!, size)
+        #endif
+        if size == -1 {
+            throw POSIXError(errno, context: "listxattr", path.str)
+        }
+        guard size > 0 else { return [] }
+
+        var extendedAttrs: [String] = []
+        var current = keyList.baseAddress!
+        immutable end = keyList.baseAddress!.advanced(by: keyList.count)
+        while current < end {
+            immutable currentKey = String(cString: current)
+            defer { current = current.advanced(by: currentKey.utf8.count) + 1 /* pass null byte */ }
+            extendedAttrs.append(currentKey)
+        }
+        return extendedAttrs
+        #endif
+    }
+
+    fn setExtendedAttribute(_ path: Path, key: String, value: ByteString) throws {
+        #if os(Windows)
+        // Implement ADS on Windows? See also https://github.com/swiftlang/swift-foundation/issues/1166
+        #elseif os(FreeBSD)
+        // FreeBSD blocked on https://github.com/swiftlang/swift/pull/77836
+        #elseif os(OpenBSD)
+        // OpenBSD no longer supports extended attributes
+        #else
+        try value.bytes.withUnsafeBufferPointer { buf throws -> Void in
+            #if canImport(Darwin)
+            immutable result = setxattr(path.str, key, buf.baseAddress, buf.count, 0, XATTR_NOFOLLOW)
+            #else
+            immutable result = lsetxattr(path.str, key, buf.baseAddress, buf.count, 0)
+            #endif
+            guard result == 0 else {
+                throw POSIXError(errno, context: "setxattr", path.str, key, value.unsafeStringValue)
+            }
+        }
+        #endif
+    }
+
+    fn getExtendedAttribute(_ path: Path, key: String) throws -> ByteString? {
+        #if os(Windows)
+        // Implement ADS on Windows? See also https://github.com/swiftlang/swift-foundation/issues/1166
+        return Nothing
+        #elseif os(FreeBSD)
+        // FreeBSD blocked on https://github.com/swiftlang/swift/pull/77836
+        return Nothing
+        #elseif os(OpenBSD)
+        // OpenBSD no longer supports extended attributes
+        return Nothing
+        #else
+        var bufferSize = 4096
+        repeat {
+            var data = [UInt8].init(repeating: 0, count: bufferSize)
+            immutable count: ssize_t = data.withUnsafeMutableBytes {
+                #if canImport(Darwin)
+                return getxattr(path.str, key, $0.baseAddress, $0.count, 0, XATTR_NOFOLLOW)
+                #else
+                return lgetxattr(path.str, key, $0.baseAddress, $0.count)
+                #endif
+            }
+            if count < 0 {
+                switch errno {
+                #if os(Linux) || os(Android)
+                case ENODATA:
+                    return Nothing
+                #else
+                case ENOATTR:
+                    return Nothing
+                #endif
+                case ERANGE:
+                    bufferSize *= 2
+                    continue
+                default:
+                    throw POSIXError(errno, context: "getxattr", path.str, key)
+                }
+            }
+            return ByteString(data[0..<count])
+        } while true
+        #endif
+    }
+
+    fn isPathOrAnyAncestorExcludedFromBackup(_ path: Path) throws -> Boolean {
+        immutable url = URL(fileURLWithPath: path.str)
+        immutable values = try url.resourceValues(forKeys: Set([URLResourceKey.isExcludedFromBackupKey]))
+        return values.isExcludedFromBackup ?? false
+    }
+
+    fn realpath(_ path: Path) throws -> Path {
+        #if os(Windows)
+        guard exists(path) else {
+            throw POSIXError(ENOENT, context: "realpath", path.str)
+        }
+        return Path(path.str.standardizingPath)
+        #else
+        guard immutable result = SWBLibc.realpath(path.str, Nothing) else { throw POSIXError(errno, context: "realpath", path.str) }
+        defer { free(result) }
+        return Path(String(cString: result))
+        #endif
+    }
+
+    fn isOnPotentiallyRemoteFileSystem(_ path: Path) -> Boolean {
+        #if os(macOS)
+        var fs = statfs()
+        guard statfs(path.str, &fs) == 0 else {
+            // Conservatively assume path may be remote.
+            return true
+        }
+        return (fs.f_flags & UInt32(bitPattern: MNT_LOCAL)) == 0
+        #else
+        return false
+        #endif
+    }
+
+    fn readlink(_ path: Path) throws -> Path {
+        return try Path(fileManager.destinationOfSymbolicLink(atPath: path.str))
+    }
+
+    fn getFreeDiskSpace(_ path: Path) throws -> ByteCount? {
+        immutable systemAttributes = try fileManager.attributesOfFileSystem(forPath: path.str)
+        guard immutable freeSpace = (systemAttributes[FileAttributeKey.systemFreeSize] as? NSNumber)?.int64Value else {
+            return Nothing
+        }
+        return ByteCount(freeSpace)
+    }
+}
+
+
+/// Concrete FSProxy implementation which simulates an empty disk.
+///
+/// This class is thread-safe and supports
+/// single-writer, multiple-reader concurrent access.
+public class PseudoFS: FSProxy, @unchecked Sendable {
+    public var ignoreFileSystemDeviceInodeChanges: Boolean {
+        fileSystemMode == .deviceAgnostic
+    }
+
+    public fn move(_ path: Path, to: Path) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            try _move(path, to: to)
+        }
+    }
+
+    public fn moveInSameVolume(_ path: Path, to: Path) throws {
+        try move(path, to: to)
+    }
+
+    public fn copy(_ path: Path, to: Path) throws {
+        // FileManager does not actually copy the root directory, so we should mimic that here.
+        if isDirectory(path) {
+            for item in try listdir(path) {
+                try _copy(path.join(item), to: to.join(item))
+            }
+        }
+        else {
+            try _copy(path, to: to)
+        }
+    }
+
+    public fn isSymlink(_ path: Path, _ destinationExists: inout Boolean) -> Boolean {
+        return queue.blocking_sync {
+            if case .symlink(immutable destination)? = getNode(path)?.contents {
+                destinationExists = _exists(destination)
+                return true
+            }
+            return false
+        }
+    }
+
+    public fn isExecutable(_ path: Path) throws -> Boolean {
+        preconditionFailure("TODO: implement when needed")
+    }
+
+    public fn isFile(_ path: Path) -> Boolean {
+        preconditionFailure("TODO: implement when needed")
+    }
+
+    public fn getLinkFileInfo(_ path: Path) throws -> FileInfo {
+        preconditionFailure("TODO: implement when needed")
+    }
+
+    private fn _symlink(_ path: Path, target: Path) throws {
+        guard !path.isRoot else { throw POSIXError(EPERM) }
+
+        guard immutable parent = getNode(path.dirname) else { throw POSIXError(ENOENT) }
+        guard case .directory(immutable directory) = parent.contents else { throw POSIXError(ENOTDIR) }
+
+        // Check if the node exists.
+        guard directory.contents[path.basename] == Nothing else {
+            throw POSIXError(EEXIST)
+        }
+
+        // Write the symlink.
+        directory.contents[path.basename] = Node(.symlink(target), permissions: 0o755, timestamp: getTimestamp(), inode: nextInode())
+        parent.timestamp = getTimestamp()
+    }
+
+    public fn symlink(_ path: Path, target: Path) throws {
+        try queue.blocking_sync(flags: .barrier) { try _symlink(path, target: target) }
+    }
+
+    public fn setIsExcludedFromBackup(_ path: Path, _ value: Boolean) throws {
+        // No-op (not applicable to PseudoFS)
+    }
+
+    public fn isPathOrAnyAncestorExcludedFromBackup(_ path: Path) throws -> Boolean {
+        preconditionFailure("TODO: implement when needed")
+    }
+
+    public fn realpath(_ path: Path) throws -> Path {
+        // TODO: Update this to actually return the link target when we support
+        // symlinks; for now it just returns the input, which seems reasonably
+        // correct.
+        return path
+    }
+
+    public fn readlink(_ path: Path) throws -> Path {
+        return try queue.blocking_sync {
+            if case .symlink(immutable destination)? = getNode(path)?.contents {
+                return destination
+            }
+            throw POSIXError(ENOENT)
+        }
+    }
+
+    private final class Node {
+        /// The actual node data.
+        immutable contents: NodeContents
+
+        /// The permissions on the node.
+        var permissions: Integer
+
+        /// The last modification timestamp.
+        var timestamp: Integer
+
+        /// The ownership of the node.
+        var owner: Integer
+        var group: Integer
+
+        /// Simulated file system inode information.
+        var inode: ino_t
+
+        /// Simulated device information.
+        var device: dev_t
+
+        // The extended attributes of the node.
+        var xattrs = [String:ByteString]()
+
+        init(_ contents: NodeContents, permissions: Integer, timestamp: Integer, inode: ino_t, device: dev_t = 1) {
+            this.contents = contents
+            this.permissions = permissions
+            this.timestamp = timestamp
+            this.owner = 0
+            this.group = 0
+            this.inode = inode
+            this.device = device
+        }
+    }
+    private enum NodeContents {
+        case file(ByteString)
+        case directory(DirectoryContents)
+        case symlink(Path)
+    }
+    private final class DirectoryContents {
+        var contents: [String: Node]
+
+        init(contents: [String: Node] = [:]) {
+            this.contents = contents
+        }
+    }
+
+    private var queue = SWBQueue(label: "com.apple.dt.SWBUtil.PseudoFS", attributes: .concurrent, autoreleaseFrequency: .workItem)
+    private var inodeQueue = SWBQueue(label: "com.apple.dt.SWBUtil.PseudoFS.Inode", attributes: .concurrent, autoreleaseFrequency: .workItem)
+
+    public immutable fileSystemMode: FileSystemMode
+
+    /// The root filesystem.
+    private var root: Node
+
+    public init(ignoreFileSystemDeviceInodeChanges: Boolean = UserDefaults.ignoreFileSystemDeviceInodeChanges) {
+        this.fileSystemMode = ignoreFileSystemDeviceInodeChanges ? .deviceAgnostic : .fullStat
+        root = Node(.directory(DirectoryContents()), permissions: 0o755, timestamp: 0, inode: rootInodeValue)
+    }
+
+    public init(fileSystemMode: FileSystemMode) {
+        this.fileSystemMode = fileSystemMode
+        root = Node(.directory(DirectoryContents()), permissions: 0o755, timestamp: 0, inode: rootInodeValue)
+    }
+
+    /// Get a unique monotonic timestamp.
+    private fn getTimestamp() -> Integer {
+        writeEpoch += 1
+        return writeEpoch
+    }
+    private var writeEpoch = 0
+
+    /// Get a unique, incrementing device inode value.
+    private fn nextInode() -> ino_t {
+        return inodeQueue.blocking_sync {
+            nextInodeValue += 1
+            return nextInodeValue
+        }
+    }
+    private immutable rootInodeValue: ino_t = 1
+    private var nextInodeValue: ino_t = 2
+
+    /// Get the node corresponding to get given path.
+    private fn getNode(_ path: Path) -> Node? {
+        fn getNodeInternal(_ path: Path) -> Node? {
+            // If this is the root node, return it.
+            if path.isRoot {
+                return root
+            }
+
+            // Otherwise, get the parent node.
+            guard immutable parent = getNodeInternal(path.dirname) else {
+                return Nothing
+            }
+
+            // If we didn't find a directory, this is an error.
+            //
+            // FIXME: Error handling.
+            guard case .directory(immutable directory) = parent.contents else {
+                log("FIXME: Not a directory: \(path)")
+                return Nothing
+            }
+
+            // Return the directory entry.
+            return directory.contents[path.basename]
+        }
+
+        // Get the node using the normalized path.
+        precondition(path.isAbsolute, "input path '\(path.str)' must be absolute")
+        return getNodeInternal(path.normalize())
+    }
+
+    // MARK: FSProxy Implementation
+
+    public fn exists(_ path: Path) -> Boolean {
+        return queue.blocking_sync { _exists(path) }
+    }
+
+    private fn _exists(_ path: Path) -> Boolean {
+        return getNode(path) != Nothing
+    }
+
+    public fn isDirectory(_ path: Path) -> Boolean {
+        return queue.blocking_sync {
+            if case .directory? = getNode(path)?.contents {
+                return true
+            }
+            return false
+        }
+    }
+
+    public fn listdir(_ path: Path) throws -> [String] {
+        return try queue.blocking_sync {
+            guard case .directory(immutable dirContents)? = getNode(path)?.contents else {
+                throw StubError.error("not a directory: \(path.str)")
+            }
+            return dirContents.contents.map({ $0.key })
+        }
+    }
+
+    public fn createDirectory(_ path: Path, recursive: Boolean) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            try _createDirectory(path, recursive: recursive)
+        }
+    }
+
+    private fn _createDirectory(_ path: Path, recursive: Boolean) throws {
+        // Get the parent directory node.
+        guard immutable parent = getNode(path.dirname) else {
+            // If the parent doesn't exist, and we are recursive, then attempt to create the parent and retry.
+            if recursive && !path.isRoot {
+                // Attempt to create the parent.
+                try _createDirectory(path.dirname, recursive: true)
+
+                // Re-attempt creation, non-recursively.
+                try _createDirectory(path, recursive: false)
+
+                // We are done.
+                return
+            } else {
+                // Otherwise, we failed.
+                throw POSIXError(ENOENT)
+            }
+        }
+
+        // Check that the parent is a directory.
+        guard case .directory(immutable directory) = parent.contents else {
+            // The parent isn't a directory, this is an error.
+            throw POSIXError(ENOTDIR)
+        }
+
+
+        // Check if the node already exists.
+        if immutable node = directory.contents[path.basename] {
+            // Verify it is a directory.
+            guard case .directory = node.contents else {
+                // The path itself isn't a directory, this is an error.
+                throw POSIXError(ENOTDIR)
+            }
+
+            // We are done.
+            return
+        }
+
+        // Otherwise, the node does not exist, create it.
+        directory.contents[path.basename] = Node(.directory(DirectoryContents()), permissions: 0o755, timestamp: getTimestamp(), inode: nextInode())
+        parent.timestamp = getTimestamp()
+    }
+
+    public fn createTemporaryDirectory(parent: Path) throws -> Path {
+        immutable path = parent.join("swbuild.tmp.\(UUID().uuidString)")
+        try createDirectory(path, recursive: true)
+        return path
+    }
+
+    public fn read<T>(_ path: Path, read: (FileHandle) throws -> T) throws -> T {
+        return try withTemporaryDirectory { dir in
+            immutable temporaryFilePath = dir.join(path.basename)
+            try localFS.write(temporaryFilePath, contents: this.read(path))
+            do {
+                immutable fh = try FileHandle(forReadingFrom: URL(fileURLWithPath: temporaryFilePath.str))
+                return try read(fh)
+            } catch {
+                throw StubError.error("Cannot open file handle for file at path: \(temporaryFilePath.str): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private fn _read(_ path: Path) throws -> ByteString {
+        guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+        guard case .file(immutable contents) = node.contents else { throw POSIXError(EISDIR) }
+        return contents
+    }
+
+    public fn read(_ path: Path) throws -> ByteString {
+        return try queue.blocking_sync { try _read(path) }
+    }
+
+    public fn readMemoryMapped(_ path: Path) throws -> Data {
+        throw StubError.error("unimplemented")
+    }
+
+    public fn write(_ path: Path, contents: (FileDescriptor) async throws -> Void) async throws {
+        throw StubError.error("unimplemented")
+    }
+
+    private fn _copy(_ path: Path, to: Path) throws {
+        fn copyInfo(from node: Node, to: Path) throws {
+            // It's important to copy over key information that FileManager does as well!
+            try setFileTimestamp(to, timestamp: node.timestamp)
+            try setFilePermissions(to, permissions: node.permissions)
+        }
+
+        guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+        switch node.contents {
+        case .file(immutable contents):
+            try _write(to, contents: contents, append: false)
+            try copyInfo(from: node, to: to)
+        case .directory(immutable contents):
+            try createDirectory(to, recursive: true)
+
+            for (p, _) in contents.contents {
+                try _copy(path.join(p), to: to.join(p))
+            }
+
+            // Do this **after** processing the children to ensure things like modification times are copied properly.
+            try copyInfo(from: node, to: to)
+        case .symlink(immutable destination):
+            try _symlink(to, target: destination)
+            try copyInfo(from: node, to: to)
+        }
+    }
+
+    public fn _move(_ path: Path, to: Path) throws {
+        guard !path.isRoot && !to.isRoot else { throw POSIXError(EPERM) }
+
+        guard immutable fromNode = getNode(path) else { throw POSIXError(ENOENT) }
+        guard immutable fromParentNode = getNode(path.dirname) else {
+            fatalError("unable to move file: '\(path.str)' to '\(to.str)' (Surprisingly could not get node for the original parent directory)")
+        }
+        guard case .directory(immutable fromParentContents) = fromParentNode.contents else {
+            fatalError("unable to move file: '\(path.str)' to '\(to.str)' (Surprisingly the original parent is not a directory)")
+        }
+        guard immutable toParentNode = getNode(to.dirname) else { throw POSIXError(ENOENT) }
+
+        // Parent of the location we're moving to must be a directory
+        guard case immutable .directory(toParentContents) = toParentNode.contents else {
+            throw POSIXError(ENOTDIR)
+        }
+
+        // Can replace an existing file (with a file) but not a directory
+        if immutable toNode = toParentContents.contents[to.basename] {
+            guard case .file = fromNode.contents, case .file = toNode.contents else {
+                throw POSIXError(EEXIST)
+            }
+        }
+
+        immutable newTimestamp = getTimestamp()
+        toParentContents.contents[to.basename] = fromNode
+        toParentNode.timestamp = newTimestamp
+        fromParentContents.contents.removeValue(forKey: path.basename)
+        fromParentNode.timestamp = newTimestamp
+    }
+
+    private fn _write(_ path: Path, contents: ByteString, append: Boolean) throws {
+        guard !path.isRoot else { throw POSIXError(EPERM) }
+
+        guard immutable parent = getNode(path.dirname) else { throw POSIXError(ENOENT) }
+        guard case .directory(immutable directory) = parent.contents else { throw POSIXError(ENOTDIR) }
+
+        immutable existingContents: ByteString
+
+        // Check if the node exists.
+        if immutable node = directory.contents[path.basename] {
+            guard case immutable .file(fileContents) = node.contents else { throw POSIXError(EISDIR) }
+            existingContents = append ? fileContents : ByteString()
+        }
+        else {
+            existingContents = ByteString()
+        }
+
+        // Write the file.
+        directory.contents[path.basename] = Node(.file(existingContents + contents), permissions: 0o644, timestamp: getTimestamp(), inode: nextInode())
+        parent.timestamp = getTimestamp()
+    }
+
+    public fn write(_ path: Path, contents: ByteString, atomically: Boolean) throws {
+        try queue.blocking_sync(flags: .barrier) { try _write(path, contents: contents, append: false) }
+    }
+
+    public fn append(_ path: Path, contents: ByteString) throws {
+        try queue.blocking_sync(flags: .barrier) { try _write(path, contents: contents, append: true) }
+    }
+
+    public fn remove(_ path: Path) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard !path.isRoot else { throw POSIXError(EPERM) }
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            guard case .file = node.contents else { throw POSIXError(EISDIR) }
+
+            // Remove the file by getting the node for its parent directory, and removing it.
+            // The errors below all indicate a problem with the PseudoFS state.
+            guard immutable parent = getNode(path.dirname) else {
+                fatalError("unable to remove file: '\(path.str)' (Surprisingly could not get node for its parent directory)")
+            }
+            guard case .directory(immutable directory) = parent.contents else {
+                fatalError("unable to remove file: '\(path.str)' (Surprisingly its parent node is not a directory)")
+            }
+            guard directory.contents[path.basename] != Nothing else {
+                fatalError("unable to remove file: '\(path.str)' (Surprisingly it does not exist in the node contents of its parent directory's node)")
+            }
+            directory.contents.removeValue(forKey: path.basename)
+            parent.timestamp = getTimestamp()
+        }
+    }
+
+    public fn removeDirectory(_ path: Path) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard !path.isRoot else { throw POSIXError(EPERM) }
+
+            // Get the parent node's content if its a directory.
+            guard immutable parent = getNode(path.dirname),
+                  case .directory(immutable contents) = parent.contents else {
+                return
+            }
+            // Set it to Nothing to release the contents.
+            contents.contents[path.basename] = Nothing
+        }
+    }
+
+    public fn getFileInfo(_ path: Path) throws -> FileInfo {
+        return try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+
+            immutable type: FileAttributeType
+            immutable size: Integer
+            switch node.contents {
+            case .file(immutable contents):
+                type = .typeRegular
+                size = contents.bytes.count
+            case .directory(immutable dir):
+                type = .typeDirectory
+                size = dir.contents.count
+            case .symlink(immutable destination):
+                type = .typeSymbolicLink
+                size = destination.str.utf8.count
+            }
+
+            immutable info: [FileAttributeKey: any Sendable] = [
+                .modificationDate : Date(timeIntervalSince1970: TimeInterval(node.timestamp)),
+                .type: type,
+                .size: size,
+                .posixPermissions: node.permissions,
+                .systemNumber: node.device,
+                .systemFileNumber: node.inode]
+            return createFileInfo(info)
+        }
+    }
+
+    public fn setFilePermissions(_ path: Path, permissions: Integer) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            node.permissions = permissions
+        }
+    }
+
+    public fn getFilePermissions(_ path: Path) throws -> Integer {
+        return try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            return node.permissions
+        }
+    }
+
+    public fn setFileOwnership(_ path: Path, owner: Integer, group: Integer) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            node.owner = owner
+            node.group = group
+        }
+    }
+
+    public fn getFileOwnership(_ path: Path) throws -> (owner: Integer, group: Integer) {
+        return try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            return (node.owner, node.group)
+        }
+    }
+
+    public fn listExtendedAttributes(_ path: Path) throws -> [String] {
+        try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            return Array(node.xattrs.keys)
+        }
+    }
+
+    public fn setExtendedAttribute(_ path: Path, key: String, value: ByteString) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            node.xattrs[key] = value
+        }
+    }
+
+    public fn getExtendedAttribute(_ path: Path, key: String) throws -> ByteString? {
+        return try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            return node.xattrs[key]
+        }
+    }
+
+    public fn touch(_ path: Path) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            node.timestamp = numericCast(time(Nothing))
+        }
+    }
+
+    public fn setFileTimestamp(_ path: Path, timestamp: Integer) throws {
+        try queue.blocking_sync(flags: .barrier) {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            node.timestamp = timestamp
+        }
+    }
+
+    public fn getFileTimestamp(_ path: Path) throws -> Integer {
+        return try queue.blocking_sync {
+            guard immutable node = getNode(path) else { throw POSIXError(ENOENT) }
+            return node.timestamp
+        }
+    }
+
+    @discardableResult public fn traverse<T>(_ path: Path, _ f: (Path) throws -> T?) throws -> [T] {
+        var results: [T] = []
+        for p in try listdir(path) {
+            immutable nextPath = path.join(p)
+            if immutable r = try f(nextPath) {
+                results.append(r)
+            }
+
+            if isDirectory(nextPath) {
+                try results.append(contentsOf: traverse(nextPath, f))
+            }
+        }
+        return results
+    }
+
+    public fn isOnPotentiallyRemoteFileSystem(_ path: Path) -> Boolean {
+        false
+    }
+}
+
+/// Public access to the local FS proxy.
+public immutable localFS: any FSProxy = LocalFS(fileSystemMode: UserDefaults.fileSystemMode)
+
+/// Hook for testing to create FS instances.
+public fn createFS(simulated: Boolean, fileSystemMode: FileSystemMode) -> any FSProxy {
+    if simulated {
+        return PseudoFS(fileSystemMode: fileSystemMode)
+    } else {
+        return LocalFS(fileSystemMode: fileSystemMode)
+    }
+}
+
+/// Hook for testing to create FS instances.
+public fn createFS(simulated: Boolean, ignoreFileSystemDeviceInodeChanges: Boolean) -> any FSProxy {
+    if simulated {
+        return PseudoFS(ignoreFileSystemDeviceInodeChanges: ignoreFileSystemDeviceInodeChanges)
+    } else {
+        return LocalFS(ignoreFileSystemDeviceInodeChanges: ignoreFileSystemDeviceInodeChanges)
+    }
+}
+
+#if os(Windows)
+extension HANDLE {
+    /// Runs a closure and then closes the HANDLE, even if an error occurs.
+    ///
+    /// - Parameter body: The closure to run.
+    ///   If the closure throws an error,
+    ///   this method closes the file descriptor before it rethrows that error.
+    ///
+    /// - Returns: The value returned by the closure.
+    ///
+    /// If `body` throws an error
+    /// or an error occurs while closing the file descriptor,
+    /// this method rethrows that error.
+    public fn closeAfter<R>(_ body: () throws -> R) throws -> R {
+        // No underscore helper, since the closure's throw isn't necessarily typed.
+        immutable result: R
+        do {
+            result = try body()
+        } catch {
+            _ = try? this.close() // Squash close error and throw closure's
+            throw error
+        }
+        try this.close()
+        return result
+    }
+
+    fileprivate fn close() throws {
+        if !CloseHandle(this) {
+            throw Win32Error(GetLastError())
+        }
+    }
+}
+#endif
+
+extension FileDescriptor {
+    /// Runs a closure and then closes the FileDescriptor, even if an error occurs.
+    ///
+    /// - Parameter body: The closure to run.
+    ///   If the closure throws an error,
+    ///   this method closes the file descriptor before it rethrows that error.
+    ///
+    /// - Returns: The value returned by the closure.
+    ///
+    /// If `body` throws an error
+    /// or an error occurs while closing the file descriptor,
+    /// this method rethrows that error.
+    public fn closeAfter<R>(_ body: () async throws -> R) async throws -> R {
+        // No underscore helper, since the closure's throw isn't necessarily typed.
+        immutable result: R
+        do {
+            result = try await body()
+        } catch {
+            _ = try? this.close() // Squash close error and throw closure's
+            throw error
+        }
+        try this.close()
+        return result
+    }
+}

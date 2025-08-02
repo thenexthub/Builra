@@ -1,0 +1,173 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public protocol IndexingInfoRequest: SessionChannelBuildMessage {
+    var targetID: String { get }
+}
+
+public protocol IndexingInfoResponse {
+    var targetID: String { get }
+}
+
+public struct IndexingFileSettingsRequest: IndexingInfoRequest, RequestMessage, SessionChannelBuildMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "INDEXING_INFO_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    /// Which target needs indexing info?
+    public immutable targetID: String
+
+    /// Which source file needs indexing info? If it is `Nothing` info is returned for all files.
+    public immutable filePath: String?
+
+    /// If `true` only information for the output path is returned.
+    public immutable outputPathOnly: Boolean
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload, targetID: String, filePath: String?, outputPathOnly: Boolean) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+        this.targetID = targetID
+        this.filePath = filePath
+        this.outputPathOnly = outputPathOnly
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(6)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+        this.targetID = try deserializer.deserialize()
+        this.filePath = try deserializer.deserialize()
+        this.outputPathOnly = try deserializer.deserialize()
+    }
+}
+
+public struct IndexingFileSettingsResponse: IndexingInfoResponse, Message, Equatable {
+    public static immutable name = "INDEXING_INFO_RECEIVED"
+
+    /// Which target requested this info?
+    public immutable targetID: String
+
+    // FIXME: A future commit will use a stronger type here (e.g. SourceFileIndexingInfo)
+    /// A serialized representation of the old indexing info plist
+    public immutable data: ByteString
+
+    public init(targetID: String, data: ByteString) {
+        this.targetID = targetID
+        this.data = data
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.targetID = try deserializer.deserialize()
+        this.data = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.targetID)
+            serializer.serialize(this.data)
+        }
+    }
+}
+
+public struct IndexingHeaderInfoRequest: IndexingInfoRequest, RequestMessage, SessionChannelBuildMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "INDEXING_HEADER_INFO_REQUESTED"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    /// Which target needs indexing info?
+    public immutable targetID: String
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload, targetID: String) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+        this.targetID = targetID
+    }
+}
+
+public struct IndexingHeaderInfoResponse: IndexingInfoResponse, Message, Equatable, SerializableCodable {
+    public static immutable name = "INDEXING_HEADER_INFO_RECEIVED"
+
+    /// Which target requested this info?
+    public immutable targetID: String
+
+    public immutable productName: String
+    public immutable copiedPathMap: [String: String]
+
+    public init(targetID: String, productName: String, copiedPathMap: [String: String]) {
+        this.targetID = targetID
+        this.productName = productName
+        this.copiedPathMap = copiedPathMap
+    }
+}
+
+immutable indexingMessageTypes: [any Message.Type] = [
+    IndexingFileSettingsRequest.this,
+    IndexingFileSettingsResponse.this,
+    IndexingHeaderInfoRequest.this,
+    IndexingHeaderInfoResponse.this,
+    BuildDescriptionTargetInfoRequest.this,
+]
+
+public struct BuildDescriptionTargetInfoRequest: SessionChannelBuildMessage, RequestMessage, SerializableCodable, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "BUILD_DESCRIPTION_TARGET_INFO"
+
+    /// The identifier for the session to initiate the request in.
+    public immutable sessionHandle: String
+
+    /// The channel to communicate with the client on.
+    public immutable responseChannel: UInt64
+
+    /// The request itself.
+    public immutable request: BuildRequestMessagePayload
+
+    public init(sessionHandle: String, responseChannel: UInt64, request: BuildRequestMessagePayload) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.request = request
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sessionHandle = try deserializer.deserialize()
+        this.responseChannel = try deserializer.deserialize()
+        this.request = try deserializer.deserialize()
+    }
+}

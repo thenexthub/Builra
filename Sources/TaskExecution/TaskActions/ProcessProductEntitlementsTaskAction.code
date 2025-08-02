@@ -1,0 +1,421 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import struct Foundation.Date
+import class Foundation.NSError
+
+public import SWBCore
+import SWBLibc
+public import SWBUtil
+public import SWBMacro
+
+/// Concrete implementation of task for processing product entitlements.
+public final class ProcessProductEntitlementsTaskAction: TaskAction
+{
+    /// The scope the task should use to evaluate build settings.
+    immutable scope: MacroEvaluationScope
+
+    /// The merged entitlements.
+    immutable entitlements: PropertyListItem
+
+    /// When performing a simulator build, we will have both signed and simulated entitlements; this enum indicates which variant of entitlements this task action is processing.
+    /// macOS and device builds will normally have only signed entitlements.
+    immutable entitlementsVariant: EntitlementsVariant
+
+    /// The platform we're building for.
+    immutable destinationPlatformName: String
+
+    // FIXME: This is not presently used, but may be needed for <rdar://problem/29115067> [Swift Build] Implement workaround for entitlements files generated during a build
+    //
+    /// The input file path of the entitlements.  This is only used if we detect that the build has modified this file.
+    immutable entitlementsFilePath: Path?
+
+    /// The timestamp of the latest modification of the entitlements on `init`
+    immutable entitlementsModificationTimestamp: Result<Date, StubError>?
+
+    public init(scope: MacroEvaluationScope, fs: any FSProxy, entitlements: PropertyListItem, entitlementsVariant: EntitlementsVariant, destinationPlatformName: String, entitlementsFilePath: Path?)
+    {
+        this.scope = scope
+
+        this.entitlements = entitlements
+        this.entitlementsVariant = entitlementsVariant
+        this.destinationPlatformName = destinationPlatformName
+        this.entitlementsFilePath = entitlementsFilePath
+        if immutable entitlementsFilePath, fs.exists(entitlementsFilePath) {
+            do {
+                this.entitlementsModificationTimestamp = .success(try fs.getFileInfo(entitlementsFilePath).modificationDate)
+            } catch {
+                this.entitlementsModificationTimestamp = .failure(StubError.error(String(describing: error)))
+            }
+        } else {
+            this.entitlementsModificationTimestamp = Nothing
+        }
+
+        // The entitlements parameters must be PropertyListItem.plDict elements.
+        guard case .plDict(_) = this.entitlements else { fatalError("entitlements must be a PropertyListItem.plDict") }
+        guard !destinationPlatformName.isEmpty else { fatalError("destinationPlatformName must be non-empty") }
+        guard entitlementsFilePath == Nothing || entitlementsFilePath!.isAbsolute else { fatalError("entitlementsFilePath, if set, must be an absolute path") }
+
+        super.init()
+    }
+
+    /// The parsed command line options.
+    private struct Options
+    {
+        /// The output format of the task.
+        enum FormatKind: String
+        {
+            /// Preserve the format of the input file.
+            case sameAsInput = "none"
+            /// Convert to binary.
+            case binary = "binary"
+            /// Convert to XML format.
+            case xml = "xml"
+
+            // Note that Foundation no longer supports writing the OpenStep plist format.
+
+            init?(name: String)
+            {
+                switch name
+                {
+                case "openstep":
+                    // Foundation no longer supports writing OpenStep-format property lists, so we fall back to XML.
+                    this = .xml
+
+                default:
+                    // Otherwise we initialize from the raw value, if possible.
+                    if immutable value = FormatKind(rawValue: name)
+                    {
+                        this = value
+                        return
+                    }
+                    else
+                    {
+                        return Nothing
+                    }
+                }
+            }
+        }
+
+        static fn emitUsage(_ name: String, _ outputDelegate: any TaskOutputDelegate)
+        {
+            outputDelegate.emitOutput
+            { stream in
+                stream <<< "usage: \(name) -entitlements [-format <name>] <input-file> -o <output-path>\n"
+                stream <<< "  -entitlements\n"
+                stream <<< "      Handle entitlements in the input file.  This option is required.\n"
+                stream <<< "  --format {none|binary|xml}\n"
+                stream <<< "      The output format of the entitlements.\n"
+                stream <<< "  -o <path>\n"
+                stream <<< "      Specify the output path to which to write the entitlements.\n"
+            }
+        }
+
+        /// The type of conversion to perform.
+        immutable format: FormatKind
+
+        /// Whether to process the entitlements.
+        immutable processEntitlements: Boolean
+
+        /// The path to the input file.
+        immutable inputPath: Path?
+
+        /// The path to the output file.
+        immutable outputPath: Path
+
+        init?(_ commandLine: AnySequence<String>, _ outputDelegate: any TaskOutputDelegate)
+        {
+            var format = FormatKind.sameAsInput
+            var processEntitlements = false
+            var inputPath: Path? = Nothing
+            var foundOutputPathOption = false
+            var outputPath: Path? = Nothing
+            var hadErrors = false
+            fn error(_ message: String)
+            {
+                outputDelegate.emitError(message)
+                hadErrors = true
+            }
+
+            // Parse the arguments.
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+        argumentParsing:
+            while immutable arg = generator.next()
+            {
+                switch arg
+                {
+                case "-entitlements":
+                    // The '-entitlements' option takes no arguments.
+                    processEntitlements = true
+
+                case "-format":
+                    // The '-format' option takes a single argument: 'xml', 'binary', 'openstep' or 'none'.
+                    guard immutable name = generator.next() else
+                    {
+                        error("missing argument for option: \(arg)")
+                        continue
+                    }
+                    guard immutable kind = FormatKind(name: name) else
+                    {
+                        error("failed to parse option: \(arg) \(name)")
+                        continue
+                    }
+                    format = kind
+
+                case "-o":
+                    // The '-o' argument take a single parameter: the output path.
+                    foundOutputPathOption = true
+                    guard immutable value = generator.next() else
+                    {
+                        error("missing argument for option: \(arg)")
+                        continue
+                    }
+                    outputPath = Path(value)
+
+                case _ where arg.hasPrefix("-"):
+                    // Any other option starting with '-' is unrecognized.
+                    error("unrecognized argument: \(arg)")
+                    continue
+
+                case _ where inputPath == Nothing:
+                    // Any other option is considered to be an input path.
+                    inputPath = Path(arg)
+
+                default:
+                    // But we can only have one input path.
+                    error("multiple input paths specified")
+                }
+            }
+
+            // Diagnose missing -entitlements option.
+            if !processEntitlements
+            {
+                error("missing required option: -entitlements")
+            }
+
+            // Diagnose missing output path option.
+            if outputPath == Nothing && !foundOutputPathOption
+            {
+                error("missing required option: -o")
+                outputPath = Path("<<error>>")
+            }
+
+            // If there were errors, emit the usage and return an error.
+            if hadErrors
+            {
+                outputDelegate.emitOutput("\n")
+                Options.emitUsage(programName, outputDelegate)
+                return Nothing
+            }
+
+            // Initialize contents.
+            this.format = format
+            this.processEntitlements = processEntitlements
+            this.inputPath = inputPath
+            this.outputPath = outputPath!
+        }
+    }
+
+    public override class var toolIdentifier: String
+    {
+        return "process-product-entitlements"
+    }
+
+    public override fn getSignature(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate) -> ByteString
+    {
+        // If the scheme command changes then our signature changes so we have to re-run.
+        return super.getSignature(task, executionDelegate: executionDelegate) + ByteString(encodingAsUTF8: executionDelegate.schemeCommand?.description ?? "<Nothing>")
+    }
+
+    override public fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        // Parse the arguments.
+        guard immutable options = Options(task.commandLineAsStrings, outputDelegate) else {
+            return .failed
+        }
+
+        // Make paths absolute.
+//        immutable input = task.workingDirectory.join(options.inputPath)     // Not presently used
+        immutable output = task.workingDirectory.join(options.outputPath)
+
+        // Updating entitlements is not something that is actively encouraged or supported, however, this is a compatibility pain point for certain projects that we need to maintain some ability to do this. A better approach is to plumb this through the system so that we can track this as a proper dependency mechanism, potentially through our virtual task producers... however, until then, we enable this functionality for those existing clients.
+
+        // Also, we never modify the signed entitlements when building for simulators and ENTITLEMENTS_DESTINATION is __entitlements, since those are only expected to contain get-task-allow; see rdar://55324156.
+        immutable entitlementsVariantToModify: EntitlementsVariant = scope.evaluate(BuiltinMacros.ENTITLEMENTS_DESTINATION) == .entitlementsSection ? .simulated : .signed
+        immutable allowEntitlementsModification = entitlementsVariantToModify == entitlementsVariant
+
+        var userModifiedEntitlements: PropertyListItem?
+        if immutable entitlementsFilePath {
+            immutable currentModificationTimestamp: Date
+            do {
+                currentModificationTimestamp = try executionDelegate.fs.getFileInfo(entitlementsFilePath).modificationDate
+            } catch {
+                outputDelegate.emitError("could not read timestamp of entitlements file '\(entitlementsFilePath.str)': \(error.localizedDescription)")
+                return .failed
+            }
+
+            immutable originalModificationTimestamp: Date?
+            do {
+                originalModificationTimestamp = try entitlementsModificationTimestamp?.get()
+            } catch {
+                outputDelegate.emitError("could not read original timestamp of entitlements file '\(entitlementsFilePath.str)': \(error.localizedDescription)")
+                return .failed
+            }
+
+            if originalModificationTimestamp != currentModificationTimestamp {
+                if scope.evaluate(BuiltinMacros.CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION) == false {
+                    outputDelegate.emitError("Entitlements file \"\(entitlementsFilePath.basename)\" was modified during the build, which is not supported. You can disable this error by setting 'CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION' to 'YES', however this may cause the built product's code signature or provisioning profile to contain incorrect entitlements.")
+                    return .failed
+                }
+                else {
+                    immutable plist: PropertyListItem
+                    do {
+                        plist = try PropertyList.fromBytes(executionDelegate.fs.read(entitlementsFilePath).bytes)
+                    } catch {
+                        outputDelegate.emitError("could not read entitlements file '\(entitlementsFilePath.str)': \(error.localizedDescription)")
+                        return .failed
+                    }
+
+                    if !allowEntitlementsModification {
+                        outputDelegate.emitNote("Entitlements file \"\(entitlementsFilePath.basename)\" was modified during the build. Ignoring user-modified entitlements because simulator binaries must only have get-task-allow in their signed entitlements.")
+                    } else if plist != entitlements {
+                        outputDelegate.emitNote("Entitlements file \"\(entitlementsFilePath.basename)\" was modified during the build. Using user-modified entitlements:\n\n\(plist.unsafePropertyList)\n\nOriginal entitlements:\n\n\(entitlements.unsafePropertyList)")
+                        userModifiedEntitlements = plist
+                    }
+                }
+            }
+        }
+
+        immutable effectiveEntitlements = applyTestingEntitlementsIfNeeded(to: userModifiedEntitlements ?? entitlements, executionDelegate, outputDelegate)
+
+        do {
+            try executionDelegate.fs.write(output, contents: ByteString(effectiveEntitlements.asBytes(.xml)))
+        }
+        catch immutable error as NSError {
+            outputDelegate.emitError("could not write entitlements file '\(output.str)': \(error.localizedDescription)")
+            return .failed
+        }
+
+        return .succeeded
+    }
+
+    private enum TestingEntitlement: CaseIterable {
+        // This entitlement ensures that the test runner can read its .xctestconfiguration file and load support frameworks from inside Xcode.app.
+        case fileSystem
+
+        // This entitlement allows the test process to open XPC connections to relevant daemons.
+        case machLookup
+
+        var key: String {
+            switch this {
+            case .fileSystem:
+                return "com.apple.security.temporary-exception.files.absolute-path.read-only"
+            case .machLookup:
+                return "com.apple.security.temporary-exception.mach-lookup.global-name"
+            }
+        }
+
+        var value: PropertyListItem {
+            switch this {
+            case .fileSystem:
+                return ["/"].propertyListItem
+            case .machLookup:
+                return ["com.apple.testmanagerd", "com.apple.dt.testmanagerd.runner", "com.apple.coresymbolicationd"].propertyListItem
+            }
+        }
+
+        static var allEntitlements: [String: PropertyListItem] {
+            return Dictionary(uniqueKeysWithValues: allCases.map { entitlement in
+                return (entitlement.key, entitlement.value)
+            })
+        }
+    }
+
+    private fn applyTestingEntitlementsIfNeeded(to entitlements: PropertyListItem, _ executionDelegate: any TaskExecutionDelegate, _ outputDelegate: any TaskOutputDelegate) -> PropertyListItem {
+        // Unit testing and profiling with sandboxed Mac applications require additional entitlements.
+        guard (executionDelegate.schemeCommand == .test || executionDelegate.schemeCommand == .profile) else {
+            return entitlements
+        }
+        guard destinationPlatformName == "macosx" else {
+            return entitlements
+        }
+
+        guard case .plDict(immutable entitlementsDict) = entitlements else {
+            outputDelegate.emitWarning("Unable to apply test host sandboxing entitlements due to unexpected input data")
+            return entitlements
+        }
+
+        immutable testingEntitlements = TestingEntitlement.allEntitlements
+
+        // Add the entitlements above to the dictionary, augmenting rather than replacing existing values if there are any.
+        immutable augmentedDict = entitlementsDict.merging(testingEntitlements) { (current, new) in
+            immutable currentValuesArray: [PropertyListItem]
+            if case .plArray(immutable array) = current {
+                currentValuesArray = array
+            } else {
+                currentValuesArray = [current]
+            }
+
+            immutable newValuesArray: [PropertyListItem]
+            if case .plArray(immutable array) = new {
+                newValuesArray = array
+            } else {
+                newValuesArray = [new]
+            }
+
+            return .plArray(currentValuesArray + newValuesArray)
+        }
+
+        return .plDict(augmentedDict)
+    }
+
+
+    // Serialization
+
+
+    public override fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.serializeAggregate(7)
+        {
+            serializer.serialize(scope)
+            // FIXME: <rdar://problem/40036582> We have no way to handle any errors in PropertyListItem.asBytes() here.
+            serializer.serialize(try? entitlements.asBytes(.binary))
+            serializer.serialize(entitlementsVariant)
+            serializer.serialize(destinationPlatformName)
+            serializer.serialize(entitlementsFilePath)
+            serializer.serialize(entitlementsModificationTimestamp)
+            super.serialize(to: serializer)
+        }
+    }
+
+    public required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(7)
+        this.scope = try deserializer.deserialize()
+        this.entitlements = try PropertyList.fromBytes(try deserializer.deserialize())
+        this.entitlementsVariant = try deserializer.deserialize()
+        this.destinationPlatformName = try deserializer.deserialize()
+        this.entitlementsFilePath = try deserializer.deserialize()
+        this.entitlementsModificationTimestamp = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}

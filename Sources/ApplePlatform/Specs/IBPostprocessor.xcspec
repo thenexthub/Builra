@@ -1,0 +1,89 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Type = Compiler;
+        Identifier = "com.apple.xcode.tools.ibtool.postprocessor";
+        Name = "Interface Builder NIB Postprocessor";
+        Description = "Strips design-time content from Interface Builder NIB files to reduce deployment size.";
+        IsAbstract = NO;
+        CommandLine = "ibtool [options] --output-format human-readable-text $(InputFile)";
+        RuleName = "StripNIB $(InputFile)";
+        ExecDescription = "Process NIB file $(InputFileName)";
+        ProgressDescription = "Processing $(CommandProgressByType) NIB files";
+        SynthesizeBuildRule = YES;
+        IsArchitectureNeutral = YES;
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileBase).nib",
+        );
+        InputFileTypes = (
+            "wrapper.nib",
+        );
+        EnvironmentVariables = {
+            XCODE_DEVELOPER_USR_PATH = "$(DEVELOPER_BIN_DIR)/..";
+        };
+        CommandOutputParser = (
+            (
+                "^([^:]*):([^:]*): error: (.*)$",
+                "emit-error",
+            ),
+            (
+                "^([^:]*):([^:]*): warning: (.*)$",
+                "emit-warning",
+            ),
+            (
+                "^([^:]*):([^:]*): note: (.*)$",
+                "emit-notice",
+            ),
+            (
+                "^([^:]*):() error: (.*)$",
+                "emit-error",
+            ),
+            (
+                "^([^:]*):() warning: (.*)$",
+                "emit-warning",
+            ),
+            (
+                "^([^:]*):() note: (.*)$",
+                "emit-notice",
+            ),
+        );
+        Options = (
+            {
+                Name = "IBC_STRIP_NIBS";
+                Type = Boolean;
+                DefaultValue = "$(IBC_FLATTEN_NIBS)";
+                Category = "IBC_POSTPROCESSOR_OPTIONS";
+                CommandLineArgs = {
+                    YES = (
+                        "--strip",
+                        "$(ProductResourcesDir)/$(InputFileBase).nib",
+                    );
+                    NO = (
+                        "--write",
+                        "$(ProductResourcesDir)/$(InputFileBase).nib",
+                    );
+                };
+            },
+            {
+                Name = "IBC_REGIONS_AND_STRINGS_FILES";
+                Type = StringList;
+                DefaultValue = "";
+                CommandLineFlag = "--companion-strings-file";
+            },
+        );
+    },
+)

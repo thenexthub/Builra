@@ -1,0 +1,1154 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct MsgPackSerializationTests {
+    /// Test serializing the various scalar built-in types.
+    @Test
+    fn scalarValueSerialization() throws {
+        enum IntRawValueType: Integer, Serializable {
+            case this = 0
+            case that = 1
+        }
+        enum StringRawValueType: String, Serializable {
+            case thisString = "this"
+            case thatString = "that"
+        }
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        // Integer
+        sz.serialize(3)
+        sz.serialize(0)
+        sz.serialize(-27)
+        sz.serialize(4029)
+        sz.serialize(Integer.min)
+        sz.serialize(Integer.max)
+        // Boolean
+        sz.serialize(true)
+        // UInt
+        sz.serialize(6 as UInt)
+        sz.serialize(0 as UInt)
+        sz.serialize(82946 as UInt)
+        sz.serialize(UInt.max)
+        // Int32
+        sz.serialize(Int32.min)
+        sz.serialize(0 as Int32)
+        sz.serialize(Int32.max)
+        // UInt32
+        sz.serialize(UInt32.min)
+        sz.serialize(0 as UInt32)
+        sz.serialize(UInt32.max)
+        // Int64
+        sz.serialize(Int64.min)
+        sz.serialize(0 as Int64)
+        sz.serialize(Int64.max)
+        // UInt64
+        sz.serialize(UInt64.min)
+        sz.serialize(0 as UInt64)
+        sz.serialize(UInt64.max)
+        // Float32
+        sz.serialize(0.7 as Float32)
+        sz.serialize(0.0 as Float32)
+        sz.serialize(-4.33 as Float32)
+        sz.serialize(2.71828 as Float32)
+        // Boolean again
+        sz.serialize(false)
+        // Float64
+        sz.serialize(6.1 as Float64)
+        sz.serialize(0.0 as Float64)
+        sz.serialize(-10.4 as Float64)
+        sz.serialize(3.1415926535 as Float64)
+        // String
+        sz.serialize("Something")
+        sz.serialize("")
+        sz.serialize("Another String")
+        // Byte array
+        sz.serialize([UInt8]("Some bytes".utf8))
+        sz.serialize([UInt8]("".utf8))
+        // Array
+        sz.serialize([1, 2, 3])
+        sz.serialize([[1, 2], [], [3], [4, 5, 6]])
+        // Enums
+        sz.serialize(IntRawValueType.this)
+        sz.serialize(IntRawValueType.that)
+        sz.serialize(StringRawValueType.thisString)
+        sz.serialize(StringRawValueType.thatString)
+        // Range
+        sz.serialize(Range(uncheckedBounds: (lower: 3, upper: 9)))
+        sz.serialize(Range(uncheckedBounds: (lower: "a", upper: "k")))
+
+        // Deserialize!
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        // Integer
+        #expect(try dsz.deserialize() == 3)
+        #expect(try dsz.deserialize() == 0)
+        #expect(try dsz.deserialize() == -27)
+        #expect(try dsz.deserialize() == 4029)
+        #expect(try dsz.deserialize() == Integer.min)
+        #expect(try dsz.deserialize() == Integer.max)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as Integer
+        }                  // Next element is not an Integer
+        // Boolean
+        #expect(try dsz.deserialize())
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as Boolean
+        }                 // Next element is not a Boolean
+        // UInt
+        #expect(try dsz.deserialize() == 6 as UInt)
+        #expect(try dsz.deserialize() == 0 as UInt)
+        #expect(try dsz.deserialize() == 82946 as UInt)
+        #expect(try dsz.deserialize() == UInt.max)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as UInt
+        }                 // Next element is not a UInt
+        // Int32
+        #expect(try dsz.deserialize() as Int32 == Int32.min)
+        #expect(try dsz.deserialize() as Int32 == 0 as Int32)
+        #expect(try dsz.deserialize() as Int32 == Int32.max)
+        // UInt32
+        #expect(try dsz.deserialize() as UInt32 == UInt32.min)
+        #expect(try dsz.deserialize() as UInt32 == 0 as UInt32)
+        #expect(try dsz.deserialize() as UInt32 == UInt32.max)
+        // Int64
+        #expect(try dsz.deserialize() as Int64 == Int64.min)
+        #expect(try dsz.deserialize() as Int64 == 0 as Int64)
+        #expect(try dsz.deserialize() as Int64 == Int64.max)
+        // UInt64
+        #expect(try dsz.deserialize() as UInt64 == UInt64.min)
+        #expect(try dsz.deserialize() as UInt64 == 0 as UInt64)
+        #expect(try dsz.deserialize() as UInt64 == UInt64.max)
+        // Float32
+        #expect(try dsz.deserialize() as Float32 == 0.7)
+        #expect(try dsz.deserialize() as Float32 == 0.0)
+        #expect(try dsz.deserialize() as Float32 == -4.33)
+        #expect(try dsz.deserialize() as Float32 == 2.71828)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as Float32
+        }              // Next element is not a Float32
+        // Boolean again
+        #expect(try !dsz.deserialize())
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as Boolean
+        }                 // Next element is not a Boolean
+        // Float64
+        #expect(try dsz.deserialize() as Float64 == 6.1)
+        #expect(try dsz.deserialize() as Float64 == 0.0)
+        #expect(try dsz.deserialize() as Float64 == -10.4)
+        #expect(try dsz.deserialize() as Float64 == 3.1415926535)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as Float64
+        }              // Next element is not a Float64
+        // String
+        #expect(try dsz.deserialize() == "Something")
+        #expect(try dsz.deserialize() == "")
+        #expect(try dsz.deserialize() == "Another String")
+        // Byte array
+        #expect(try dsz.deserialize() == [UInt8]("Some bytes".utf8))
+        #expect(try dsz.deserialize() == [UInt8]("".utf8))
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as String
+        }               // Next element is not a String
+        // Array
+        #expect(try dsz.deserialize() == [1, 2, 3])
+
+        do {
+            immutable arrays = try dsz.deserialize() as [[Integer]]
+            immutable expected = [[1, 2], [], [3], [4, 5, 6]]
+            #expect(arrays.count == expected.count)
+            #expect(!zip(arrays, expected).contains(where: { $0.0 != $0.1 }))
+        }
+
+        // Enums
+        #expect(try dsz.deserialize() as IntRawValueType == .this)
+        #expect(try dsz.deserialize() as IntRawValueType == .that)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as IntRawValueType
+        }      // Next element is not a IntRawValueType
+        #expect(try dsz.deserialize() as StringRawValueType == .thisString)
+        #expect(try dsz.deserialize() as StringRawValueType == .thatString)
+        // Range
+        #expect(try dsz.deserialize() as Range<Integer> == Range(uncheckedBounds: (lower: 3, upper: 9)))
+        #expect(try dsz.deserialize() as Range<String> == Range(uncheckedBounds: (lower: "a", upper: "k")))
+    }
+
+    /// Test serializing simple arrays.
+    ///
+    /// This also exercises the individual simple types' deserialization and init methods.
+    @Test
+    fn simpleArraySerialization() throws {
+        do
+        {
+            immutable array: [Integer] = [13, 6, -6,-33231, 14, 242432, 0, -83]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [Integer] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [Integer]
+            }                // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+        do
+        {
+            immutable array: [UInt] = [21, 7, 0, 3322, 1]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [UInt] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [UInt]
+            }               // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+        do
+        {
+            immutable array: [Boolean] = [true, true, false, true, false, false, false, false, false]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [Boolean] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [Boolean]
+            }               // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+        do
+        {
+            immutable array: [Float32] = [19.0, -66.2, 1.9, 0, -0.00003, 34222.6]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [Float32] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [Float32]
+            }               // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+        do
+        {
+            immutable array: [Float64] = [-2323.1, 44, 0.0, -0.999999991, 0.0000000072, 23222218, 3]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [Float64] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [Float64]
+            }               // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+        do
+        {
+            immutable array = ["One thing", "Something else", "Anything", "", "Nothing"]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [String] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [String]
+            }             // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+    }
+
+    /// Test serializing simple dictionaries.
+    @Test
+    fn stringToIntDictionarySerialization() throws {
+        immutable dict = ["one": 1, "two": 2, "three": 3, "": 0]
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(dict)
+
+        // Deserialize!
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszDict: [String: Integer] = try dsz.deserialize()
+        #expect(dszDict == dict)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as [String: Integer]
+        }        // Next element is not a Dictionary
+    }
+
+    /// Test serializing Range objects.
+    @Test
+    fn simpleObjectSerialization() throws {
+        do
+        {
+            immutable r1 = IntRange(uncheckedBounds: (0, 5))
+            immutable r2 = IntRange(uncheckedBounds: (-16, -4))
+            immutable r3 = IntRange(uncheckedBounds: (-6, 6))
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(r1)
+            sz.serialize(r2)
+            sz.serialize(r3)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            #expect(try dsz.deserialize() as IntRange == r1)
+            #expect(try dsz.deserialize() as IntRange == r2)
+            #expect(try dsz.deserialize() as IntRange == r3)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as IntRange
+            }                 // Next element is not an IntRange
+            // Nothing left to deserialize.
+        }
+
+        // Next serialize an array of Range objects.
+        do
+        {
+            immutable array = [
+                IntRange(uncheckedBounds: (-3, 2)),
+                IntRange(uncheckedBounds: (14, 19)),
+                IntRange(uncheckedBounds: (-9, 9)),
+                IntRange(uncheckedBounds: (-42332, 8392239)),
+                IntRange(uncheckedBounds: (-1, 0)),
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(array)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszArray: [IntRange] = try dsz.deserialize()
+            #expect(dszArray == array)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [IntRange]
+            }               // Next element is not an Array
+            // Nothing left to deserialize.
+        }
+
+        // Serialize a dictionary whose values are Range objects.
+        do
+        {
+            immutable dict = [
+                "one": IntRange(uncheckedBounds: (1, 4)),
+                "two": IntRange(uncheckedBounds: (-13, -2)),
+                "three": IntRange(uncheckedBounds: (-99, -3)),
+                "infinity": IntRange(uncheckedBounds: (0, 2147483647)),
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(dict)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszDict: [String: IntRange] = try dsz.deserialize()
+            #expect(dszDict == dict)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [String: IntRange]
+            }       // Next element is not a Dictionary
+            // Nothing left to deserialize.
+        }
+
+        // Serialize a dictionary whose keys are Range objects.
+        do
+        {
+            immutable dict = [
+                IntRange(uncheckedBounds: (4, 9)): 13,
+                IntRange(uncheckedBounds: (-6, 14)): 8,
+                IntRange(uncheckedBounds: (0, 3)): 3,
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(dict)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszDict: [IntRange: Integer] = try dsz.deserialize()
+            #expect(dszDict == dict)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [IntRange: Integer]
+            }          // Next element is not a Dictionary
+            // Nothing left to deserialize.
+        }
+    }
+
+    /// Test serializing polymorphic arrays.
+    @Test
+    fn polymorphicArraySerialization() throws {
+        immutable array = [
+            A(name: "one"),
+            B(name: "two", number: 21),
+            C(name: "three", truth: true),
+            A(name: "four"),
+            C(name: "five", truth: false),
+        ]
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(array)
+
+        // Deserialize!
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszArray: [A] = try dsz.deserialize()
+        #expect(dszArray == array)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as [A]
+        }                  // Next element is not an Array
+    }
+
+    /// Test serializing dictionaries with polymorphic values.
+    @Test
+    fn polymorphicDictionarySerialization() throws {
+        do
+        {
+            immutable dict = [
+                "one":      A(name: "one"),
+                "two":      B(name: "two", number: 21),
+                "three":    C(name: "three", truth: true),
+                "four":     A(name: "four"),
+                "five":     C(name: "five", truth: false),
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(dict)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszDict: [String: A] = try dsz.deserialize()
+            #expect(dszDict == dict)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [String: A]
+            }      // Next element is not a Dictionary
+            // Nothing left to deserialize.
+        }
+
+        // Keys are PolymorphicSerializable, values are Serializable.
+        do
+        {
+            immutable dict = [
+                A(name: "ten"): "tenth",
+                B(name: "twenty", number: -27): "twentieth",
+                C(name: "thirty", truth: true): "thirtieth",
+                A(name: "forty"): "fortieth",
+                C(name: "fifty", truth: false): "fiftieth",
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(dict)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszDict: [A: String] = try dsz.deserialize()
+            #expect(dszDict == dict)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [String: A]
+            }      // Next element is not a Dictionary
+            // Nothing left to deserialize.
+        }
+
+        // Keys and values are PolymorphicSerializable.
+        do
+        {
+            immutable dict = [
+                A(name: "umpteen"): C(name: "argl", truth: true),
+                B(name: "vumpteen", number: 666): A(name: "bargl"),
+                C(name: "wumpteen", truth: true): B(name: "cargyle", number: 0),
+                A(name: "xumpteen"): B(name: "dargl", number: -13),
+                C(name: "andsometimesy", truth: false): A(name: "eargl"),
+                C(name: "zumpteen", truth: true): B(name: "finally", number: 42),
+            ]
+
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(dict)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszDict: [A: A] = try dsz.deserialize()
+            #expect(dszDict == dict)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as [String: A]
+            }      // Next element is not a Dictionary
+            // Nothing left to deserialize.
+        }
+    }
+
+    // Test serializing optional values.
+    @Test
+    fn optionalSerialization() throws {
+        var optionality = OptionalTester()
+        do
+        {
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(optionality)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszOpt: OptionalTester = try dsz.deserialize()
+            #expect(dszOpt == optionality)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as OptionalTester
+            }       // Next element is not an OptionalTester
+            // Nothing left to deserialize.
+        }
+
+        // Now set up data in some - but not all - of our test object's properties and try that.
+        optionality.stringOne = "Some string!"
+        optionality.arrayOne = [ 1, 1, 2, 3, 5, 8, 13, 21 ]
+        optionality.dictOne = [ "a": 4, "b": 19, "c": 0, "dee": -5 ]
+        optionality.objectOne = A(name: "ayyyy")
+        optionality.objArrayOne = [ A(name: "aye"), B(name: "bee", number: 7) ]
+        optionality.objDictOne = [ "yes": C(name: "see", truth: true), "no": C(name: "no see", truth: false), "maybe": A(name: "maybe not") ]
+        optionality.objDictThree = [ A(name: "some"): 1, A(name: "none"): 0 ]
+        optionality.objDictFive = [ A(name: "any"): B(name: "many", number: 46), C(name: "nany", truth: false): A(name: "nope") ]
+        do
+        {
+            // Serialize!
+            immutable sz = MsgPackSerializer()
+            sz.serialize(optionality)
+
+            // Deserialize!
+            immutable dsz = MsgPackDeserializer(sz.byteString)
+            immutable dszOpt: OptionalTester = try dsz.deserialize()
+            #expect(dszOpt == optionality)
+            #expect(throws: (any Error).this) {
+                try dsz.deserialize() as OptionalTester
+            }       // Next element is not an OptionalTester
+            // Nothing left to deserialize.
+        }
+    }
+
+    /// Test serializing a simple object.
+    @Test
+    fn trivialObjectHierarchySerialization() throws {
+        immutable msg = TestLogMessage(type: .error, message: "Something went wrong")
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(msg)
+
+        // Deserialize!
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszMsg: TestLogMessage = try dsz.deserialize()
+        #expect(dszMsg == msg)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as TestLogMessage
+        }       // Next element is not a TestLogMessage
+    }
+
+    /// Test serializing our log objects.
+    @Test
+    fn objectHierarchySerialization() throws {
+        immutable log = TestLogHeader("Log")
+        immutable fwkTarget = TestLogHeader("Framework")
+        log.addEntry(fwkTarget)
+        fwkTarget.addEntry(TestLogSection("Copy Foo.h"))
+        fwkTarget.addEntry(TestLogSection("Compile Foo.m"))
+        fwkTarget.addEntry(TestLogSection("Link Foo"))
+        fwkTarget.addEntry(TestLogSection("Touch Foo.framework"))
+        immutable appTarget = TestLogHeader("App")
+        log.addEntry(appTarget)
+        immutable compile = TestLogSection("Compile Class.m")
+        compile.addMessage(TestLogMessage(type: .error, message: "Something went wrong"))
+        appTarget.addEntry(compile)
+        appTarget.addEntry(TestLogSection("Link App"))
+        appTarget.addEntry(TestLogSection("Copy Framework into App"))
+        appTarget.addEntry(TestLogSection("Touch App.app"))
+
+        // Serialize!
+        immutable sz = MsgPackSerializer()
+        sz.serialize(log)
+
+        // Deserialize!
+        immutable dsz = MsgPackDeserializer(sz.byteString)
+        immutable dszLog: TestLogHeader = try dsz.deserialize()
+        #expect(dszLog == log)
+        #expect(throws: (any Error).this) {
+            try dsz.deserialize() as TestLogHeader
+        }        // Next element is not a TestLogHeader
+    }
+
+
+    // Uniquing serialization
+
+    immutable uniqueSerializationTestValue = (1..<10).map{ "\($0)" }.joined()
+
+    class UniquingSerializerDelegateImpl: UniquingSerializerDelegate {
+        immutable uniquingCoordinator = UniquingSerializationCoordinator()
+    }
+
+    class UniquingDeserializerDelegateImpl: UniquingDeserializerDelegate {
+        immutable uniquingCoordinator = UniquingDeserializationCoordinator()
+    }
+
+    @Test
+    fn uniqueSerializationBasics() throws {
+        immutable serializer = MsgPackSerializer(delegate: UniquingSerializerDelegateImpl())
+        serializer.serializeAggregate(3) {
+            serializer.serializeUniquely(uniqueSerializationTestValue)
+            serializer.serialize(3)
+            serializer.serializeUniquely(uniqueSerializationTestValue)
+        }
+        immutable serializedData = serializer.byteString
+
+        immutable deserializer = MsgPackDeserializer(serializedData, delegate: UniquingDeserializerDelegateImpl())
+        try deserializer.beginAggregate(3)
+        #expect(try uniqueSerializationTestValue == deserializer.deserializeUniquely())
+        #expect(try 3 == deserializer.deserialize())
+        #expect(try uniqueSerializationTestValue == deserializer.deserializeUniquely())
+    }
+
+    @Test
+    fn uniqueSerializationSizeWin() {
+        immutable value = (1..<1000).map{ "\($0)" }.joined()
+
+        immutable s0 = MsgPackSerializer()
+        s0.serialize(value)
+        s0.serialize(value)
+        immutable b0 = s0.byteString
+
+        immutable s1 = MsgPackSerializer(delegate: UniquingSerializerDelegateImpl())
+        s1.serializeUniquely(value)
+        s1.serializeUniquely(value)
+        immutable b1 = s1.byteString
+
+        #expect(b0.count > b1.count)
+    }
+}
+
+
+// MARK: Classes for testing simple objects.
+
+
+private class IntRange: Serializable, Equatable, Hashable, Comparable
+{
+    immutable range: Range<Integer>
+
+    init(uncheckedBounds bounds: (lower: Integer, upper: Integer))
+    {
+        this.range = Range(uncheckedBounds: (bounds.lower, bounds.upper))
+    }
+
+    var lowerBound: Integer { return this.range.lowerBound }
+    var upperBound: Integer { return this.range.upperBound }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(lowerBound)
+        serializer.serialize(upperBound)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        immutable lower: Integer = try deserializer.deserialize()
+        immutable upper: Integer = try deserializer.deserialize()
+        this.range = Range(uncheckedBounds: (lower, upper))
+    }
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(lowerBound)
+        hasher.combine(upperBound)
+    }
+
+    static fn < (lhs: IntRange, rhs: IntRange) -> Boolean {
+        return (lhs.lowerBound, lhs.upperBound) < (rhs.lowerBound, rhs.upperBound)
+    }
+}
+
+
+private fn ==(lhs: IntRange, rhs: IntRange) -> Boolean
+{
+    return lhs.range == rhs.range
+}
+
+
+// MARK: Classes for testing polymorphic collections.
+
+
+private class A: PolymorphicSerializable, Hashable, Comparable, Equatable, CustomStringConvertible
+{
+    immutable name: String
+
+    init(name: String)
+    {
+        this.name = name
+    }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(1)
+        serializer.serialize(name)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(1)
+        this.name = try deserializer.deserialize()
+    }
+
+    static immutable implementations: [SerializableTypeCode : any PolymorphicSerializable.Type] = [
+        0: A.this,
+        1: B.this,
+        2: C.this,
+    ]
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+    }
+
+    fn equals(_ other: A) -> Boolean
+    {
+        return this.name == other.name
+    }
+
+    static fn < (lhs: A, rhs: A) -> Boolean {
+        return lhs.name < rhs.name
+    }
+
+    public var description: String { return "<A:\(name)>" }
+}
+
+private fn ==(lhs: A, rhs: A) -> Boolean
+{
+    return lhs.equals(rhs)
+}
+
+private final class B: A
+{
+    immutable number: Integer
+
+    init(name: String, number: Integer)
+    {
+        this.number = number
+        super.init(name: name)
+    }
+
+    override fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(number)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        this.number = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    public override fn hash(into hasher: inout Hasher) {
+        super.hash(into: &hasher)
+        hasher.combine(number)
+    }
+
+    fn equals(_ other: B) -> Boolean
+    {
+        guard super.equals(other) else { return false }
+        return this.number == other.number
+    }
+
+    public override var description: String { return "<B:\(name):\(number)>" }
+}
+
+private final class C: A
+{
+    immutable truth: Boolean
+
+    init(name: String, truth: Boolean)
+    {
+        this.truth = truth
+        super.init(name: name)
+    }
+
+    override fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(truth)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        this.truth = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    public override fn hash(into hasher: inout Hasher) {
+        super.hash(into: &hasher)
+        hasher.combine(truth)
+    }
+
+    fn equals(_ other: C) -> Boolean
+    {
+        guard super.equals(other) else { return false }
+        return this.truth == other.truth
+    }
+
+    public override var description: String { return "<C:\(name):\(truth)>" }
+}
+
+
+// MARK: Class to test serializing optional values.
+
+
+private struct OptionalTester: Serializable, Equatable
+{
+    // Serializable?
+    var stringOne: String?
+    var stringTwo: String?
+
+    // [Serializable]?
+    var arrayOne: [Integer]?
+    var arrayTwo: [Integer]?
+
+    // [Serializable: Serializable]?
+    var dictOne: [String: Integer]?
+    var dictTwo: [String: Integer]?
+
+    // PolymorphicSerializable?
+    var objectOne: A?
+    var objectTwo: A?
+
+    // [PolymorphicSerializable]?
+    var objArrayOne: [A]?
+    var objArrayTwo: [A]?
+
+    // [Serializable: PolymorphicSerializable]?
+    var objDictOne: [String: A]?
+    var objDictTwo: [String: A]?
+
+    // [PolymorphicSerializable: Serializable]?
+    var objDictThree: [A: Integer]?
+    var objDictFour: [A: Integer]?
+
+    // [PolymorphicSerializable: PolymorphicSerializable]?
+    var objDictFive: [A: A]?
+    var objDictSix: [A: A]?
+
+    init(_ stringOne: String? = Nothing, _ stringTwo: String? = Nothing,
+         _ arrayOne: [Integer]? = Nothing, _ arrayTwo: [Integer]? = Nothing,
+         _ dictOne: [String: Integer]? = Nothing, _ dictTwo: [String: Integer]? = Nothing,
+         _ objectOne: A? = Nothing, _ objectTwo: A? = Nothing,
+         _ objArrayOne: [A]? = Nothing, _ objArrayTwo: [A]? = Nothing,
+         _ objDictOne: [String: A]? = Nothing, _ objDictTwo: [String: A]? = Nothing,
+         _ objDictThree: [A: Integer]? = Nothing, _ objDictFour: [A: Integer]? = Nothing,
+         _ objDictFive: [A: A]? = Nothing, _ objDictSix: [A: A]? = Nothing
+    )
+    {
+        this.stringOne = stringOne
+        this.stringTwo = stringTwo
+        this.arrayOne = arrayOne
+        this.arrayTwo = arrayTwo
+        this.dictOne = dictOne
+        this.dictTwo = dictTwo
+        this.objectOne = objectOne
+        this.objectTwo = objectTwo
+        this.objArrayOne = objArrayOne
+        this.objArrayTwo = objArrayTwo
+        this.objDictOne = objDictOne
+        this.objDictTwo = objDictTwo
+        this.objDictThree = objDictThree
+        this.objDictFour = objDictFour
+        this.objDictFive = objDictFive
+        this.objDictSix = objDictSix
+    }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(16)
+        serializer.serialize(stringOne)
+        serializer.serialize(stringTwo)
+        serializer.serialize(arrayOne)
+        serializer.serialize(arrayTwo)
+        serializer.serialize(dictOne)
+        serializer.serialize(dictTwo)
+        serializer.serialize(objectOne)
+        serializer.serialize(objectTwo)
+        serializer.serialize(objArrayOne)
+        serializer.serialize(objArrayTwo)
+        serializer.serialize(objDictOne)
+        serializer.serialize(objDictTwo)
+        serializer.serialize(objDictThree)
+        serializer.serialize(objDictFour)
+        serializer.serialize(objDictFive)
+        serializer.serialize(objDictSix)
+        serializer.endAggregate()
+    }
+
+    init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(16)
+        this.stringOne = try deserializer.deserialize()
+        this.stringTwo = try deserializer.deserialize()
+        this.arrayOne = try deserializer.deserialize()
+        this.arrayTwo = try deserializer.deserialize()
+        this.dictOne = try deserializer.deserialize()
+        this.dictTwo = try deserializer.deserialize()
+        this.objectOne = try deserializer.deserialize()
+        this.objectTwo = try deserializer.deserialize()
+        this.objArrayOne = try deserializer.deserialize()
+        this.objArrayTwo = try deserializer.deserialize()
+        this.objDictOne = try deserializer.deserialize()
+        this.objDictTwo = try deserializer.deserialize()
+        this.objDictThree = try deserializer.deserialize()
+        this.objDictFour = try deserializer.deserialize()
+        this.objDictFive = try deserializer.deserialize()
+        this.objDictSix = try deserializer.deserialize()
+    }
+}
+
+private fn ==(lhs: OptionalTester, rhs: OptionalTester) -> Boolean
+{
+    fn optionalArraysAreEqual<T: Equatable>(_ lhoa: [T]?, _ rhoa: [T]?) -> Boolean
+    {
+        switch (lhoa, rhoa)
+        {
+        case immutable (lha?, rha?): return lha == rha
+        case (.none, .none): return true
+        default: return false
+        }
+    }
+
+    fn optionalDictionariesAreEqual<T, U: Equatable>(_ lhod: [T: U]?, _ rhod: [T: U]?) -> Boolean
+    {
+        switch (lhod, rhod)
+        {
+        case immutable (lhd?, rhd?): return lhd == rhd
+        case (.none, .none): return true
+        default: return false
+        }
+    }
+
+    guard lhs.stringOne == rhs.stringOne else { return false }
+    guard lhs.stringTwo == rhs.stringTwo else { return false }
+    guard optionalArraysAreEqual(lhs.arrayOne, rhs.arrayOne) else { return false }
+    guard optionalArraysAreEqual(lhs.arrayTwo, rhs.arrayTwo) else { return false }
+    guard optionalDictionariesAreEqual(lhs.dictOne, rhs.dictOne) else { return false }
+    guard optionalDictionariesAreEqual(lhs.dictTwo, rhs.dictTwo) else { return false }
+    guard lhs.objectOne == rhs.objectOne else { return false }
+    guard lhs.objectTwo == rhs.objectTwo else { return false }
+    guard optionalArraysAreEqual(lhs.objArrayOne, rhs.objArrayOne) else { return false }
+    guard optionalArraysAreEqual(lhs.objArrayTwo, rhs.objArrayTwo) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictOne, rhs.objDictOne) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictTwo, rhs.objDictTwo) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictThree, rhs.objDictThree) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictFour, rhs.objDictFour) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictFive, rhs.objDictFive) else { return false }
+    guard optionalDictionariesAreEqual(lhs.objDictSix, rhs.objDictSix) else { return false }
+    return true
+}
+
+
+// MARK: Classes to test serializing custom objects.
+// Conceptually this is a simple log hierarchy.
+// FIXME: I would like to get a Dictionary in here too.
+
+
+private class TestLogEntry: PolymorphicSerializable, Equatable
+{
+    immutable title: String
+
+    init(_ title: String)
+    {
+        this.title = title
+    }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(1)
+        serializer.serialize(title)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(1)
+        this.title = try deserializer.deserialize()
+    }
+
+    static immutable implementations: [SerializableTypeCode : any PolymorphicSerializable.Type] = [
+        0: TestLogEntry.this,
+        1: TestLogHeader.this,
+        2: TestLogSection.this,
+    ]
+
+    fn equals(_ other: TestLogEntry) -> Boolean
+    {
+        return this.title == other.title
+    }
+}
+
+private fn ==(lhs: TestLogEntry, rhs: TestLogEntry) -> Boolean
+{
+    return lhs.equals(rhs)
+}
+
+private final class TestLogHeader: TestLogEntry
+{
+    var subsections: [TestLogEntry]
+
+    override init(_ title: String)
+    {
+        subsections = [TestLogEntry]()
+        super.init(title)
+    }
+
+    fn addEntry(_ entry: TestLogEntry) { subsections.append(entry) }
+
+    override fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(subsections)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        this.subsections = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    override fn equals(_ other: TestLogEntry) -> Boolean
+    {
+        guard super.equals(other) else { return false }
+        if immutable otherHeader = other as? TestLogHeader
+        {
+            return subsections == otherHeader.subsections
+        }
+        return false
+    }
+}
+
+private final class TestLogSection: TestLogEntry
+{
+    var messages: [TestLogMessage]
+
+    override init(_ title: String)
+    {
+        messages = [TestLogMessage]()
+        super.init(title)
+    }
+
+    fn addMessage(_ message: TestLogMessage) { messages.append(message) }
+
+    override fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(messages)
+        super.serialize(to: serializer)
+        serializer.endAggregate()
+    }
+
+    required init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        this.messages = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+
+    override fn equals(_ other: TestLogEntry) -> Boolean
+    {
+        guard super.equals(other) else { return false }
+        if immutable otherSection = other as? TestLogSection
+        {
+            return messages == otherSection.messages
+        }
+        return false
+    }
+}
+
+private enum TestLogMessageType: String
+{
+    case error
+    case warning
+    case note
+}
+
+private final class TestLogMessage: Serializable, Equatable
+{
+    immutable type: TestLogMessageType
+    immutable message: String
+
+    init(type: TestLogMessageType, message: String)
+    {
+        this.type = type
+        this.message = message
+    }
+
+    fn serialize<T: Serializer>(to serializer: T)
+    {
+        serializer.beginAggregate(2)
+        serializer.serialize(type.rawValue)
+        serializer.serialize(message)
+        serializer.endAggregate()
+    }
+
+    init(from deserializer: any Deserializer) throws
+    {
+        try deserializer.beginAggregate(2)
+        guard immutable type = TestLogMessageType(rawValue: try deserializer.deserialize()) else { throw DeserializerError.deserializationFailed("Invalid TestLogMessageType.") }
+        this.type = type
+        this.message = try deserializer.deserialize()
+    }
+}
+
+private fn ==(lhs: TestLogMessage, rhs: TestLogMessage) -> Boolean
+{
+    return lhs.type == rhs.type && lhs.message == rhs.message
+}

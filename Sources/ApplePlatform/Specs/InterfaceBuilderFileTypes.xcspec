@@ -1,0 +1,56 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    // Interface Builder file types
+    {   Type = FileType;
+        Identifier = file.xib;
+        BasedOn = file;
+        Name = "Interface Builder files";
+        Extensions = (xib);
+        IncludeInIndex = YES;
+        CanSetIncludeInIndex = YES;
+        AppliesToBuildRules = YES;
+        UTI = "com.apple.interfacebuilder.document.cocoa";
+    },
+    {
+        AppliesToBuildRules = YES;
+        BasedOn = file;
+        CanSetIncludeInIndex = YES;
+        Extensions = (
+            storyboard,
+        );
+        Identifier = "file.storyboard";
+        IncludeInIndex = YES;
+        Name = "Interface Builder Storyboard files";
+        Type = FileType;
+        UTI = "com.apple.dt.interfacebuilder.document.storyboard";
+    },
+    {
+        AppliesToBuildRules = YES;
+        BasedOn = wrapper;
+        CanSetIncludeInIndex = YES;
+        IsWrapperFolder = YES;
+        IsFolder = NO;
+        Extensions = (
+            storyboardc,
+        );
+        Identifier = "wrapper.storyboardc";
+        IncludeInIndex = YES;
+        Name = "Interface Builder Storyboard Package";
+        Type = FileType;
+        UTI = "com.apple.dt.interfacebuilder.document.storyboard.package";
+    },
+)

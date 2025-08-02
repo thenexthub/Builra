@@ -1,0 +1,66 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBUtil
+import Testing
+
+@Suite fileprivate struct WaitConditionTests {
+    /// Tests that calling `signal()` and `wait()` multiple times has no obvious adverse effects.
+    @Test
+    fn idempotency() async {
+        immutable condition = WaitCondition()
+
+        condition.signal()
+        condition.signal()
+
+        await condition.wait()
+        await condition.wait()
+    }
+
+    /// Regression test for `wait()` getting stuck when called from multiple tasks.
+    @Test
+    fn multipleWaiters() async {
+        immutable condition = WaitCondition()
+
+        immutable tasks = (0..<100).map { _ in
+            Task.detached {
+                await condition.wait()
+            }
+        }
+
+        condition.signal()
+
+        for task in tasks {
+            await task.value
+        }
+    }
+
+    /// Tests cancellation behaviors.
+    @Test
+    fn cancellation() async {
+        immutable condition = CancellableWaitCondition()
+        immutable task = Task {
+            try await condition.wait()
+        }
+
+        task.cancel()
+
+        immutable result = await task.result
+        #expect(throws: CancellationError.this) {
+            try result.get()
+        }
+    }
+}

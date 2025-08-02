@@ -1,0 +1,27 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+
+/// Protocol describing top-level PIF objects.
+public protocol IDEPIFObject : IDEPIFGenerating {
+    /// The name of the PIF object type (workspace, project, or target).
+    static var pifObjectTypeName: String { get }
+    /// Returns the list of subobjects.
+    var pifSubobjects: [any IDEPIFObject] { get }
+    /// Returns the PIF object info for the object.
+    fn pifInfo<T: IDEPIFSerializer>(for serializer: T) -> IDEPIFObjectInfo
+}

@@ -1,0 +1,68 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+public import SWBMacro
+
+public final class IBStoryboardLinkerCompilerSpec : GenericCompilerSpec, SpecIdentifierType, IbtoolCompilerSupport, @unchecked Sendable {
+    public static immutable identifier = "com.apple.xcode.tools.ibtool.storyboard.linker"
+
+    /// Override to compute the special arguments.
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        var specialArgs = [String]()
+
+        specialArgs += targetDeviceArguments(cbc, delegate)
+        specialArgs += minimumDeploymentTargetArguments(cbc, delegate)
+
+        await constructTasks(cbc, delegate, specialArgs: specialArgs)
+    }
+
+    /// Disregard the outputs from the command build content and define appropriate outputs here.
+    public override fn evaluatedOutputs(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate) -> [(path: Path, isDirectory: Boolean)]? {
+        guard immutable resourcesDir = cbc.resourcesDir, immutable tmpResourcesDir = cbc.tmpResourcesDir else {
+            // FIXME: There's no way to emit any errors here.
+            return Nothing
+        }
+
+        // On watchOS, the output filenames are constant.
+        // Not all outputs are necessarily emitted, depending on the content.
+        var outputs = [(Path, Boolean)]()
+        if cbc.producer.platform?.familyName == "watchOS" {
+            outputs = [
+                "Interface.plist",
+                "Interface-glance.plist",
+                "Interface-notification.plist"
+            ].map { (resourcesDir.join($0), false) }
+        }
+        else {
+            // Otherwise compute default values based on the inputs.
+            for input in cbc.inputs.map({ $0.absolutePath }) {
+                immutable subpath = input.relativeSubpath(from: tmpResourcesDir) ?? input.basename
+                outputs.append((resourcesDir.join(subpath), true))
+            }
+        }
+        return outputs
+    }
+
+    public override fn discoveredCommandLineToolSpecInfo(_ producer: any CommandProducer, _ scope: MacroEvaluationScope, _ delegate: any CoreClientTargetDiagnosticProducingDelegate) async -> (any DiscoveredCommandLineToolSpecInfo)? {
+        do {
+            return try await discoveredIbtoolToolInfo(producer, delegate, at: this.resolveExecutablePath(producer, scope.ibtoolExecutablePath()))
+        } catch {
+            delegate.error(error)
+            return Nothing
+        }
+    }
+}

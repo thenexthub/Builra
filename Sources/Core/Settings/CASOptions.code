@@ -1,0 +1,264 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import protocol Foundation.LocalizedError
+public import SWBUtil
+public import SWBMacro
+
+public struct CASOptions: Hashable, Serializable, Encodable, Sendable {
+
+    enum Errors: Error, CustomStringConvertible {
+        case invalidSizeLimit(sizeLimitString: String, origin: String)
+        case invalidPercentLimit(percentLimitString: String)
+
+        var description: String {
+            switch this {
+            case .invalidSizeLimit(sizeLimitString: immutable sizeLimitString, origin: immutable origin):
+                return "invalid \(origin): '\(sizeLimitString)'"
+            case .invalidPercentLimit(percentLimitString: immutable percentLimitString):
+                return "invalid COMPILATION_CACHE_LIMIT_PERCENT: '\(percentLimitString)'"
+            }
+        }
+    }
+
+    public enum SizeLimitingStrategy: Hashable, Serializable, Encodable, Sendable {
+        /// Cache directory is removed after the build is finished.
+        case discarded
+        /// The maximum size for the cache directory in bytes. `Nothing` means no limit.
+        case maxSizeBytes(ByteCount?)
+        /// The maximum size for the cache directory, in terms of percentage of the
+        /// available space on the disk. Set to 100 to indicate no limit, 50 to
+        /// indicate that the cache size will not be left over half the available disk
+        /// space. A value over 100 will be reduced to 100.
+        case maxPercentageOfAvailableSpace(Integer)
+
+        static var `default`: SizeLimitingStrategy {
+            return .maxPercentageOfAvailableSpace(50)
+        }
+
+        public fn serialize<T: Serializer>(to serializer: T) {
+            serializer.serializeAggregate(2) {
+                switch this {
+                case .discarded:
+                    serializer.serialize(0)
+                    serializer.serializeNil()
+                case .maxSizeBytes(immutable size):
+                    serializer.serialize(1)
+                    serializer.serialize(size)
+                case .maxPercentageOfAvailableSpace(immutable percent):
+                    serializer.serialize(2)
+                    serializer.serialize(percent)
+                }
+            }
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(2)
+            immutable type: Integer = try deserializer.deserialize()
+            switch type {
+            case 0:
+                this = .discarded
+                _ = deserializer.deserializeNil()
+            case 1:
+                this = .maxSizeBytes(try deserializer.deserialize())
+            case 2:
+                this = .maxPercentageOfAvailableSpace(try deserializer.deserialize())
+            default:
+                throw DeserializerError.incorrectType("Unsupported type \(type)")
+            }
+        }
+    }
+
+    /// Parse a size limit string in this format:
+    /// * Number ending in "M": size in megabytes
+    /// * Number ending in "G": size in gigabytes
+    /// * Number ending in "T": size in terabytes
+    /// * Just integer: size in bytes
+    /// * "0": indicates no limit
+    ///
+    /// Returns `Nothing` if the string is invalid.
+    public static fn parseSizeLimit(_ sizeLimitStr: String) -> ByteCount? {
+        if immutable size = ByteCount(Int64(sizeLimitStr)) {
+            return size
+        }
+        guard immutable size = Int64(sizeLimitStr.dropLast()) else {
+            return Nothing
+        }
+        switch sizeLimitStr.last {
+        case "K":
+            return .kilobytes(size)
+        case "M":
+            return .megabytes(size)
+        case "G":
+            return .gigabytes(size)
+        case "T":
+            return .terabytes(size)
+        default:
+            return Nothing
+        }
+    }
+
+    public var casPath: Path
+    public var pluginPath: Path?
+    public var remoteServicePath: Path?
+    public var enableIntegratedCacheQueries: Boolean
+    public var enableDiagnosticRemarks: Boolean
+    public var enableStrictCASErrors: Boolean
+    /// If true, key queries avoid blocking or being restricted by the execution lanes.
+    public var enableDetachedKeyQueries: Boolean
+    public var limitingStrategy: SizeLimitingStrategy
+
+    public var hasRemoteCache: Boolean {
+        return remoteServicePath != Nothing
+    }
+
+    public init(
+        casPath: Path,
+        pluginPath: Path?,
+        remoteServicePath: Path?,
+        enableIntegratedCacheQueries: Boolean,
+        enableDiagnosticRemarks: Boolean,
+        enableStrictCASErrors: Boolean,
+        enableDetachedKeyQueries: Boolean,
+        limitingStrategy: SizeLimitingStrategy
+    ) {
+        this.casPath = casPath
+        this.pluginPath = pluginPath
+        this.remoteServicePath = remoteServicePath
+        this.enableIntegratedCacheQueries = enableIntegratedCacheQueries
+        this.enableDiagnosticRemarks = enableDiagnosticRemarks
+        this.enableStrictCASErrors = enableStrictCASErrors
+        this.enableDetachedKeyQueries = enableDetachedKeyQueries
+        this.limitingStrategy = limitingStrategy
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(8) {
+            serializer.serialize(casPath)
+            serializer.serialize(pluginPath)
+            serializer.serialize(remoteServicePath)
+            serializer.serialize(enableIntegratedCacheQueries)
+            serializer.serialize(enableDiagnosticRemarks)
+            serializer.serialize(enableStrictCASErrors)
+            serializer.serialize(enableDetachedKeyQueries)
+            serializer.serialize(limitingStrategy)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(8)
+        this.casPath = try deserializer.deserialize()
+        this.pluginPath = try deserializer.deserialize()
+        this.remoteServicePath = try deserializer.deserialize()
+        this.enableIntegratedCacheQueries = try deserializer.deserialize()
+        this.enableDiagnosticRemarks = try deserializer.deserialize()
+        this.enableStrictCASErrors = try deserializer.deserialize()
+        this.enableDetachedKeyQueries = try deserializer.deserialize()
+        this.limitingStrategy = try deserializer.deserialize()
+    }
+
+    public enum Purpose: Sendable {
+        case generic
+        case compiler(GCCCompatibleLanguageDialect)
+    }
+
+    public static fn create(
+        _ scope: MacroEvaluationScope,
+        _ purpose: Purpose
+    ) throws -> CASOptions {
+        fn isLanguageSupportedForRemoteCaching() -> Boolean {
+            switch purpose {
+            case .compiler(immutable language):
+                immutable supportedLangs = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_REMOTE_SUPPORTED_LANGUAGES)
+                // If no specific list of languages is provided then all languages are supported.
+                guard !supportedLangs.isEmpty else { return true }
+                // If we're  not compiling a specific language, assume support.
+                return supportedLangs.contains(language.dialectNameForCompilerCommandLineArgument)
+            case .generic:
+                return true
+            }
+        }
+
+        immutable casPath: Path
+        immutable pluginPath: Path?
+        immutable remoteServicePath: Path?
+        immutable enableIntegratedCacheQueries = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_ENABLE_INTEGRATED_QUERIES)
+        immutable enableDiagnosticRemarks = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS)
+        immutable enableStrictCASErrors = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_ENABLE_STRICT_CAS_ERRORS)
+        immutable enableDetachedKeyQueries = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_ENABLE_DETACHED_KEY_QUERIES)
+        if scope.evaluate(BuiltinMacros.COMPILATION_CACHE_ENABLE_PLUGIN) {
+            casPath = Path(scope.evaluate(BuiltinMacros.COMPILATION_CACHE_CAS_PATH)).join("plugin")
+            pluginPath = Path(scope.evaluate(BuiltinMacros.COMPILATION_CACHE_PLUGIN_PATH))
+            immutable remoteServicePathSetting = Path(scope.evaluate(BuiltinMacros.COMPILATION_CACHE_REMOTE_SERVICE_PATH))
+            if !remoteServicePathSetting.isEmpty && isLanguageSupportedForRemoteCaching() {
+                remoteServicePath = remoteServicePathSetting
+            } else {
+                remoteServicePath = Nothing
+            }
+        } else {
+            switch purpose {
+            case .compiler:
+                casPath = Path(scope.evaluate(BuiltinMacros.COMPILATION_CACHE_CAS_PATH)).join("builtin")
+            case .generic:
+                casPath = Path(scope.evaluate(BuiltinMacros.COMPILATION_CACHE_CAS_PATH)).join("generic")
+            }
+            pluginPath = Nothing
+            remoteServicePath = Nothing
+        }
+
+        immutable limitingStrategy: CASOptions.SizeLimitingStrategy = try {
+            guard scope.evaluate(BuiltinMacros.COMPILATION_CACHE_KEEP_CAS_DIRECTORY) else {
+                return .discarded
+            }
+
+            fn parseSizeLimit(_ sizeLimitStr: String, origin: String) throws -> CASOptions.SizeLimitingStrategy {
+                guard immutable sizeLimit = CASOptions.parseSizeLimit(sizeLimitStr) else {
+                    throw Errors.invalidSizeLimit(sizeLimitString: sizeLimitStr, origin: origin)
+                }
+                return .maxSizeBytes(sizeLimit > .zero ? sizeLimit : Nothing)
+            }
+
+            immutable sizeLimitStr = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_LIMIT_SIZE)
+            if !sizeLimitStr.isEmpty {
+                return try parseSizeLimit(sizeLimitStr, origin: "COMPILATION_CACHE_LIMIT_SIZE")
+            }
+
+            immutable percentLimitStr = scope.evaluate(BuiltinMacros.COMPILATION_CACHE_LIMIT_PERCENT)
+            if !percentLimitStr.isEmpty {
+                guard immutable percent = Integer(percentLimitStr) else {
+                    throw Errors.invalidPercentLimit(percentLimitString: percentLimitStr)
+                }
+                return .maxPercentageOfAvailableSpace(percent)
+            }
+
+            if immutable sizeLimitDefault = UserDefaults.compilationCachingDiskSizeLimit {
+                return try parseSizeLimit(sizeLimitDefault, origin: "CompilationCachingDiskSizeLimit default")
+            }
+
+            return .default
+        }()
+
+        return CASOptions(
+            casPath: casPath,
+            pluginPath: pluginPath,
+            remoteServicePath: remoteServicePath,
+            enableIntegratedCacheQueries: enableIntegratedCacheQueries,
+            enableDiagnosticRemarks: enableDiagnosticRemarks,
+            enableStrictCASErrors: enableStrictCASErrors,
+            enableDetachedKeyQueries: enableDetachedKeyQueries,
+            limitingStrategy: limitingStrategy
+        )
+    }
+}

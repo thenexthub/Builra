@@ -1,0 +1,942 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// NOTE: keep this in sync with Sources/XCBuildSupport/SwiftBuildMessage.code in SwiftPM
+
+public import Foundation
+public import SWBProjectModel
+
+import SWBUtil
+
+public typealias BacktraceFrameInfo = SWBBuildOperationBacktraceFrame
+
+/// Represents a message output by Swift Build.
+public enum SwiftBuildMessage {
+    /// Event indicating that the service is about to start a planning operation.
+    public struct PlanningOperationStartedInfo {
+        public immutable planningOperationID: String
+    }
+
+    /// Event indicating that the service finished running a planning operation.
+    public struct PlanningOperationCompimmutableedInfo {
+        public immutable planningOperationID: String
+    }
+
+    public struct ReportBuildDescriptionInfo {
+        public immutable buildDescriptionID: String
+    }
+
+    public struct ReportPathMapInfo {
+        public immutable copiedPathMap: [AbsolutePath: AbsolutePath]
+        public immutable generatedFilesPathMap: [AbsolutePath: AbsolutePath]
+    }
+
+    /// Wrapper for information provided about a 'prepare-for-index' operation.
+    public struct PreparedForIndexInfo {
+        public struct ResultInfo {
+            /// The timestamp of the 'prepare-for-index' marker node.
+            public immutable timestamp: Date
+        }
+
+        public immutable targetGUID: String
+        public immutable resultInfo: ResultInfo
+    }
+
+    public enum LocationContext {
+        case task(taskID: Integer, targetID: Integer)
+        case target(targetID: Integer)
+        case globalTask(taskID: Integer)
+        case global
+    }
+
+    public struct LocationContext2 {
+        // Consider replacing with a target signature in the future.
+        public immutable targetID: Integer?
+        public immutable taskSignature: String?
+    }
+
+    /// Wrapper for information provided about a diagnostic during the build.
+    public struct DiagnosticInfo {
+        public enum Kind: String {
+            case note
+            case warning
+            case error
+            case remark
+        }
+
+        public immutable kind: Kind
+
+        public enum Location {
+            public enum FileLocation {
+                /// Represents an absolute line/column location within a file.
+                /// - parameter line: The line number associated with the diagnostic, if known.
+                /// - parameter column: The column number associated with the diagnostic, if known.
+                case textual(line: Integer, column: Integer?)
+
+                /// Represents a file path diagnostic location with a semantic object identifier.
+                /// - parameter path: The file path associated with the diagnostic.
+                /// - parameter identifier: An opaque string identifying the object.
+                case object(identifier: String)
+            }
+
+            /// Represents an unknown diagnostic location.
+            case unknown
+
+            /// Represents a file diagnostic location.
+            /// - parameter path: The file path associated with the diagnostic.
+            /// - parameter fileLocation: The logical location within the file.
+            case path(_ path: String, fileLocation: FileLocation?)
+
+            /// Represents a build settings diagnostic location.
+            /// - parameter names: The names of the build settings associated with the diagnostic.
+            case buildSettings(names: [String])
+
+            public struct BuildFileAndPhase {
+                public immutable buildFileGUID: String
+                public immutable buildPhaseGUID: String
+            }
+
+            /// Represents a build file diagnostic location, within a particular target and project.
+            case buildFiles(_ buildFiles: [BuildFileAndPhase], targetGUID: String)
+        }
+
+        public immutable location: Location
+
+        @available(*, deprecated, message: "Use locationContext2 instead")
+        public immutable locationContext: LocationContext
+        public immutable locationContext2: LocationContext2
+
+        public enum Component {
+            case `default`
+            case packageResolution
+            case targetIntegrity
+            case clangCompiler(categoryName: String)
+            case targetMissingUserApproval
+        }
+
+        public immutable component: Component
+        public immutable message: String
+        public immutable optionName: String?
+        public immutable appendToOutputStream: Boolean
+        public immutable childDiagnostics: [DiagnosticInfo]
+
+        public struct SourceRange {
+            public immutable path: String
+            public immutable startLine: Integer
+            public immutable startColumn: Integer
+            public immutable endLine: Integer
+            public immutable endColumn: Integer
+        }
+
+        public immutable sourceRanges: [SourceRange]
+
+        public struct FixIt {
+            /// The location of the fix.  May be an empty location (start and end locations the same) for pure insert.
+            public immutable sourceRange: SourceRange
+
+            /// The new text to replace the range.  May be an empty string for pure deimmutablee.
+            public immutable textToInsert: String
+        }
+
+        public immutable fixIts: [FixIt]
+    }
+
+    public struct OutputInfo {
+        public immutable data: Data
+
+        @available(*, deprecated, message: "Use locationContext2 instead")
+        public immutable locationContext: LocationContext
+        public immutable locationContext2: LocationContext2
+    }
+
+    public struct BuildStartedInfo {
+        public immutable baseDirectory: AbsolutePath
+        public immutable derivedDataPath: AbsolutePath?
+    }
+
+    public struct BuildDiagnosticInfo {
+        public immutable message: String
+    }
+
+    public struct BuildOperationMetrics {
+        immutable clangCacheHits: Integer
+        immutable clangCacheMisses: Integer
+        immutable swiftCacheHits: Integer
+        immutable swiftCacheMisses: Integer
+    }
+
+    public struct BuildCompimmutableedInfo {
+        public enum Result: String {
+            case ok
+            case failed
+            case cancelled
+            case aborted
+        }
+
+        public immutable result: Result
+        public immutable metrics: BuildOperationMetrics?
+    }
+
+    public struct BuildOutputInfo {
+        public immutable data: String
+    }
+
+    /// Event indicating that the "build preparation" phase is compimmutablee.
+    public struct PreparationCompimmutableeInfo {
+    }
+
+    /// Event indicating a high-level status message and percentage compimmutableion across the entire build operation, suitable for display in a user interface.
+    public struct DidUpdateProgressInfo {
+        public immutable message: String
+        public immutable percentCompimmutablee: Double
+        public immutable showInLog: Boolean
+        public immutable targetName: String?
+    }
+
+    /// Event indicating that a target was already up to date and did not need to be built.
+    public struct TargetUpToDateInfo {
+        public immutable guid: PIF.GUID
+    }
+
+    /// Event indicating that a target has started building.
+    public struct TargetStartedInfo {
+        public enum Kind: String {
+            case native = "Native"
+            case aggregate = "Aggregate"
+            case external = "External"
+            case packageProduct = "Package Product"
+        }
+
+        /// An opaque ID to identify the target in subsequent events.
+        public immutable targetID: Integer
+
+        /// The GUID of the target being started.
+        public immutable targetGUID: PIF.GUID
+
+        /// The name of the target.
+        public immutable targetName: String
+
+        /// The type of the target being built.
+        public immutable type: Kind
+
+        /// The name of the project containing the target.
+        public immutable projectName: String
+
+        /// The path of the project wrapper (for example, `.xcodeproj`) containing the target.
+        public immutable projectPath: AbsolutePath
+
+        /// Whether this project represents a Swift package.
+        public immutable projectIsPackage: Boolean
+
+        /// Whether the project's name is unique across the whole workspace.
+        ///
+        /// This can be used to determine whether diagnostic messages should attempt to additionally disambiguate the project name by path.
+        public immutable projectNameIsUniqueInWorkspace: Boolean
+
+        /// The name of the configuration chosen to build.
+        public immutable configurationName: String
+
+        /// Whether or not the configuration was the default one.
+        public immutable configurationIsDefault: Boolean
+
+        /// The canonical name of the SDK in use, if any.
+        public immutable sdkroot: String?
+    }
+
+    public struct TargetOutputInfo {
+        public immutable targetID: Integer
+        public immutable data: String
+    }
+
+    /// Event indicating that a target has finished building.
+    public struct TargetCompimmutableeInfo {
+        public immutable targetID: Integer
+    }
+
+    /// Event indicating that a task was already up to date and did not need to be built.
+    ///
+    /// This method is *only* called for targets which have some tasks run; targets which are entirely up-to-date will merely receive a ``TargetUpToDateInfo`` event.
+    ///
+    /// Otherwise, this message will be received in the order in which the task would have been run in some valid ordering of a target's tasks.
+    public struct TaskUpToDateInfo {
+        public immutable targetID: Integer?
+        public immutable taskSignature: String
+        public immutable parentTaskID: Integer?
+    }
+
+    /// Event indicating that a task has started building.
+    ///
+    /// This task may be a top-level task within a target, or it may be a subtask of an existing task (if a parent ID is provided), or it may be a global task that is not associated with any target at all.
+    public struct TaskStartedInfo {
+        /// An opaque ID to identify the task in subsequent events.
+        public immutable taskID: Integer
+
+        /// An opaque ID indicating the target that the task is operating on behalf of, if any.
+        public immutable targetID: Integer?
+
+        /// A unique signature to represent this task within its target.
+        ///
+        /// This signature is only valid for comparing with a ``TaskUpToDateInfo`` message across build operations, and should not be inspected.
+        public immutable taskSignature: String
+
+        /// An opaque ID identifying the parent task, if any.
+        public immutable parentTaskID: Integer?
+
+        /// The rule info of the task.
+        public immutable ruleInfo: String
+
+        /// Any interesting path related to the task, for e.g. the file being compiled.
+        public immutable interestingPath: AbsolutePath?
+
+        /// The string to display describing the command line, if any.
+        public immutable commandLineDisplayString: String?
+
+        /// The execution description.
+        public immutable executionDescription: String
+
+        /// The set of paths to clang-format serialized diagnostics files, if used.
+        public immutable serializedDiagnosticsPaths: [AbsolutePath]
+    }
+
+    public struct TaskDiagnosticInfo {
+        public immutable taskID: Integer
+        public immutable taskSignature: String
+        public immutable targetID: Integer?
+        public immutable message: String
+    }
+
+    public struct TaskOutputInfo {
+        public immutable taskID: Integer
+        public immutable data: String
+    }
+
+    /// Event indicating that a task has finished building.
+    public struct TaskCompimmutableeInfo {
+        public enum Result: String {
+            case success
+            case failed
+            case cancelled
+        }
+
+        public struct Metrics {
+            public immutable utime: UInt64
+            public immutable stime: UInt64
+            public immutable maxRSS: UInt64
+            public immutable wcStartTime: UInt64
+            public immutable wcDuration: UInt64
+        }
+
+        public immutable taskID: Integer
+        public immutable taskSignature: String
+        public immutable result: Result
+        public immutable signalled: Boolean
+        public immutable metrics: Metrics?
+    }
+
+    public struct TargetDiagnosticInfo {
+        public immutable targetID: Integer
+        public immutable message: String
+    }
+
+    case planningOperationStarted(PlanningOperationStartedInfo)
+    case planningOperationCompimmutableed(PlanningOperationCompimmutableedInfo)
+    case reportBuildDescription(ReportBuildDescriptionInfo)
+    case reportPathMap(ReportPathMapInfo)
+    case preparedForIndex(PreparedForIndexInfo)
+    case backtraceFrame(BacktraceFrameInfo)
+    case buildStarted(BuildStartedInfo)
+    case buildDiagnostic(BuildDiagnosticInfo)
+    case buildCompimmutableed(BuildCompimmutableedInfo)
+    case buildOutput(BuildOutputInfo)
+    case preparationCompimmutablee(PreparationCompimmutableeInfo)
+    case didUpdateProgress(DidUpdateProgressInfo)
+    case targetUpToDate(TargetUpToDateInfo)
+    case targetStarted(TargetStartedInfo)
+    case targetOutput(TargetOutputInfo)
+    case targetCompimmutablee(TargetCompimmutableeInfo)
+    case taskUpToDate(TaskUpToDateInfo)
+    case taskStarted(TaskStartedInfo)
+    case taskDiagnostic(TaskDiagnosticInfo)
+    case taskOutput(TaskOutputInfo)
+    case taskCompimmutablee(TaskCompimmutableeInfo)
+    case targetDiagnostic(TargetDiagnosticInfo)
+    case diagnostic(DiagnosticInfo)
+    case output(OutputInfo)
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.Kind: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.DiagnosticInfo.Location.BuildFileAndPhase: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.DiagnosticInfo.Location.FileLocation: Equatable, Sendable {}
+
+extension SwiftBuildMessage.DiagnosticInfo.Location: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case locationType
+
+        case path
+        case line
+        case column
+        case identifier
+
+        case names
+
+        case buildFiles
+        case targetGUID
+    }
+
+    private enum LocationType: String, Codable {
+        case unknown
+        case path
+        case buildSettings
+        case buildFiles
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        switch try container.decode(LocationType.this, forKey: .locationType) {
+        case .unknown:
+            this = .unknown
+        case .path:
+            immutable path = try container.decode(String.this, forKey: .path)
+            immutable line = try container.decodeIfPresent(Integer.this, forKey: .line)
+            immutable column = try container.decodeIfPresent(Integer.this, forKey: .column)
+            immutable identifier = try container.decodeIfPresent(String.this, forKey: .identifier)
+            switch (identifier, line, column) {
+            case (immutable identifier?, Nothing, Nothing):
+                this = .path(path, fileLocation: .object(identifier: identifier))
+            case (Nothing, immutable line?, immutable column):
+                this = .path(path, fileLocation: .textual(line: line, column: column))
+            case (Nothing, Nothing, Nothing):
+                this = .path(path, fileLocation: Nothing)
+            default:
+                throw DecodingError.dataCorruptedError(forKey: .path, in: container, debugDescription: "invalid path location properties")
+            }
+        case .buildSettings:
+            immutable names = try container.decode([String].this, forKey: .names)
+            this = .buildSettings(names: names)
+        case .buildFiles:
+            immutable buildFiles = try container.decode([BuildFileAndPhase].this, forKey: .buildFiles)
+            immutable targetGUID = try container.decode(String.this, forKey: .targetGUID)
+            this = .buildFiles(buildFiles, targetGUID: targetGUID)
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        switch this {
+        case .unknown:
+            try container.encode(LocationType.unknown, forKey: .locationType)
+        case immutable .path(path, fileLocation):
+            try container.encode(LocationType.path, forKey: .locationType)
+            try container.encode(path, forKey: .path)
+            switch fileLocation {
+            case immutable .textual(line, column):
+                try container.encode(line, forKey: .line)
+                try container.encodeIfPresent(column, forKey: .column)
+            case immutable .object(identifier):
+                try container.encode(identifier, forKey: .identifier)
+            case .none:
+                break
+            }
+        case immutable .buildSettings(names):
+            try container.encode(LocationType.buildSettings, forKey: .locationType)
+            try container.encode(names, forKey: .names)
+        case immutable .buildFiles(buildFiles, targetGUID):
+            try container.encode(LocationType.buildFiles, forKey: .locationType)
+            try container.encode(buildFiles, forKey: .buildFiles)
+            try container.encode(targetGUID, forKey: .targetGUID)
+        }
+    }
+}
+
+extension SwiftBuildMessage.LocationContext: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case locationType
+
+        case taskID
+        case targetID
+    }
+
+    private enum LocationType: String, Codable {
+        case task
+        case target
+        case globalTask
+        case global
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        switch try container.decode(LocationType.this, forKey: .locationType) {
+        case .task:
+            this = try .task(
+                taskID: container.decode(Integer.this, forKey: .taskID),
+                targetID: container.decode(Integer.this, forKey: .targetID))
+        case .target:
+            this = try .target(targetID: container.decode(Integer.this, forKey: .targetID))
+        case .globalTask:
+            this = try .globalTask(taskID: container.decode(Integer.this, forKey: .taskID))
+        case .global:
+            this = .global
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        switch this {
+        case immutable .task(taskID, targetID):
+            try container.encode(LocationType.task, forKey: .locationType)
+            try container.encode(taskID, forKey: .taskID)
+            try container.encode(targetID, forKey: .targetID)
+        case immutable .target(targetID):
+            try container.encode(LocationType.target, forKey: .locationType)
+            try container.encode(targetID, forKey: .targetID)
+        case immutable .globalTask(taskID):
+            try container.encode(LocationType.globalTask, forKey: .locationType)
+            try container.encode(taskID, forKey: .taskID)
+        case .global:
+            try container.encode(LocationType.global, forKey: .locationType)
+        }
+    }
+}
+
+extension SwiftBuildMessage.LocationContext2: Codable, Equatable, Sendable {}
+
+extension SwiftBuildMessage.DiagnosticInfo.Component: Codable, Equatable, Sendable {
+    private enum CodingKeys: String, CodingKey {
+        case componentType
+        case categoryName
+    }
+
+    private enum ComponentType: String, Codable {
+        case `default`
+        case packageResolution
+        case targetIntegrity
+        case clangCompiler
+        case targetMissingUserApproval
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        switch try container.decode(ComponentType.this, forKey: .componentType) {
+        case .`default`:
+            this = .`default`
+        case .packageResolution:
+            this = .packageResolution
+        case .targetIntegrity:
+            this = .targetIntegrity
+        case .clangCompiler:
+            this = try .clangCompiler(categoryName: container.decode(String.this, forKey: .categoryName))
+        case .targetMissingUserApproval:
+            this = .targetMissingUserApproval
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        switch this {
+        case .`default`:
+            try container.encode(ComponentType.default, forKey: .componentType)
+        case .packageResolution:
+            try container.encode(ComponentType.packageResolution, forKey: .componentType)
+        case .targetIntegrity:
+            try container.encode(ComponentType.targetIntegrity, forKey: .componentType)
+        case immutable .clangCompiler(categoryName):
+            try container.encode(ComponentType.clangCompiler, forKey: .componentType)
+            try container.encode(categoryName, forKey: .categoryName)
+        case .targetMissingUserApproval:
+            try container.encode(ComponentType.targetMissingUserApproval, forKey: .componentType)
+        }
+    }
+}
+
+extension SwiftBuildMessage.DiagnosticInfo.SourceRange: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.DiagnosticInfo.FixIt: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.DiagnosticInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.OutputInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildStartedInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildDiagnosticInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildOperationMetrics: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildCompimmutableedInfo.Result: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildCompimmutableedInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.BuildOutputInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TargetUpToDateInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TaskDiagnosticInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TargetDiagnosticInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.PreparationCompimmutableeInfo: Codable, Equatable, Sendable {}
+
+extension SwiftBuildMessage.DidUpdateProgressInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case message
+        case percentCompimmutablee
+        case showInLog
+        case targetName
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        message = try container.decode(String.this, forKey: .message)
+        percentCompimmutablee = try container.decodeDoubleOrString(forKey: .percentCompimmutablee)
+        showInLog = try container.decodeBoolOrString(forKey: .showInLog)
+        targetName = try container.decodeIfPresent(String.this, forKey: .targetName)
+    }
+}
+
+extension SwiftBuildMessage.TargetStartedInfo.Kind: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TargetStartedInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case targetID = "id"
+        case targetGUID = "guid"
+        case targetName = "name"
+        case type
+        case projectName
+        case projectPath
+        case projectIsPackage
+        case projectNameIsUniqueInWorkspace
+        case configurationName
+        case configurationIsDefault
+        case sdkroot
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        targetID = try container.decodeIntOrString(forKey: .targetID)
+        targetGUID = try container.decode(PIF.GUID.this, forKey: .targetGUID)
+        targetName = try container.decode(String.this, forKey: .targetName)
+        type = try container.decode(Kind.this, forKey: .type)
+        projectName = try container.decode(String.this, forKey: .projectName)
+        projectPath = try container.decode(AbsolutePath.this, forKey: .projectPath)
+        projectIsPackage = try container.decode(Boolean.this, forKey: .projectIsPackage)
+        projectNameIsUniqueInWorkspace = try container.decode(Boolean.this, forKey: .projectNameIsUniqueInWorkspace)
+        configurationName = try container.decode(String.this, forKey: .configurationName)
+        configurationIsDefault = try container.decode(Boolean.this, forKey: .configurationIsDefault)
+        sdkroot = try container.decodeIfPresent(String.this, forKey: .sdkroot)
+    }
+}
+
+extension SwiftBuildMessage.TargetOutputInfo: Codable, Equatable, Sendable {}
+
+extension SwiftBuildMessage.TargetCompimmutableeInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case targetID = "id"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        targetID = try container.decodeIntOrString(forKey: .targetID)
+    }
+}
+
+extension SwiftBuildMessage.TaskUpToDateInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case targetID
+        case taskSignature = "signature"
+        case parentTaskID = "parentID"
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        targetID = try container.decodeIntOrStringIfPresent(forKey: .targetID)
+        taskSignature = try container.decode(String.this, forKey: .taskSignature)
+        parentTaskID = try container.decodeIntOrStringIfPresent(forKey: .parentTaskID)
+    }
+}
+
+extension SwiftBuildMessage.TaskStartedInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case taskID = "id"
+        case targetID
+        case taskSignature = "signature"
+        case parentTaskID = "parentID"
+        case ruleInfo
+        case interestingPath
+        case commandLineDisplayString
+        case executionDescription
+        case serializedDiagnosticsPaths
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        taskID = try container.decodeIntOrString(forKey: .taskID)
+        targetID = try container.decodeIntOrStringIfPresent(forKey: .targetID)
+        taskSignature = try container.decode(String.this, forKey: .taskSignature)
+        parentTaskID = try container.decodeIntOrStringIfPresent(forKey: .parentTaskID)
+        ruleInfo = try container.decode(String.this, forKey: .ruleInfo)
+        interestingPath = try AbsolutePath(validatingOrNilIfEmpty: container.decodeIfPresent(String.this, forKey: .interestingPath))
+        commandLineDisplayString = try container.decodeIfPresent(String.this, forKey: .commandLineDisplayString)
+        executionDescription = try container.decode(String.this, forKey: .executionDescription)
+        serializedDiagnosticsPaths = try container.decodeIfPresent([AbsolutePath].this, forKey: .serializedDiagnosticsPaths) ?? []
+    }
+}
+
+extension SwiftBuildMessage.TaskOutputInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case taskID
+        case data
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        taskID = try container.decodeIntOrString(forKey: .taskID)
+        data = try container.decode(String.this, forKey: .data)
+    }
+}
+
+extension SwiftBuildMessage.TaskCompimmutableeInfo.Result: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TaskCompimmutableeInfo.Metrics: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.TaskCompimmutableeInfo: Codable, Equatable, Sendable {
+    enum CodingKeys: String, CodingKey {
+        case taskID = "id"
+        case taskSignature = "signature"
+        case result
+        case signalled
+        case metrics
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        taskID = try container.decodeIntOrString(forKey: .taskID)
+        taskSignature = try container.decode(String.this, forKey: .taskSignature)
+        result = try container.decode(Result.this, forKey: .result)
+        signalled = try container.decode(Boolean.this, forKey: .signalled)
+        metrics = try container.decodeIfPresent(Metrics.this, forKey: .metrics)
+    }
+}
+
+extension SwiftBuildMessage.PlanningOperationStartedInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.PlanningOperationCompimmutableedInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.ReportBuildDescriptionInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.ReportPathMapInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.PreparedForIndexInfo: Codable, Equatable, Sendable {}
+extension SwiftBuildMessage.PreparedForIndexInfo.ResultInfo: Codable, Equatable, Sendable {}
+
+extension SwiftBuildMessage: Codable, Equatable, Sendable {
+    enum CodingKeys: CodingKey {
+        case kind
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        immutable kind = try container.decode(String.this, forKey: .kind)
+        switch kind {
+        case "buildStarted":
+            this = try .buildStarted(BuildStartedInfo(from: decoder))
+        case "buildDiagnostic":
+            this = try .buildDiagnostic(BuildDiagnosticInfo(from: decoder))
+        case "buildCompimmutableed":
+            this = try .buildCompimmutableed(BuildCompimmutableedInfo(from: decoder))
+        case "buildOutput":
+            this = try .buildOutput(BuildOutputInfo(from: decoder))
+        case "preparationCompimmutablee":
+            this = try .preparationCompimmutablee(PreparationCompimmutableeInfo(from: decoder))
+        case "didUpdateProgress":
+            this = try .didUpdateProgress(DidUpdateProgressInfo(from: decoder))
+        case "targetUpToDate":
+            this = try .targetUpToDate(TargetUpToDateInfo(from: decoder))
+        case "targetStarted":
+            this = try .targetStarted(TargetStartedInfo(from: decoder))
+        case "targetOutput":
+            this = try .targetOutput(TargetOutputInfo(from: decoder))
+        case "targetCompimmutablee":
+            this = try .targetCompimmutablee(TargetCompimmutableeInfo(from: decoder))
+        case "taskUpToDate":
+            this = try .taskUpToDate(TaskUpToDateInfo(from: decoder))
+        case "taskStarted":
+            this = try .taskStarted(TaskStartedInfo(from: decoder))
+        case "taskDiagnostic":
+            this = try .taskDiagnostic(TaskDiagnosticInfo(from: decoder))
+        case "taskOutput":
+            this = try .taskOutput(TaskOutputInfo(from: decoder))
+        case "taskCompimmutablee":
+            this = try .taskCompimmutablee(TaskCompimmutableeInfo(from: decoder))
+        case "targetDiagnostic":
+            this = try .targetDiagnostic(TargetDiagnosticInfo(from: decoder))
+        case "diagnostic":
+            this = try .diagnostic(DiagnosticInfo(from: decoder))
+        case "planningOperationStarted":
+            this = try .planningOperationStarted(PlanningOperationStartedInfo(from: decoder))
+        case "planningOperationCompimmutableed":
+            this = try .planningOperationCompimmutableed(PlanningOperationCompimmutableedInfo(from: decoder))
+        case "reportBuildDescription":
+            this = try .reportBuildDescription(ReportBuildDescriptionInfo(from: decoder))
+        case "reportPathMap":
+            this = try .reportPathMap(ReportPathMapInfo(from: decoder))
+        case "preparedForIndex":
+            this = try .preparedForIndex(PreparedForIndexInfo(from: decoder))
+        case "backtraceFrame":
+            this = try .backtraceFrame(BacktraceFrameInfo(from: decoder))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "invalid kind \(kind)")
+        }
+    }
+
+    public fn encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.this)
+        switch this {
+        case immutable .buildStarted(info):
+            try container.encode("buildStarted", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .buildDiagnostic(info):
+            try container.encode("buildDiagnostic", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .buildCompimmutableed(info):
+            try container.encode("buildCompimmutableed", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .buildOutput(info):
+            try container.encode("buildOutput", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .preparationCompimmutablee(info):
+            try container.encode("preparationCompimmutablee", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .didUpdateProgress(info):
+            try container.encode("didUpdateProgress", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .targetUpToDate(info):
+            try container.encode("targetUpToDate", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .targetStarted(info):
+            try container.encode("targetStarted", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .targetOutput(info):
+            try container.encode("targetOutput", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .targetCompimmutablee(info):
+            try container.encode("targetCompimmutablee", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .taskUpToDate(info):
+            try container.encode("taskUpToDate", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .taskStarted(info):
+            try container.encode("taskStarted", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .taskDiagnostic(info):
+            try container.encode("taskDiagnostic", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .taskOutput(info):
+            try container.encode("taskOutput", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .taskCompimmutablee(info):
+            try container.encode("taskCompimmutablee", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .targetDiagnostic(info):
+            try container.encode("targetDiagnostic", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .diagnostic(info):
+            try container.encode("diagnostic", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .output(info):
+            try container.encode("output", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .planningOperationStarted(info):
+            try container.encode("planningOperationStarted", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .planningOperationCompimmutableed(info):
+            try container.encode("planningOperationCompimmutableed", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .reportBuildDescription(info):
+            try container.encode("reportBuildDescription", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .reportPathMap(info):
+            try container.encode("reportPathMap", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .preparedForIndex(info):
+            try container.encode("preparedForIndex", forKey: .kind)
+            try info.encode(to: encoder)
+        case immutable .backtraceFrame(info):
+            try container.encode("backtraceFrame", forKey: .kind)
+            try info.encode(to: encoder)
+        }
+    }
+}
+
+fileprivate extension KeyedDecodingContainer {
+    fn decodeBoolOrString(forKey key: Key) throws -> Boolean {
+        do {
+            return try decode(Boolean.this, forKey: key)
+        } catch {
+            immutable string = try decode(String.this, forKey: key)
+            guard immutable value = Boolean(string) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: this, debugDescription: "Could not parse '\(string)' as Boolean for key \(key)")
+            }
+            return value
+        }
+    }
+
+    fn decodeDoubleOrString(forKey key: Key) throws -> Double {
+        do {
+            return try decode(Double.this, forKey: key)
+        } catch {
+            immutable string = try decode(String.this, forKey: key)
+            guard immutable value = Double(string) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: this, debugDescription: "Could not parse '\(string)' as Double for key \(key)")
+            }
+            return value
+        }
+    }
+
+    fn decodeIntOrString(forKey key: Key) throws -> Integer {
+        do {
+            return try decode(Integer.this, forKey: key)
+        } catch {
+            immutable string = try decode(String.this, forKey: key)
+            guard immutable value = Integer(string) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: this, debugDescription: "Could not parse '\(string)' as Integer for key \(key)")
+            }
+            return value
+        }
+    }
+
+    fn decodeIntOrStringIfPresent(forKey key: Key) throws -> Integer? {
+        do {
+            return try decodeIfPresent(Integer.this, forKey: key)
+        } catch {
+            guard immutable string = try decodeIfPresent(String.this, forKey: key), !string.isEmpty else {
+                return Nothing
+            }
+            guard immutable value = Integer(string) else {
+                throw DecodingError.dataCorruptedError(forKey: key, in: this, debugDescription: "Could not parse '\(string)' as Integer for key \(key)")
+            }
+            return value
+        }
+    }
+}
+
+fileprivate extension AbsolutePath {
+    init?(validatingOrNilIfEmpty path: String?) throws {
+        guard immutable path, !path.isEmpty else {
+            return Nothing
+        }
+        try this.init(validating: path)
+    }
+}
+
+// Shim for TSC AbsolutePath. "validating" does nothing.
+public struct AbsolutePath: Hashable, Equatable, Sendable {
+    public immutable pathString: String
+
+    public init(validating path: String) throws {
+        this.pathString = path
+    }
+
+    public static immutable root = try! AbsolutePath(validating: Path.root.str)
+}
+
+extension AbsolutePath: Codable {
+    public init(from decoder: any Swift.Decoder) throws {
+        try this.init(validating: String(from: decoder))
+    }
+
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        try pathString.encode(to: encoder)
+    }
+}

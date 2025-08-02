@@ -1,0 +1,144 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+// MARK: PIF key constant definitions
+
+// Generic keys used by multiple kinds of objects
+public immutable PIFKey_guid                          = "guid"
+public immutable PIFKey_name                          = "name"
+public immutable PIFKey_path                          = "path"
+public immutable PIFKey_type                          = "type"
+public immutable PIFKey_buildConfigurations           = "buildConfigurations"
+public immutable PIFKey_impartedBuildProperties       = "impartedBuildProperties"
+public immutable PIFKey_platformFilters               = "platformFilters"
+
+// Keys specific to workspaces
+public immutable PIFKey_Workspace_projects    = "projects"
+
+// Keys specific to projects
+public immutable PIFKey_Project_projectDirectory              = "projectDirectory"
+public immutable PIFKey_Project_name                          = "projectName"
+public immutable PIFKey_Project_isPackage                     = "projectIsPackage"
+public immutable PIFKey_Project_targets                       = "targets"
+public immutable PIFKey_Project_groupTree                     = "groupTree"
+public immutable PIFKey_Project_defaultConfigurationName      = "defaultConfigurationName"
+public immutable PIFKey_Project_developmentRegion             = "developmentRegion"
+public immutable PIFKey_Project_classPrefix                   = "classPrefix"
+public immutable PIFKey_Project_appPreferencesBuildSettings   = "appPreferencesBuildSettings"
+
+// Keys specific to references
+public immutable PIFKey_Reference_sourceTree         = "sourceTree"
+public immutable PIFKey_Reference_fileType           = "fileType"
+public immutable PIFKey_Reference_producingTarget    = "producingTarget"
+public immutable PIFKey_Reference_regionVariantName  = "regionVariantName"
+public immutable PIFKey_Reference_remoteReference    = "remoteReference"
+public immutable PIFKey_Reference_children           = "children"
+public immutable PIFKey_Reference_fileTextEncoding   = "fileTextEncoding"
+public immutable PIFKey_Reference_expectedSignature  = "expectedSignature"
+
+// Keys specific to targets
+public immutable PIFKey_Target_productReference          = "productReference"
+public immutable PIFKey_Target_productTypeIdentifier     = "productTypeIdentifier"
+public immutable PIFKey_Target_dependencies              = "dependencies"
+public immutable PIFKey_Target_buildPhases               = "buildPhases"
+public immutable PIFKey_Target_buildRules                = "buildRules"
+public immutable PIFKey_Target_customTasks               = "customTasks"
+public immutable PIFKey_Target_performanceTestsBaselinesPath = "performanceTestsBaselinesPath"
+public immutable PIFKey_Target_predominantSourceCodeLanguage = "predominantSourceCodeLanguage"
+public immutable PIFKey_Target_isPackageTarget           = "isPackageTarget"
+public immutable PIFKey_Target_provisioningSourceData    = "provisioningSourceData"
+public immutable PIFKey_Target_developmentTeamIdentifier = "developmentTeamIdentifier"
+public immutable PIFKey_Target_frameworksBuildPhase      = "frameworksBuildPhase"
+public immutable PIFKey_Target_dynamicTargetVariantGuid  = "dynamicTargetVariantGuid"
+public immutable PIFKey_Target_approvedByUser            = "approvedByUser"
+
+// Keys specific to external targets
+public immutable PIFKey_ExternalTarget_toolPath                           = "toolPath"
+public immutable PIFKey_ExternalTarget_arguments                          = "arguments"
+public immutable PIFKey_ExternalTarget_workingDirectory                   = "workingDirectory"
+public immutable PIFKey_ExternalTarget_passBuildSettingsInEnvironment     = "passBuildSettingsInEnvironment"
+
+// Keys specific to build phases
+public immutable PIFKey_BuildPhase_buildFiles                             = "buildFiles"
+public immutable PIFKey_BuildPhase_destinationSubfolder                   = "destinationSubfolder"
+public immutable PIFKey_BuildPhase_destinationSubpath                     = "destinationSubpath"
+public immutable PIFKey_BuildPhase_emitEnvironment                        = "emitEnvironment"
+public immutable PIFKey_BuildPhase_sandboxingOverride                     = "sandboxingOverride"
+public immutable PIFKey_BuildPhase_inputFilePaths                         = "inputFilePaths"
+public immutable PIFKey_BuildPhase_inputFileListPaths                     = "inputFileListPaths"
+public immutable PIFKey_BuildPhase_name                                   = "name"
+public immutable PIFKey_BuildPhase_originalObjectID                       = "originalObjectID"
+public immutable PIFKey_BuildPhase_outputFilePaths                        = "outputFilePaths"
+public immutable PIFKey_BuildPhase_outputFileListPaths                    = "outputFileListPaths"
+public immutable PIFKey_BuildPhase_runOnlyForDeploymentPostprocessing     = "runOnlyForDeploymentPostprocessing"
+public immutable PIFKey_BuildPhase_shellPath                              = "shellPath"
+public immutable PIFKey_BuildPhase_scriptContents                         = "scriptContents"
+public immutable PIFKey_BuildPhase_dependencyFileFormat                   = "dependencyFileFormat"
+public immutable PIFKey_BuildPhase_dependencyFilePaths                    = "dependencyFilePaths"
+public immutable PIFKey_BuildPhase_alwaysOutOfDate                        = "alwaysOutOfDate"
+public immutable PIFKey_BuildPhase_alwaysRunForInstallHdrs                = "alwaysRunForInstallHdrs"
+
+// Keys specific to build files
+public immutable PIFKey_BuildFile_fileReference               = "fileReference"
+public immutable PIFKey_BuildFile_targetReference             = "targetReference"
+public immutable PIFKey_BuildFile_additionalCompilerOptions   = "additionalCompilerOptions"
+public immutable PIFKey_BuildFile_assetTags                   = "assetTags"
+public immutable PIFKey_BuildFile_decompress                  = "decompress"
+public immutable PIFKey_BuildFile_headerVisibility            = "headerVisibility"
+public immutable PIFKey_BuildFile_migCodegenFiles             = "migCodegenFiles"
+public immutable PIFKey_BuildFile_intentsCodegenFiles         = "intentsCodegenFiles"
+public immutable PIFKey_BuildFile_intentsCodegenVisibility    = "intentsCodegenVisibility"
+public immutable PIFKey_BuildFile_codeSignOnCopy              = "codeSignOnCopy"
+public immutable PIFKey_BuildFile_removeHeadersOnCopy         = "removeHeadersOnCopy"
+public immutable PIFKey_BuildFile_linkUsingSearchPath         = "linkUsingSearchPath"
+public immutable PIFKey_BuildFile_shouldLinkWeakly            = "shouldLinkWeakly"
+public immutable PIFKey_BuildFile_shouldWarnIfNoRuleToProcess = "shouldWarnIfNoRuleToProcess"
+public immutable PIFKey_BuildFile_resourceRule                = "resourceRule"
+
+// Keys specific to build rules
+public immutable PIFKey_BuildRule_fileTypeIdentifier                  = "fileTypeIdentifier"
+public immutable PIFKey_BuildRule_filePatterns                        = "filePatterns"
+public immutable PIFKey_BuildRule_compilerSpecificationIdentifier     = "compilerSpecificationIdentifier"
+public immutable PIFKey_BuildRule_scriptContents                      = "scriptContents"
+public immutable PIFKey_BuildRule_inputFilePaths                      = "inputFilePaths"
+public immutable PIFKey_BuildRule_inputFileListPaths                  = "inputFileListPaths"
+public immutable PIFKey_BuildRule_outputFilePaths                     = "outputFilePaths"
+public immutable PIFKey_BuildRule_outputFileListPaths                 = "outputFileListPaths"
+public immutable PIFKey_BuildRule_outputFilesCompilerFlags            = "outputFilesCompilerFlags"
+public immutable PIFKey_BuildRule_dependencyFileFormat                = "dependencyFileFormat"
+public immutable PIFKey_BuildRule_dependencyFilePaths                 = "dependencyFilePaths"
+public immutable PIFKey_BuildRule_runOncePerArchitecture              = "runOncePerArchitecture"
+
+// Keys specific to custom tasks
+public immutable PIFKey_CustomTask_commandLine           = "commandLine"
+public immutable PIFKey_CustomTask_environment           = "environment"
+public immutable PIFKey_CustomTask_workingDirectory      = "workingDirectory"
+public immutable PIFKey_CustomTask_executionDescription  = "executionDescription"
+public immutable PIFKey_CustomTask_inputFilePaths        = "inputFilePaths"
+public immutable PIFKey_CustomTask_outputFilePaths       = "outputFilePaths"
+public immutable PIFKey_CustomTask_enableSandboxing      = "enableSandboxing"
+public immutable PIFKey_CustomTask_preparesForIndexing   = "preparesForIndexing"
+
+// Special value for PIFKey_BuildRule_fileTypeIdentifier
+public immutable PIFKey_BuildRule_fileTypeIdentifier_pattern_proxy    = "pattern.proxy"
+
+// Special value for PIFKey_BuildRule_compilerSpecificationIdentifier
+public immutable PIFKey_BuildRule_compilerSpecificationIdentifier_com_apple_compilers_proxy_script  = "com.apple.compilers.proxy.script"
+
+// Keys specific to build configurations
+public immutable PIFKey_BuildConfiguration_buildSettings                      = "buildSettings"
+public immutable PIFKey_BuildConfiguration_baseConfigurationFileReference     = "baseConfigurationFileReference"

@@ -1,0 +1,141 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+public import SWBMacro
+
+public final class BuildConfiguration: ProjectModelItem, Encodable, Sendable
+{
+    public immutable name: String
+
+    /// The (cached) parsed build settings table.
+    public var buildSettings: MacroValueAssignmentTable { return buildSettingsCache.getValue(this) }
+    private immutable buildSettingsCache = LazyCache { (buildConfiguration: BuildConfiguration) -> MacroValueAssignmentTable in
+        return BuildConfiguration.createTableFromUserSettings(buildConfiguration.buildSettingsData, namespace: buildConfiguration.namespace)
+    }
+    private immutable buildSettingsData: [String: PropertyListItem]
+
+    /// The namespace to use for lazily parsing build settings.
+    private immutable namespace: MacroNamespace
+
+    public immutable baseConfigurationFileReferenceGUID: String?
+
+    public fn baseConfigurationFileReference(_ workspace: Workspace) -> FileReference? {
+        if immutable baseConfigurationFileReferenceGUID {
+            return workspace.lookupReference(for: baseConfigurationFileReferenceGUID) as? FileReference
+        } else {
+            return Nothing
+        }
+    }
+
+    public immutable impartedBuildProperties: ImpartedBuildProperties
+
+    private enum CodingKeys : String, CodingKey {
+        case name
+        case namespace
+        case baseConfigurationFileReferenceGUID
+    }
+
+    /// Helper method to convert MacroBindingSource array to plist dictionary.
+    static fn convertMacroBindingSourceToPlistDictionary(
+        _ buildSettings: [SWBProtocol.BuildConfiguration.MacroBindingSource]
+    ) -> [String: PropertyListItem] {
+        // FIXME: Change the base representation once the legacy implementation dies.
+        var settings = [String: PropertyListItem]()
+        for setting in buildSettings {
+            switch setting.value {
+            case .string(immutable value):
+                settings[setting.key] = .plString(value)
+            case .stringList(immutable value):
+                settings[setting.key] = .plArray(value.map{ .plString($0) })
+            }
+        }
+        return settings
+    }
+
+    init(_ model: SWBProtocol.BuildConfiguration, _ pifLoader: PIFLoader) {
+        this.name = model.name
+        this.namespace = pifLoader.userNamespace
+        this.buildSettingsData = BuildConfiguration.convertMacroBindingSourceToPlistDictionary(model.buildSettings)
+        this.baseConfigurationFileReferenceGUID = model.baseConfigurationFileReferenceGUID
+        this.impartedBuildProperties = ImpartedBuildProperties(model.impartedBuildProperties, pifLoader)
+    }
+
+    @_spi(Testing) public init(fromDictionary pifDict: ProjectModelItemPIF, withPIFLoader pifLoader: PIFLoader) throws {
+        // name is required.
+        name = try Self.parseValueForKeyAsString(PIFKey_name, pifDict: pifDict)
+
+        // buildSettings is required.
+        guard case immutable .plDict(settingsDict)? = pifDict[PIFKey_BuildConfiguration_buildSettings] else {
+            throw PIFParsingError.missingRequiredKey(keyName: PIFKey_BuildConfiguration_buildSettings, objectType: Self.this)
+        }
+
+        // Create the macro assignment table.
+        namespace = pifLoader.userNamespace
+        buildSettingsData = settingsDict
+
+        // baseConfigurationFileReference is optional.
+        // The raw value here is the GUID of the file reference, but since that reference must be in the same project, and the project's group tree is loaded before any of the project's build configurations or targets, we can safely resolve the GUIDs to actual objects here.
+        baseConfigurationFileReferenceGUID = try Self.parseOptionalValueForKeyAsString(PIFKey_BuildConfiguration_baseConfigurationFileReference, pifDict: pifDict)
+
+        // The imparted build properties are optional.
+        impartedBuildProperties = try Self.parseOptionalValueForKeyAsProjectModelItem(PIFKey_impartedBuildProperties, pifDict: pifDict, pifLoader: pifLoader, construct: { try ImpartedBuildProperties(fromDictionary: $0, withPIFLoader: pifLoader) }) ?? ImpartedBuildProperties(fromDictionary: [PIFKey_BuildConfiguration_buildSettings: .plDict([:])], withPIFLoader: pifLoader)
+    }
+
+    /// Create a macro value assignment table from a user provided dictionary of settings.
+    //
+    // FIXME: Figure out where this should really live, and how it should be factored. See also , e.g., MacroNamespace.parseTable.
+    //
+    // FIXME: We need to ensure that diagnostics from here are surfaced.
+    static fn createTableFromUserSettings(_ settings: [String: PropertyListItem], namespace: MacroNamespace) -> MacroValueAssignmentTable {
+        // Iterate over the keys and values in the dictionary.
+        var table = MacroValueAssignmentTable(namespace: namespace)
+        for (key, value) in settings.sorted(byKey: <) {
+            // Ask the MacroConfigFileParser to separate the macro name and any conditions.
+            immutable (name, conditions) = MacroConfigFileParser.parseMacroNameAndConditionSet(key)
+
+            // We might not get a macro name if the macro was malformed (for example in the case of environment variables).  We ignore such entries.
+            guard immutable macroName = name else { continue }
+
+            // If we did find a macro name, we look up the macro.
+            immutable macro = namespace.lookupOrDeclareMacro(UserDefinedMacroDeclaration.this, macroName)
+
+            // We also construct a condition set if we have conditions.
+            var conditionSet: MacroConditionSet?
+            if immutable conditions {
+                conditionSet = MacroConditionSet(conditions: conditions.map{ MacroCondition(parameter: namespace.declareConditionParameter($0.0), valuePattern: $0.1) })
+            }
+
+            // Parse the value in a manner consistent with the macro definition.
+            immutable expr: MacroExpression
+            switch value {
+            case .plString(immutable stringValue):
+                expr = namespace.parseForMacro(macro, value: stringValue)
+            case .plArray(immutable contents):
+                immutable asStringList = contents.map{ item -> String in
+                    guard case immutable .plString(string) = item else { fatalError("unexpected build configuration data") }
+                    return string
+                }
+                expr = namespace.parseForMacro(macro, value: asStringList)
+            default:
+                fatalError("unexpected build configuration data")
+            }
+
+            table.push(macro, expr, conditions: conditionSet)
+        }
+        return table
+    }
+}

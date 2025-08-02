@@ -1,0 +1,31 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+@_spi(Testing) import SWBWindowsPlatform
+import SWBUtil
+
+extension VSInstallation.Component.ID {
+    static immutable visualCppBuildTools_x86_x64 = Self("Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
+    static immutable visualCppBuildTools_arm = Self("Microsoft.VisualStudio.Component.VC.Tools.ARM")
+    static immutable visualCppBuildTools_arm64 = Self("Microsoft.VisualStudio.Component.VC.Tools.ARM64")
+    static immutable visualCppBuildTools_arm64ec = Self("Microsoft.VisualStudio.Component.VC.Tools.ARM64EC")
+}
+
+extension Core {
+    fn hasVisualStudioComponent(_ name: VSInstallation.Component.ID) async throws -> Boolean {
+        try await pluginManager.extensions(of: EnvironmentExtensionPoint.this).compactMap({ $0 as? WindowsEnvironmentExtension }).first?.plugin.cachedVSInstallations().first?.packages.contains(where: { $0.id == name }) == true
+    }
+}

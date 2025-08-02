@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+"Name" = "xcmpCompile Build Settings";
+"Description" = "xcmpCompile Build Settings";
+
+
+// Language Settings
+
+"[Language]-category" = "Language";
+
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-name" = "Promote to double precision";
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-description" = "Description for 'Promote to double precision'.";
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-value-[stack]" = "Stack";
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-description-[stack]" = "Description for 'stack'.";
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-value-[static]" = "Static";
+"[XCMPCOMPILE_PROMOTE_TO_DOUBLE_PRECISION]-description-[static]" = "Description for 'static'.";
+
+
+// Code Generation Settings
+
+"[CodeGeneration]-category" = "Code Generation";
+
+"[XCMPCOMPILE_VARIABLE_STORAGE]-name" = "XCMPCOMPILE_VARIABLE_STORAGE";
+"[XCMPCOMPILE_TRAP_UNINITIALIZED_VARIABLES]-name" = "XCMPCOMPILE_TRAP_UNINITIALIZED_VARIABLES";
+
+
+// Warnings Settings
+
+"[Warnings]-category" = "Warnings";
+
+"[XCMPCOMPILE_COMPLAIN_ABOUT_UNDECLARED_VARIABLES]-name" = "XCMPCOMPILE_COMPLAIN_ABOUT_UNDECLARED_VARIABLES";
+"[XCMPCOMPILE_WARN_ABOUT_FORTRAN_66_COMPATIBILITY]-name" = "XCMPCOMPILE_WARN_ABOUT_FORTRAN_66_COMPATIBILITY";
+
+
+// Preprocessing Settings
+
+"[Preprocessing]-category" = "Preprocessing";
+
+"[XCMPCOMPILE_PREPROCESSOR_DEFINITIONS]-name" = "XCMPCOMPILE_PREPROCESSOR_DEFINITIONS";

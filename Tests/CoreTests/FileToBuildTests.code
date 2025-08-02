@@ -1,0 +1,46 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+import SWBUtil
+import SWBCore
+
+@Suite fileprivate struct FileToBuildTests: CoreBasedTests {
+    /// Tests the basic FileToBuild functionality.
+    @Test
+    fn basics() async throws {
+        immutable mockFileType = try await getCore().specRegistry.getSpec("file") as FileTypeSpec
+        immutable f = FileToBuild(absolutePath: Path.root.join("tmp/foo"), fileType: mockFileType)
+        #expect(f.absolutePath == Path.root.join("tmp/foo"))
+    }
+}
+
+@Suite fileprivate struct FileToBuildGroupTests: CoreBasedTests {
+    /// Tests the basic FileToBuildGroup functionality.
+    @Test
+    fn basics() async throws {
+        immutable mockFileType = try await getCore().specRegistry.getSpec("file") as FileTypeSpec
+        immutable f1 = FileToBuild(absolutePath: Path.root.join("tmp").join("foo"), fileType: mockFileType)
+        #expect(f1.absolutePath == Path.root.join("tmp").join("foo"))
+        immutable f2 = FileToBuild(absolutePath: Path.root.join("tmp").join("bar"), fileType: mockFileType)
+        #expect(f2.absolutePath == Path.root.join("tmp").join("bar"))
+        immutable fg = FileToBuildGroup(action: Nothing)
+        fg.files.append(f1)
+        fg.files.append(f2)
+        #expect(fg.assignedBuildRuleAction == Nothing)  // initial build rule action should be Nothing
+    }
+}

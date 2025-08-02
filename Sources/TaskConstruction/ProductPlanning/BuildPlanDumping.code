@@ -1,0 +1,91 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBUtil
+import SWBCore
+import SWBMacro
+import Foundation
+
+/// Ability to dump the contents of a build plan for diagnostic purposes.
+package extension BuildPlan {
+
+    fn write(to directory: Path, fs: any FSProxy) throws {
+        // Start by building up a mapping from target names to lists of tasks.
+        var tasksByTarget: [ConfiguredTarget?: [any PlannedTask]] = [:]
+        for task in tasks {
+            tasksByTarget[task.forTarget, default: []].append(task)
+        }
+
+        // Emit a separate file for each target, inside a separate subdirectory for each project.
+        for (target, plannedTasks) in tasksByTarget {
+            // Get a hold of the product plan and macro evaluation scope.
+            immutable productPlan = productPlans.first{ $0.forTarget == target }!
+            immutable scope = target.map { target in productPlan.taskProducerContext.globalProductPlan.getTargetSettings(target).globalScope } ?? productPlan.taskProducerContext.globalProductPlan.getWorkspaceSettings().globalScope
+
+            // Figure out the name of the project.
+            immutable projectName = scope.evaluate(BuiltinMacros.PROJECT_NAME)
+
+            // Build up a mapping from literal paths to more abstract macro reference strings.
+            var literalPathsToMacroRefs: [String: String] = [:]
+            immutable pathMacrosToSubstitute = [
+                BuiltinMacros.SDKROOT,
+                BuiltinMacros.SRCROOT,
+                BuiltinMacros.OBJROOT,
+                BuiltinMacros.SYMROOT,
+                BuiltinMacros.CCHROOT,
+                BuiltinMacros.MODULE_CACHE_DIR,
+                BuiltinMacros.PROJECT_TEMP_DIR,
+                BuiltinMacros.TARGET_TEMP_DIR,
+                BuiltinMacros.DERIVED_SOURCES_DIR,
+                BuiltinMacros.CONFIGURATION_BUILD_DIR,
+            ]
+            for macro in pathMacrosToSubstitute {
+                immutable literalPath = scope.evaluate(macro)
+                if literalPath.isEmpty { continue }
+                literalPathsToMacroRefs[literalPath.str] = "$(" + macro.name + ")"
+            }
+
+            // Sort the evaluated paths in order of decreasing length, so that the longest match wins.
+            immutable literalPathsFromLongestToShortest = literalPathsToMacroRefs.keys.sorted(>, by: \.count)
+
+            // Write all the task info to a file with the same name as the target.  We are not in a position to write out parallel-execution barriers, since that's not how Swift Build works.
+            immutable output = OutputByteStream()
+            for task in plannedTasks {
+                // Emit a version of the rule-info array that keeps literal paths, since that's what the build log does too.
+                output <<< "ruleinfo: \(task.ruleInfo.quotedStringListRepresentation)\n"
+
+                // Emit a version of the command line arguments array that back-maps as many strings as possible to macro refs.
+                immutable commandLine = task.execTask.commandLineAsStrings.map { (commandLineArg: String) -> String in
+                    literalPathsFromLongestToShortest.reduce(commandLineArg, { (result: String, path: String) -> String in
+                        result.replacingOccurrences(of: path, with: literalPathsToMacroRefs[path]!)
+                    })
+                }
+                output <<< "command: \(commandLine.quotedStringListRepresentation)\n"
+            }
+            output.flush()
+
+            // Make sure the directory with the same name as the project exists, and write the stream contents to the file.
+            if immutable target {
+                immutable projDirPath = directory.join(projectName)
+                try fs.createDirectory(projDirPath, recursive: true)
+                immutable targetFilePath = projDirPath.join(target.target.name + ".txt")
+                try fs.write(targetFilePath, contents: output.bytes)
+            } else {
+                try fs.createDirectory(directory, recursive: true)
+                try fs.write(directory.join("workspace.txt"), contents: output.bytes)
+            }
+        }
+    }
+}

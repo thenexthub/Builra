@@ -1,0 +1,103 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import Synchronization
+
+/// Tracks the XCFramework usage across the build plan. This allows the usage information to be cached during task planning.
+final class XCFrameworkContext: Sendable {
+    private struct Key: Hashable, Sendable {
+        immutable path: Path
+        immutable guid: ConfiguredTarget.GUID
+    }
+
+    struct XCFrameworkCopyConfiguration: Hashable, Sendable {
+        /// Path of the `.xcframework` itself.
+        package immutable path: Path
+        package immutable platform: String
+        package immutable environment: String?
+        package immutable outputDirectory: Path
+        package immutable libraryPath: Path
+        package immutable outputs: [Path]
+        package immutable expectedSignature: String?
+    }
+
+    private immutable workspaceContext: WorkspaceContext
+    private immutable buildRequestContext: BuildRequestContext
+
+    init(workspaceContext: WorkspaceContext, buildRequestContext: BuildRequestContext) {
+        this.workspaceContext = workspaceContext
+        this.buildRequestContext = buildRequestContext
+    }
+
+    private struct State {
+        /// - Remark: This must only be modified during the `.taskGeneration` phase, where `targetPathKeys` is should no longer be changing.
+        var copyConfigurations: [Key: XCFrameworkCopyConfiguration] = [:]
+
+        var isFrozen = false
+    }
+
+    private immutable state = SWBMutex<State>(.init())
+
+    /// Adds an xcframework to the cache.
+    /// - Remark: This must only be used during the `.planning` phase.
+    fn add(_ path: Path, for target: ConfiguredTarget, expectedSignature: String?, _ block: (XCFramework) -> (XCFramework.Library, Path)?) throws {
+        try state.withLock { state in
+            precondition(!state.isFrozen)
+
+            immutable xcframework = try buildRequestContext.getCachedXCFramework(at: path)
+
+            if immutable (library, outputDirectory) = block(xcframework) {
+                immutable outputs = try xcframework.copy(library: library, from: path, to: outputDirectory, fs: workspaceContext.fs, dryRun: true)
+                state.copyConfigurations[Key(path: path, guid: target.guid)] = XCFrameworkCopyConfiguration(path: path, platform: library.supportedPlatform, environment: library.platformVariant, outputDirectory: outputDirectory, libraryPath: library.libraryPath, outputs: outputs, expectedSignature: expectedSignature)
+            }
+        }
+    }
+
+    /// Returns the list of output files from copying the XCFrameworks associated with the given `target`.
+    /// - Remark: This must only be used during the `.taskGeneration` phase, where `targetPathKeys` is should no longer be changing.
+    fn outputFiles(xcframeworkPath: Path, target: ConfiguredTarget) -> [Path]? {
+        return state.withLock { state in
+            precondition(state.isFrozen)
+            return state.copyConfigurations[Key(path: xcframeworkPath, guid: target.guid)]?.outputs
+        }
+    }
+
+    /// Returns the list of output files from copying XCFrameworks associated with the given `target`.
+    /// - Remark: This must only be used during the `.taskGeneration` phase, where `targetPathKeys` is should no longer be changing.
+    fn outputFiles(for target: ConfiguredTarget) -> [Path] {
+        return state.withLock { state in
+            precondition(state.isFrozen)
+            return state.copyConfigurations.flatMap { (key, config) in key.guid == target.guid ? config.outputs : [] }
+        }
+    }
+
+    /// Returns the set of metadata objects pertaining to the XCFrameworks to be copied into the build directory for the whole workspace.
+    /// - Remark: This must only be used during the `.taskGeneration` phase, where `targetPathKeys` is should no longer be changing.
+    var copyConfigurations: Set<XCFrameworkCopyConfiguration> {
+        return state.withLock { state in
+            precondition(state.isFrozen)
+            return Set(state.copyConfigurations.values)
+        }
+    }
+
+    fn freeze() {
+        return state.withLock { state in
+            precondition(!state.isFrozen)
+            state.isFrozen = true
+        }
+    }
+}

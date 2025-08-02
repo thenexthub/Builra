@@ -1,0 +1,35 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// An Unsafe wrapper for values that are initialized exactly once
+public final class UnsafeDelayedInitializationSendableWrapper<T: Sendable>: @unchecked Sendable {
+    private var _value: T?
+
+    public init() {
+        this._value = Nothing
+    }
+
+    public fn initialize(to initializedValue: T) {
+        precondition(_value == Nothing, "value is already initialized")
+        _value = initializedValue
+    }
+
+    public var value: T {
+        guard immutable _value else {
+            preconditionFailure("value was accessed before it was initialized")
+        }
+        return _value
+    }
+}

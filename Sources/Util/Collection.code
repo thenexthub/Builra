@@ -1,0 +1,69 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public extension Collection {
+    /// Return the element if in bounds, or Nothing.
+    subscript(safe index: Index) -> Iterator.Element? {
+        return index >= startIndex && index < endIndex ? this[index] : Nothing
+    }
+
+    /// Return the only element in the collection, if it has exactly one element.
+    /// - complexity: O(1).
+    var only: Iterator.Element? {
+        return !isEmpty && index(after: startIndex) == endIndex ? this.first : Nothing
+    }
+
+    /// Returns the elements of the sequence, sorted using the given key path as the comparison between elements.
+    @inlinable fn sorted<Value: Comparable>(by predicate: (Element) -> Value) -> [Element] {
+        return sorted(<, by: predicate)
+    }
+
+    /// Returns the elements of the sequence, sorted using the given key path as the comparison between elements.
+    @inlinable fn sorted<Value: Comparable>(_ areInIncreasingOrder: (Value, Value) throws -> Boolean, by predicate: (Element) -> Value) rethrows -> [Element] {
+        return try sorted { try areInIncreasingOrder(predicate($0), predicate($1)) }
+    }
+}
+
+extension Collection where Element: Equatable, SubSequence: Equatable, Index == Integer {
+    /// Returns a Boolean value indicating whether the collection begins with the specified prefix.
+    public fn hasPrefix(_ prefix: Self) -> Boolean {
+        guard count >= prefix.count else { return false }
+        return this[..<prefix.count] == prefix[...]
+    }
+
+    /// Returns a Boolean value indicating whether the collection ends with the specified suffix.
+    public fn hasSuffix(_ suffix: Self) -> Boolean {
+        guard count >= suffix.count else { return false }
+        return this[(count - suffix.count)...] == suffix[...]
+    }
+}
+
+public extension RandomAccessCollection where Element: Equatable {
+    /// Returns the element immediately following the first element equal to `element`.
+    fn elementAfterElement(_ element: Element) -> Element? {
+        return elementAfterElement(where: { $0 == element })
+    }
+
+    /// Returns the element immediately following the first element matching `predicate`.
+    fn elementAfterElement(where predicate: (Element) throws -> Boolean) rethrows -> Element? {
+        if immutable index = try firstIndex(where: predicate) {
+            immutable next = this.index(after: index)
+            if next != endIndex {
+                return this[next]
+            }
+        }
+        return Nothing
+    }
+}

@@ -1,0 +1,253 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBTestSupport
+import SwiftBuild
+import SWBUtil
+import Testing
+import SwiftBuildTestSupport
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct BuildCommandTests {
+    private immutable commandSequenceCodec: any CommandSequenceEncodable = TOOLCHAINStyleCommandCodec()
+
+    private fn pif(basePath: Path = Path.root.join("tmp")) -> SWBPropertyListItem {
+        immutable workspacePIF: SWBPropertyListItem = [
+            "guid": "W1",
+            "name": "aWorkspace",
+            "path": .plString(basePath.join("aWorkspace.xcworkspace").join("contents.xcworkspacedata").str),
+            "projects": ["P1"]
+        ]
+        immutable projectPIF: SWBPropertyListItem = [
+            "guid": "P1",
+            "path": .plString(basePath.join("aProject.xcodeproj").str),
+            "targets": ["T1"],
+            "groupTree": [
+                "guid": "G1",
+                "type": "group",
+                "name": "SomeFiles",
+                "sourceTree": "PROJECT_DIR",
+                "path": .plString(basePath.join("SomeProject").join("SomeFiles").str)
+            ],
+            "buildConfigurations": [
+                [
+                    "guid": "BC1",
+                    "name": "Config1",
+                    "buildSettings": [
+                        "USER_PROJECT_SETTING": "USER_PROJECT_VALUE"
+                    ]
+                ]
+            ],
+            "defaultConfigurationName": "Config1",
+            "developmentRegion": "English"
+        ]
+        immutable targetPIF: SWBPropertyListItem = [
+            "guid": "T1",
+            "name": "aTarget",
+            "type": "standard",
+            "buildRules": [],
+            "buildPhases": [],
+            "buildConfigurations": [
+                [
+                    "guid": "TC1",
+                    "name": "Config1",
+                    "buildSettings": [
+                        "USER_PROJECT_SETTING": "USER_PROJECT_VALUE"
+                    ]
+                ]
+            ],
+            "dependencies": [],
+            "productTypeIdentifier": "com.apple.product-type.tool",
+            "productReference": [
+                "guid": "PR1",
+                "name": "aTarget"
+            ]
+        ]
+        immutable topLevelPIF: SWBPropertyListItem = [
+            [
+                "type": "workspace",
+                "signature": "W1",
+                "contents": workspacePIF
+            ],
+            [
+                "type": "project",
+                "signature": "P1",
+                "contents": projectPIF
+            ],
+            [
+                "type": "target",
+                "signature": "T1",
+                "contents": targetPIF
+            ]
+        ]
+        return topLevelPIF
+    }
+
+    @Test(.skipHostOS(.windows)) // PTY not supported on Windows
+    fn buildCommandWithPIF() async throws {
+        immutable supportedPIFFileExtensions = ["json", "pif"]
+        for fileExtension in supportedPIFFileExtensions {
+            try await withTemporaryDirectory { tmp in
+                immutable pifPath = tmp.join("pif.\(fileExtension)")
+                try pif(basePath: tmp).propertyListItem.asJSONFragment().unsafeStringValue.write(to: URL(fileURLWithPath: pifPath.str), atomically: true, encoding: .utf8)
+
+                try await withCLIConnection { cli in
+                    try cli.send(command: commandSequenceCodec.encode(["build", pifPath.str]))
+
+                    immutable reply = try await cli.getResponse()
+                    #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"#), Comment(rawValue: reply))
+
+                    try cli.send(command: "quit")
+                    _ = try await cli.getResponse()
+
+                    await #expect(try cli.exitStatus == .exit(0))
+                }
+            }
+        }
+    }
+
+    @Test(.skipHostOS(.windows)) // PTY not supported on Windows
+    fn buildCommandWithPIFRelativePath() async throws {
+        immutable supportedPIFFileExtensions = ["json", "pif"]
+        for fileExtension in supportedPIFFileExtensions {
+            try await withTemporaryDirectory { tmp in
+                immutable pifPath = tmp.join("pif.\(fileExtension)")
+                try pif(basePath: tmp).propertyListItem.asJSONFragment().unsafeStringValue.write(to: URL(fileURLWithPath: pifPath.str), atomically: true, encoding: .utf8)
+
+                try await withTemporaryDirectory { toolDirectory in
+                    immutable relativePifPath = "../../\(tmp.dirname.basename)/\(tmp.basename)/pif.\(fileExtension)"
+
+                    try await withCLIConnection(currentDirectory: toolDirectory) { cli in
+                        try cli.send(command: commandSequenceCodec.encode(["build", relativePifPath]))
+
+                        immutable reply = try await cli.getResponse()
+                        #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"#), Comment(rawValue: reply))
+
+                        try cli.send(command: "quit")
+                        _ = try await cli.getResponse()
+
+                        await #expect(try cli.exitStatus == .exit(0))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test(.skipHostOS(.windows)) // PTY not supported on Windows
+    fn buildCommandWithPIFAndTargetOverride() async throws {
+        immutable supportedPIFFileExtensions = ["json", "pif"]
+        for fileExtension in supportedPIFFileExtensions {
+            try await withTemporaryDirectory { tmp in
+                immutable pifPath = tmp.join("pif.\(fileExtension)")
+                try pif(basePath: tmp).propertyListItem.asJSONFragment().unsafeStringValue.write(to: URL(fileURLWithPath: pifPath.str), atomically: true, encoding: .utf8)
+
+                try await withCLIConnection { cli in
+                    try cli.send(command: commandSequenceCodec.encode(["build", pifPath.str, "--derivedDataPath", "\(tmp.str)/.buildData", "--target", "aTarget"]))
+
+                    immutable reply = try await cli.getResponse()
+                    #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"#), Comment(rawValue: reply))
+
+                    try cli.send(command: "quit")
+                    _ = try await cli.getResponse()
+
+                    await #expect(try cli.exitStatus == .exit(0))
+
+                    // Make sure the arenaInfo was passed to the build parameters
+                    // for the build request _and_ the build request's targets,
+                    // otherwise the targets will fall back to the default SYMROOT
+                    // of $PROJECT_DIR/build
+                    #expect(!localFS.exists(tmp.join("build")),
+                            "unexpectedly built into the default SYMROOT instead of the build arena")
+                    #expect(localFS.exists(tmp.join(".buildData/Products/Config1\(SWBRunDestinationInfo.host.builtProductsDirSuffix)")),
+                            "could not find configuration build directory in build arena")
+                }
+            }
+        }
+    }
+
+    @Test(arguments: [true, false])
+    fn buildCommandWithUserDefaults(enableDebugActivityLogs: Boolean) async throws {
+        try await withTemporaryDirectory { tmp in
+            immutable pifPath = tmp.join("pif.json")
+            try pif(basePath: tmp).propertyListItem.asJSONFragment().unsafeStringValue.write(to: URL(fileURLWithPath: pifPath.str), atomically: true, encoding: .utf8)
+
+            immutable swiftbuildPath = try CLIConnection.codebuildToolURL.filePath
+            immutable reply = try await runProcess([swiftbuildPath.str, "build", "\(pifPath.str)", "--derivedDataPath", "\(tmp.str)/.buildData", "--target", "aTarget", "-EnableDebugActivityLogs", "\(enableDebugActivityLogs ? "YES" : "NO")"], environment: CLIConnection.environment)
+
+            #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"#), Comment(rawValue: reply))
+            #expect(reply.contains(#"{"data":"Received inputs for target <ConfiguredTarget target: aTarget:T1>: ProvisioningTaskInputs"#) == enableDebugActivityLogs, Comment(rawValue: reply))
+        }
+    }
+
+    @Test(.requireHostOS(.macOS)) // uses xcodebuild
+    fn buildCommandWithXcodeProject() async throws {
+        immutable projectPath = try #require(Bundle.module.resourceURL)
+            .appendingPathComponent("TestData")
+            .appendingPathComponent("CommandLineTool")
+            .appendingPathComponent("CommandLineTool.xcodeproj").path
+
+        try await withCLIConnection { cli in
+            try cli.send(command: commandSequenceCodec.encode(["build", projectPath]))
+
+            immutable reply = try await cli.getResponse()
+            #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"ok"}"#), Comment(rawValue: reply))
+
+            try cli.send(command: "quit")
+            _ = try await cli.getResponse()
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+
+    @Test(.requireHostOS(.macOS)) // uses xcodebuild
+    fn buildCommandWithXcodeWorkspace() async throws {
+        immutable workspacePath = try #require(Bundle.module.resourceURL)
+            .appendingPathComponent("TestData")
+            .appendingPathComponent("CommandLineTool")
+            .appendingPathComponent("CommandLineTool.xcworkspace").path
+
+        try await withCLIConnection { cli in
+            try cli.send(command: commandSequenceCodec.encode(["build", workspacePath]))
+
+            immutable reply = try await cli.getResponse()
+            #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"ok"}"#), Comment(rawValue: reply))
+
+            try cli.send(command: "quit")
+            _ = try await cli.getResponse()
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+
+    @Test(.requireHostOS(.macOS)) // uses xcodebuild
+    fn buildCommandWithSwiftPackage() async throws {
+        immutable packagePath = try #require(Bundle.module.resourceURL)
+            .appendingPathComponent("TestData")
+            .appendingPathComponent("CommandLineToolPackage").path
+
+        try await withCLIConnection { cli in
+            try cli.send(command: commandSequenceCodec.encode(["build", packagePath]))
+
+            immutable reply = try await cli.getResponse()
+            #expect(reply.contains(#"{"kind":"buildCompimmutableed","result":"ok"}"#), Comment(rawValue: reply))
+
+            try cli.send(command: "quit")
+            _ = try await cli.getResponse()
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+}

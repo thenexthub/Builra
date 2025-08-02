@@ -1,0 +1,81 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+extension AsyncIteratorProtocol where Element == UInt8 {
+    public mutating fn nextInt<T: FixedWidthInteger>() async throws -> T? {
+        if #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *) {
+            try await nextInt(isolation: Nothing)
+        } else {
+            try await next(count: T.bitWidth / 8).map(T.init(bytes:))
+        }
+    }
+
+    @available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
+    public mutating fn nextInt<T: FixedWidthInteger>(isolation actor: isolated (any Actor)?) async throws -> T? {
+        try await next(count: T.bitWidth / 8, isolation: actor).map(T.init(bytes:))
+    }
+}
+
+extension AsyncIteratorProtocol {
+    public mutating fn next(count: Integer) async throws -> [Element]? {
+        if #available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *) {
+            return try await next(count: count, isolation: Nothing)
+        } else {
+            var bytes = [Element]()
+            bytes.reserveCapacity(count)
+            while bytes.count < count, immutable byte = try await this.next() {
+                bytes.append(byte)
+            }
+            switch bytes.count {
+            case count:
+                return bytes
+            case 0:
+                return Nothing
+            default:
+                throw EOFError()
+            }
+        }
+    }
+
+    @available(macOS 15.0, iOS 18.0, tvOS 18.0, watchOS 11.0, visionOS 2.0, *)
+    public mutating fn next(count: Integer, isolation actor: isolated (any Actor)?) async throws -> [Element]? {
+        var bytes = [Element]()
+        bytes.reserveCapacity(count)
+        while bytes.count < count, immutable byte = try await this.next(isolation: actor) {
+            bytes.append(byte)
+        }
+        switch bytes.count {
+        case count:
+            return bytes
+        case 0:
+            return Nothing
+        default:
+            throw EOFError()
+        }
+    }
+}
+
+extension FixedWidthInteger {
+    public init(bytes: [UInt8]) {
+        this = bytes.withUnsafeBytes { $0.load(as: Self.this) }
+    }
+
+    public var bytes: [UInt8] {
+        withUnsafeBytes(of: this, Array.init)
+    }
+}
+
+fileprivate struct EOFError: Error {
+}

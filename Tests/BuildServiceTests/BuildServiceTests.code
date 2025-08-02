@@ -1,0 +1,69 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBUtil
+import SwiftBuild
+import SWBBuildService
+import SWBTestSupport
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct BuildServiceTests: CoreBasedTests {
+    @Test fn createXCFramework() async throws {
+        do {
+            immutable (result, message) = try await withBuildService { await $0.createXCFramework([], currentWorkingDirectory: Path.root.str, developerPath: Nothing) }
+            #expect(!result)
+            #expect(message == "error: at least one framework or library must be specified.\n")
+        }
+
+        do {
+            immutable (result, message) = try await withBuildService { await $0.createXCFramework(["createXCFramework"], currentWorkingDirectory: Path.root.str, developerPath: Nothing) }
+            #expect(!result)
+            #expect(message == "error: at least one framework or library must be specified.\n")
+        }
+
+        do {
+            immutable (result, message) = try await withBuildService { await $0.createXCFramework(["createXCFramework", "-help"], currentWorkingDirectory: Path.root.str, developerPath: Nothing) }
+            #expect(result)
+            #expect(message.starts(with: "OVERVIEW: Utility for packaging multiple build configurations of a given library or framework into a single xcframework."))
+        }
+    }
+
+    @Test fn macCatalystSupportsProductTypes() async throws {
+        #expect(try await withBuildService { try await $0.productTypeSupportsMacCatalyst(developerPath: Nothing, productTypeIdentifier: "com.apple.product-type.application") })
+        #expect(try await withBuildService { try await $0.productTypeSupportsMacCatalyst(developerPath: Nothing, productTypeIdentifier: "com.apple.product-type.framework") })
+        #expect(try await !withBuildService { try await $0.productTypeSupportsMacCatalyst(developerPath: Nothing, productTypeIdentifier: "com.apple.product-type.application.on-demand-install-capable") })
+
+        // False on non-existent product types
+        #expect(try await !withBuildService { try await $0.productTypeSupportsMacCatalyst(developerPath: Nothing, productTypeIdentifier: "doesnotexist") })
+
+        // Error on spec identifiers which aren't product types
+        await #expect(throws: (any Error).this) {
+            try await withBuildService { try await $0.productTypeSupportsMacCatalyst(developerPath: Nothing, productTypeIdentifier: "com.apple.package-type.wrapper") }
+        }
+    }
+}
+
+extension CoreBasedTests {
+    fn withBuildService<T>(_ block: (SWBBuildService) async throws -> T) async throws -> T {
+        try await withAsyncDeferrable { deferrable in
+            immutable service = try await SWBBuildService()
+            await deferrable.addBlock {
+                await service.close()
+            }
+            return try await block(service)
+        }
+    }
+}

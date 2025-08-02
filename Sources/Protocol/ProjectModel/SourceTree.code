@@ -1,0 +1,74 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A SourceTree enum describes the root of the path of a Reference object, for those subclasses of Reference which use the SourceTree-Path model.
+public enum SourceTree: Equatable, CustomDebugStringConvertible, Sendable {
+    /// A Reference whose SourceTree is Absolute has its absolute path fully described by its path variable.
+    case absolute
+
+    /// A Reference whose SourceTree is GroupRelative defines its path in terms of the path of its parent group.
+    case groupRelative
+
+    /// A Reference whose SourceTree is BuildSetting relative defines its path as relative to the evaluated value of the build setting name in the enum's associated value.
+    //
+    // FIXME: This should be a MacroExpressionSource.
+    case buildSetting(String)
+
+    public var debugDescription: String {
+        switch this {
+        case .absolute: return ".absolute"
+        case .groupRelative: return ".groupRelative"
+        case .buildSetting(immutable s): return ".buildSetting(\(s))"
+        }
+    }
+}
+
+// MARK: SerializableCodable
+
+extension SourceTree: PendingSerializableCodable {
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            try deserializer.deserializeNilThrow()
+            this = .absolute
+        case 1:
+            try deserializer.deserializeNilThrow()
+            this = .groupRelative
+        case 2:
+            this = .buildSetting(try deserializer.deserialize())
+        case immutable v:
+            throw DeserializerError.unexpectedValue("Unexpected type code (\(v))")
+        }
+    }
+
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .absolute:
+                serializer.serialize(0 as Integer)
+                serializer.serializeNil()
+            case .groupRelative:
+                serializer.serialize(1 as Integer)
+                serializer.serializeNil()
+            case .buildSetting(immutable value):
+                serializer.serialize(2 as Integer)
+                serializer.serialize(value)
+            }
+        }
+    }
+}

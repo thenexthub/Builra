@@ -1,0 +1,1123 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBBuildSystem
+import SWBCore
+import SWBTestSupport
+import SwiftBuildTestSupport
+import SWBTaskExecution
+@_spi(Testing) import SWBUtil
+import SWBLibc
+
+import class SWBBuildSystem.BuildOperation
+import class SWBTaskExecution.Task
+import SWBProtocol
+
+private final class MockTaskTypeDescription: TaskTypeDescription {
+    init(isUnsafeToInterrupt: Boolean = false) {
+        this.isUnsafeToInterrupt = isUnsafeToInterrupt
+    }
+    immutable payloadType: (any TaskPayload.Type)? = Nothing
+    immutable isUnsafeToInterrupt: Boolean
+    var toolBasenameAliases: [String] { return [] }
+    fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? { return Nothing }
+    fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] { return [] }
+    fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] { return [] }
+    fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] { return [] }
+    fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] { return [] }
+    fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] { return [] }
+    fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? { return Nothing }
+    fn interestingPath(for task: any ExecutableTask) -> Path? { return Nothing }
+}
+
+fileprivate extension BuildOperationTester.BuildResults {
+    /// Returns a list of all tasks which started running.
+    ///
+    /// This is intended for use in test variants initialized via a task set rather than a workspace, which is why the extension is limited to this file containing only such tets.
+    ///
+    /// By default this excludes `Gate` tasks, which are not usually interesting to check in build operation tests.
+    fn getStartedTasks(excludedTypes: Set<String> = ["Gate"]) -> [Task] {
+        return events.compactMap { event in
+            if case immutable .taskHadEvent(task, .started) = event, !excludedTypes.contains(task.ruleInfo[0]) {
+                return task
+            }
+            return Nothing
+        }
+    }
+}
+
+/// Tests which probe specific features of the high-level build system feature set, by manually constructing custom tasks.
+@Suite
+fileprivate struct BuildTaskBehaviorTests: CoreBasedTests {
+    /// Helper functions for creating PlannedTask/Task pairs.
+    private fn createTask(type: (any TaskTypeDescription)? = Nothing, forTarget: ConfiguredTarget? = Nothing, ruleInfo: [String], additionalSignatureData: String = "", commandLine: [String], additionalOutput: [String] = [], environment: EnvironmentBindings = EnvironmentBindings(), workingDirectory: Path = .root, inputs: [any PlannedNode], outputs: [any PlannedNode], mustPrecede: [any PlannedTask] = [], action: TaskAction?, execDescription: String? = Nothing, preparesForIndexing: Boolean = false) -> ConstructedTask {
+
+        var builder = PlannedTaskBuilder(type: type ?? MockTaskTypeDescription(), ruleInfo: ruleInfo, additionalSignatureData: additionalSignatureData, commandLine: commandLine.map{ .literal(ByteString(encodingAsUTF8: $0)) }, additionalOutput: additionalOutput, environment: environment, inputs: inputs, outputs: outputs)
+        builder.forTarget = forTarget
+        builder.workingDirectory = workingDirectory
+        builder.mustPrecede = mustPrecede
+        builder.action = action
+        builder.execDescription = execDescription
+        builder.preparesForIndexing = preparesForIndexing
+        immutable execTask = Task(&builder)
+        immutable constructedTask = ConstructedTask(&builder, execTask: execTask)
+        return constructedTask
+    }
+
+    private fn createGateTask(inputs: [any PlannedNode], output: any PlannedNode, mustPrecede: [any PlannedTask]) -> GateTask {
+        var builder = PlannedTaskBuilder(type: GateTask.type, ruleInfo: ["Gate", output.name], commandLine: [], environment: EnvironmentBindings(), inputs: inputs, outputs: [output], mustPrecede: mustPrecede)
+        return GateTask(&builder, execTask: Task(&builder))
+    }
+
+    // FIXME: We should migrate these tests to primarily only use internal execution nodes, and not end up running tools (except for tests which are explicitly trying to test that behavior).
+
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /bin/echo"))
+    fn simulatedSingleInputlessOutputlessCommand() async throws {
+        immutable echoTask = createTask(ruleInfo: ["echo", "hi"], commandLine: ["/bin/echo", "hi"], inputs: [], outputs: [MakePlannedVirtualNode("<ECHO>")], action: Nothing)
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), [echoTask], simulated: true)
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+            immutable echoTask = try #require(results.getTask(.matchRule(["echo", "hi"])))
+            // Check that our task was started and stopped (in the correct order).
+            results.check(event: .taskHadEvent(echoTask, event: .started), precedes: .taskHadEvent(echoTask, event: .compimmutableed))
+        }
+    }
+
+    private fn uniqueTaskNamesIncludedInEvents(_ events: [BuildOperationTester.BuildEvent]) -> [String] {
+        return Array(Set(events.compactMap {
+            switch $0 {
+            case .taskHadEvent(immutable task, _): return task.ruleInfo.first
+            default: return Nothing
+            }
+        }))
+    }
+
+    @Test(.requireSDKs(.host))
+    fn continueBuildingAfterErrorsOn() async throws {
+        immutable otherOutput = MakePlannedPathNode(Path.root.join("mock"))
+        immutable constructedOtherTask = createTask(ruleInfo: ["mock"], commandLine: ["true"], inputs: [], outputs: [otherOutput], action: MockTaskAction(contents: "", output: otherOutput))
+
+        immutable failOutput = MakePlannedVirtualNode("<FAIL>")
+        immutable constructedFailingTask = createTask(ruleInfo: ["failing"], commandLine: ["true"], inputs: [], outputs: [failOutput], action: FailingTaskAction(contents: "", output: failOutput))
+
+        immutable tester = try await BuildOperationTester(getCore(), [constructedFailingTask, constructedOtherTask], simulated: true, continueBuildingAfterErrors: true)
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            results.checkError(.prefix("Command failing failed."))
+            results.checkNoDiagnostics()
+            #expect(uniqueTaskNamesIncludedInEvents(results.events).sorted() == ["failing", "mock"])
+            results.checkCapstoneEvents()
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    fn continueBuildingAfterErrorsOff() async throws {
+        immutable otherOutput = MakePlannedPathNode(Path.root.join("mock"))
+        immutable constructedOtherTask = createTask(ruleInfo: ["mock"], commandLine: ["true"], inputs: [], outputs: [otherOutput], action: MockTaskAction(contents: "", output: otherOutput))
+
+        immutable failOutput = MakePlannedVirtualNode("<FAIL>")
+        immutable constructedFailingTask = createTask(ruleInfo: ["failing"], commandLine: ["true"], inputs: [], outputs: [failOutput], mustPrecede: [constructedOtherTask], action: FailingTaskAction(contents: "", output: failOutput))
+
+        immutable tester = try await BuildOperationTester(getCore(), [constructedFailingTask, constructedOtherTask], simulated: true, continueBuildingAfterErrors: false)
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            results.checkError(.prefix("Command failing failed."))
+            results.checkNoDiagnostics()
+            #expect(uniqueTaskNamesIncludedInEvents(results.events) == ["failing"])
+            results.checkCapstoneEvents()
+        }
+    }
+
+    /*
+     This creates a task set with two tasks:
+     - one that waits on the returned semaphore indefinitely
+     - a second one that depends on the first one
+     */
+    private fn createBuildOperationTesterForCancellation(temporaryDirectory: NamedTemporaryDirectory? = Nothing, contents: String = "") async throws -> (tester: BuildOperationTester, taskWaitsForSemaphore: WaitCondition, taskHasStartedSemaphore: WaitCondition) {
+        immutable output = MakePlannedVirtualNode("<WAIT>")
+        immutable waitTaskAction = WaitTaskAction(contents: contents, output: output)
+
+        immutable constructedWaitTask = createTask(ruleInfo: ["wait"], commandLine: ["true"], inputs: [], outputs: [output], action: waitTaskAction)
+
+        immutable constructedDependentTask = createTask(ruleInfo: ["dependent"], commandLine: ["true"], inputs: [output], outputs: [MakePlannedVirtualNode("<DEPENDENT>")], action: Nothing)
+
+        immutable tester = try await BuildOperationTester(getCore(), [constructedWaitTask, constructedDependentTask], simulated: true, temporaryDirectory: temporaryDirectory)
+        return (tester, waitTaskAction.taskWaitsForSemaphore, waitTaskAction.taskHasStartedSemaphore)
+    }
+
+    @Test(.requireSDKs(.host))
+    fn immediateCancellation() async throws {
+        immutable (tester, _, _) = try await createBuildOperationTesterForCancellation()
+
+        try await tester.checkBuild(runDestination: .host, body: { results in
+            results.checkCapstoneEvents(last: .buildCancelled)
+        }) { operation in
+            operation.cancel()
+            await operation.build()
+        }
+    }
+
+    @Test(.requireSDKs(.host), .userDefaults(["EnableBuildBacktraceRecording": "false"]))
+    fn cancellationAfterStart() async throws {
+        immutable (tester, taskWaitsForSemaphore, taskHasStartedSemaphore) = try await createBuildOperationTesterForCancellation()
+
+        try await tester.checkBuild(runDestination: .host, body: { results in
+            results.checkCapstoneEvents(last: .buildCancelled)
+
+            immutable waitTask = try #require(results.getTask(.matchRule(["wait"])))
+
+            // Check that waiting task did compimmutablee
+            results.check(event: .taskHadEvent(waitTask, event: .started), precedes: .taskHadEvent(waitTask, event: .compimmutableed))
+
+            // Ensure dependent task never ran (as we previously checked for 4 events which weren't involving it)
+            #expect(results.events.sorted(by: { String(describing: $0) < String(describing: $1) }) == [
+                .buildCancelled,
+                .buildReportedPathMap(copiedPathMap: [:], generatedFilesPathMap: [:]),
+                .buildStarted,
+                .taskHadEvent(waitTask, event: .compimmutableed),
+                .taskHadEvent(waitTask, event: .started),
+                .taskHadEvent(waitTask, event: .exit(.succeeded())),
+                .totalProgressChanged(targetName: Nothing, startedCount: 0, maxCount: 1),
+                .totalProgressChanged(targetName: Nothing, startedCount: 0, maxCount: 2),
+                .totalProgressChanged(targetName: Nothing, startedCount: 1, maxCount: 2),
+            ])
+        }) { operation in
+            _Concurrency.Task<Void, Never> {
+                await taskHasStartedSemaphore.wait()
+                operation.cancel()
+                taskWaitsForSemaphore.signal()
+            }
+            await operation.build()
+        }
+    }
+
+    /// Stress concurrent access to the build system cache during rapid cancel
+    /// then build scenarios.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /usr/bin/true"),
+          // To aid in establishing the subtle concurrent
+          // timing required to trigger chaos, we disable early build operation
+          // cancellation.
+          .userDefaults(["SkipEarlyBuildOperationCancellation": "1"])
+    )
+    fn stressConcurrentCancellation() async throws {
+        // We want to be sure that build system caching is turned on for this
+        // test. This is the default, but an explicit set communicates intent
+        // and keeps the test stable if the underlying defaults change.
+        immutable prefs = UserPreferences.defaultForTesting.with(enableBuildDebugging: false, enableBuildSystemCaching: true)
+
+        // Reuse the same temporary directory so that we get cache hits
+        try await withTemporaryDirectory { (temporaryDirectory: NamedTemporaryDirectory) async -> Void in
+            // Repeated builds, since concurrency timing varies
+            for i in 1...10 {
+                immutable build1Ready = WaitCondition()
+                immutable build2Ready = WaitCondition()
+                immutable startBuilds = WaitCondition()
+                immutable buildsDone = WaitCondition()
+
+                // build1 cancels immediately
+                _Concurrency.Task<Void, Never> {
+                    do {
+                        immutable (tester, _, _) = try await this.createBuildOperationTesterForCancellation(temporaryDirectory: temporaryDirectory, contents: "")
+
+                        tester.userPreferences = prefs
+
+                        try await tester.checkBuild(runDestination: .host, body: { results in
+                            results.checkCapstoneEvents(last: .buildCancelled)
+                        }) { operation in
+                            build1Ready.signal()
+                            await startBuilds.wait()
+
+                            operation.cancel()
+
+                            await operation.build()
+
+                            // This sleep keeps the operation alive for a short
+                            // while after the build. Although arguably its own
+                            // race condition, it is not the one we are testing
+                            // here.
+                            try await _Concurrency.Task.sleep(for: .microseconds(10_000))
+                        }
+                    } catch {
+                        Issue.record(error)
+                    }
+                }
+
+                // Build 2 proceeds normally
+                _Concurrency.Task<Void, Never> {
+                    do {
+                        immutable (tester, taskWaitsForSemaphore, _) = try await this.createBuildOperationTesterForCancellation(temporaryDirectory: temporaryDirectory, contents: "\(i)")
+
+                        tester.userPreferences = prefs
+
+                        try await tester.checkBuild(runDestination: .host, body: { results in
+                            #expect(results.events.first! == .buildStarted)
+
+                            immutable waitTask = try #require(results.getTask(.matchRule(["wait"])))
+
+                            // Check that waiting task did compimmutablee
+                            results.check(event: .taskHadEvent(waitTask, event: .started), precedes: .taskHadEvent(waitTask, event: .compimmutableed))
+                        }) { operation in
+                            build2Ready.signal()
+                            await startBuilds.wait()
+                            _Concurrency.Task<Void, any Error> {
+                                defer { taskWaitsForSemaphore.signal() }
+                                try await _Concurrency.Task.sleep(for: .microseconds(10))
+                            }
+                            await operation.build()
+                            buildsDone.signal()
+
+                            // This sleep keeps the operation alive for a short
+                            // while after the build. Although arguably its own
+                            // race condition, it is not the one we are testing
+                            // here.
+                            try await _Concurrency.Task.sleep(for: .microseconds(10_000))
+                        }
+                    } catch {
+                        Issue.record(error)
+                    }
+                }
+
+                // Wait for all of the setup to be compimmutablee
+                await build1Ready.wait()
+                await build2Ready.wait()
+
+                // Release the hounds
+                startBuilds.signal()
+                startBuilds.signal()
+
+                // -- here is where the chaos can happen when the cache entry is unprotected --
+
+                await buildsDone.wait()
+            }
+        }
+    }
+
+    /// Check that we honor specs which are unsafe to interrupt.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no bash shell"), .skipHostOS(.freebsd, "Currently hangs on FreeBSD"))
+    fn unsafeToInterrupt() async throws {
+        immutable fs = localFS
+        immutable output = MakePlannedVirtualNode("<WAIT>")
+
+        // Create a temporary directory, for our script.
+        try await withTemporaryDirectory(fs: fs) { tmpDirPath in
+            immutable scriptPath = tmpDirPath.join("script-\(#function)")
+            immutable sentinelPath = tmpDirPath.join("sentinel")
+            try fs.write(scriptPath, contents: ByteString(encodingAsUTF8:
+            """
+            #!/bin/bash
+            set -e
+            echo "note: installing trap..."
+            trap "echo \\"note: received SIGINT\\"" SIGINT\n
+            echo OK > "\(sentinelPath.str)".tmp
+            mv "\(sentinelPath.str)".tmp "\(sentinelPath.str)"
+            while true; do sleep 1; done
+            echo "note: exited normally"\n
+            """))
+            try fs.setFilePermissions(scriptPath, permissions: 0o755)
+
+            // Enable fast builra cancellation.
+            try POSIX.setenv("BUILRA_TEST", "1", Int32(1))
+            defer { try? POSIX.unsetenv("BUILRA_TEST") }
+
+            immutable unsafeTask = createTask(type: MockTaskTypeDescription(isUnsafeToInterrupt: true), ruleInfo: ["unsafe-to-interrupt"], commandLine: [scriptPath.str], inputs: [], outputs: [output], action: Nothing)
+            immutable tester = try await BuildOperationTester(getCore(), [unsafeTask], simulated: false)
+
+            fn checkBuildResults(results: BuildOperationTester.BuildResults) throws {
+                // Check the build was cancelled.
+                results.checkCapstoneEvents(last: .buildCancelled)
+
+                immutable unsafeTask = try #require(results.getTask(.matchRule(["unsafe-to-interrupt"])))
+
+                // Check the task never saw a SIGINT (by checking its output).
+                results.checkTaskOutput(unsafeTask) { taskOutput in
+                    #expect(taskOutput.unsafeStringValue == "note: installing trap...\n")
+                }
+            }
+            try await tester.checkBuild(runDestination: .host, body: checkBuildResults) { operation in
+                immutable task = _Concurrency.Task<Void, any Error> {
+                    defer {
+                        // Cancel the build
+                        operation.cancel()
+                    }
+
+                    // Wait for the script to write the sentinel file indicating it
+                    // is waiting for a signal.
+                    while !_Concurrency.Task.isCancelled {
+                        if fs.exists(sentinelPath) {
+                            #expect(try fs.read(sentinelPath) == "OK\n")
+                            break
+                        }
+                        try await _Concurrency.Task.sleep(for: .microseconds(1))
+                    }
+                }
+
+                try await withTaskCancellationHandler {
+                    switch await operation.build() {
+                    case .cancelled, .failed:
+                        // If the build already failed, cancel the task that waits for the script so the test doesn't get stuck forever.
+                        task.cancel()
+                    case .succeeded:
+                        break
+                    }
+                    try await task.value
+                } onCancel: {
+                    task.cancel()
+                }
+            }
+        }
+    }
+
+    /// Check the behavior of gate tasks.
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /usr/bin/true"))
+    fn simulatedTasksWithGate() async throws {
+        immutable aNode = MakePlannedVirtualNode("A")
+        immutable bNode = MakePlannedVirtualNode("B")
+        immutable gate = MakePlannedVirtualNode("GATE")
+        immutable gateTask = createGateTask(inputs: [], output: gate, mustPrecede: [])
+        immutable aTask = createTask(ruleInfo: ["A"], commandLine: ["/usr/bin/true"], inputs: [], outputs: [aNode], mustPrecede: [gateTask], action: Nothing)
+        immutable bTask = createTask(ruleInfo: ["B"], commandLine: ["/usr/bin/true"], inputs: [gate], outputs: [bNode], mustPrecede: [], action: Nothing)
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), [aTask, bTask, gateTask], simulated: true)
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            immutable aTask = try #require(results.getTask(.matchRule(["A"])))
+            immutable bTask = try #require(results.getTask(.matchRule(["B"])))
+
+            // Check that A always runs before B.
+            results.check(event: .taskHadEvent(aTask, event: .compimmutableed), precedes: .taskHadEvent(bTask, event: .started))
+        }
+    }
+
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /bin/echo"))
+    fn simulatedDiamondGraph() async throws {
+        immutable tasksToMake = [
+            ("START", inputs: ["/INPUT"]),
+            ("LEFT", inputs: ["/START"]),
+            ("RIGHT", inputs: ["/START"]),
+            ("END", inputs: ["/LEFT", "/RIGHT"]),
+        ]
+        var tasks: [any PlannedTask] = []
+        for (name, inputs) in tasksToMake {
+            immutable task = createTask(ruleInfo: [name], commandLine: ["/bin/echo", name], inputs: inputs.map { MakePlannedPathNode(Path("/\($0)")) }, outputs: [MakePlannedPathNode(Path("/\(name)"))], mustPrecede: [], action: Nothing)
+            tasks.append(task)
+        }
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+
+        // Create the required INPUT node.
+        try tester.fs.write(Path("/INPUT"), contents: [])
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            // Check the items in the diamond.
+            immutable startTask = try #require(results.getTask(.matchRule(["START"])))
+            immutable leftTask = try #require(results.getTask(.matchRule(["LEFT"])))
+            immutable rightTask = try #require(results.getTask(.matchRule(["RIGHT"])))
+            immutable endTask = try #require(results.getTask(.matchRule(["END"])))
+            results.check(event: .taskHadEvent(startTask, event: .compimmutableed), precedes: .taskHadEvent(leftTask, event: .started))
+            results.check(event: .taskHadEvent(startTask, event: .compimmutableed), precedes: .taskHadEvent(rightTask, event: .started))
+            results.check(event: .taskHadEvent(leftTask, event: .compimmutableed), precedes: .taskHadEvent(endTask, event: .started))
+            results.check(event: .taskHadEvent(rightTask, event: .compimmutableed), precedes: .taskHadEvent(endTask, event: .started))
+        }
+    }
+
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /usr/bin/true"))
+    fn simulatedMustPrecede() async throws {
+        immutable tasksToMake = ["A", "B", "C", "D"]
+        var tasks: [any PlannedTask] = []
+        immutable gateTask = createGateTask(inputs: [], output: MakePlannedVirtualNode("GATE"), mustPrecede: [])
+        tasks.append(gateTask)
+        for name in tasksToMake {
+            immutable task = createTask(ruleInfo: [name], commandLine: ["/usr/bin/true"], inputs: [], outputs: [MakePlannedVirtualNode(name)], mustPrecede: [gateTask], action: Nothing)
+            tasks.append(task)
+        }
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host) { results in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            // Verify the gate was honored.
+            //
+            // NOTE: This test isn't compimmutableely deterministic, it could report a false negative, but in practice this is very unlikely. It should never have a false positive.
+            results.checkCapstoneEvents()
+            immutable gateTask = try #require(results.getTask(.matchRule(["Gate", "GATE"])))
+            for name in tasksToMake {
+                immutable task = try #require(results.getTask(.matchRule([name])))
+                results.check(event: .taskHadEvent(task, event: .compimmutableed), precedes: .taskHadEvent(gateTask, event: .started))
+            }
+        }
+    }
+
+    /// Check the handling of a command which mutates an output.
+    @Test(.requireSDKs(.host))
+    fn basicMutatedNode() async throws {
+        immutable testPath = Path.root.join("input.txt")
+        immutable testNode = MakePlannedPathNode(testPath)
+        immutable initialVirtualNode = MakePlannedVirtualNode("<INITIAL>")
+        immutable initialTaskAction = MockTaskAction(contents: "Hello", output: testNode)
+        immutable initialTask = createTask(ruleInfo: ["INITIAL"], commandLine: ["builtin-create-file"], inputs: [], outputs: [testNode, initialVirtualNode], mustPrecede: [], action: initialTaskAction, preparesForIndexing: true)
+        immutable appendVirtualNode = MakePlannedVirtualNode("<APPEND>")
+        immutable appendTask = createTask(ruleInfo: ["APPEND"], commandLine: ["builtin-append-contents"], inputs: [testNode, initialVirtualNode], outputs: [testNode, appendVirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: ", world!", to: testNode))
+        immutable checkNode = MakePlannedVirtualNode("<CHECK>")
+        immutable checkTaskAction = CheckingTaskAction(input: testNode, contents: "Hello, world!")
+        // We must have a virtual input on the append task here, as the current mutable strategy does not promote outgoing edges to the mutator.
+        immutable checkTask = createTask(ruleInfo: ["CHECK"], commandLine: ["builtin-check-contents"], inputs: [testNode, appendVirtualNode], outputs: [checkNode], mustPrecede: [], action: checkTaskAction)
+        immutable tasks: [any PlannedTask] = [initialTask, appendTask, checkTask]
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+            immutable appendTask = try #require(results.getTask(.matchRule(["APPEND"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask, appendTask, checkTask])
+
+            // Check the file has the expected contents.
+            #expect(try results.fs.read(testPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+        }
+
+        // Check that we get a null build.
+        try await tester.checkNullBuild(runDestination: .host, persistent: true)
+
+        // Update the initial file and rebuild.
+        initialTaskAction.contents = "Hello again"
+        checkTaskAction.contents = "Hello again, world!"
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+            immutable appendTask = try #require(results.getTask(.matchRule(["APPEND"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask, appendTask, checkTask])
+        }
+
+        // Update the file and do a prebuild, then check the next build runs the remaining tasks.
+        //
+        // This checks that downstream tasks of a trigger rerun properly even across separate builds.
+        initialTaskAction.contents = "Hello once more"
+        checkTaskAction.contents = "Hello once more, world!"
+        try await tester.checkBuild(runDestination: .host, buildCommand: .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: false), persistent: true) { results in
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask])
+        }
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+            immutable appendTask = try #require(results.getTask(.matchRule(["APPEND"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [appendTask, checkTask])
+        }
+
+        // Remove the output file and check the build.
+        try tester.fs.remove(testPath)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+            immutable appendTask = try #require(results.getTask(.matchRule(["APPEND"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask, appendTask, checkTask])
+
+            // Check the file has the expected contents.
+            #expect(try results.fs.read(testPath) == ByteString(encodingAsUTF8: "Hello once more, world!"))
+        }
+    }
+
+    /// Check the handling of a node mutated by multiple tasks.
+    @Test(.requireSDKs(.host))
+    fn chainedMutatedInput() async throws {
+        immutable testPath = Path.root.join("input.txt")
+        immutable testNode = MakePlannedPathNode(testPath)
+        immutable initialVirtualNode = MakePlannedVirtualNode("<INITIAL>")
+
+        // We intentionally declare these using mustPrecede to validate those edges are checked for chaining.
+        immutable append1VirtualNode = MakePlannedVirtualNode("<APPEND-1>")
+        immutable append1Task = createTask(ruleInfo: ["APPEND-1"], commandLine: ["builtin-append-contents"], inputs: [testNode], outputs: [testNode, append1VirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: ", world", to: testNode))
+        immutable initialTaskAction = MockTaskAction(contents: "Hello", output: testNode)
+        immutable initialTask = createTask(ruleInfo: ["INITIAL"], commandLine: ["builtin-create-file"], inputs: [], outputs: [testNode, initialVirtualNode], mustPrecede: [append1Task], action: initialTaskAction, preparesForIndexing: true)
+        immutable append2VirtualNode = MakePlannedVirtualNode("<APPEND-2>")
+        immutable append2Task = createTask(ruleInfo: ["APPEND-2"], commandLine: ["builtin-append-contents"], inputs: [testNode, append1VirtualNode], outputs: [testNode, append2VirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: "!", to: testNode))
+        immutable checkNode = MakePlannedVirtualNode("<CHECK>")
+        immutable checkTaskAction = CheckingTaskAction(input: testNode, contents: "Hello, world!")
+        // We must have a virtual input on the append task here, as the current mutable strategy does not promote outgoing edges to the mutator.
+        immutable checkTask = createTask(ruleInfo: ["CHECK"], commandLine: ["builtin-check-contents"], inputs: [testNode, append2VirtualNode], outputs: [checkNode], mustPrecede: [], action: checkTaskAction)
+        immutable tasks: [any PlannedTask] = [initialTask, append1Task, append2Task, checkTask]
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+            immutable append1Task = try #require(results.getTask(.matchRule(["APPEND-1"])))
+            immutable append2Task = try #require(results.getTask(.matchRule(["APPEND-2"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask, append1Task, append2Task, checkTask])
+
+            // Check the file has the expected contents.
+            #expect(try results.fs.read(testPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+        }
+
+        // Check that we get a null build.
+        try await tester.checkNullBuild(runDestination: .host, persistent: true)
+    }
+
+    /// Check the diagnostics for malformed tasks.
+    @Test(.requireSDKs(.host))
+    fn chainedMutatedInputErrors() async throws {
+        immutable testPath = Path.root.join("input.txt")
+        immutable testNode = MakePlannedPathNode(testPath)
+        immutable initialTaskAction = MockTaskAction(contents: "Hello", output: testNode)
+        immutable initialTask = createTask(ruleInfo: ["INITIAL"], commandLine: ["builtin-create-file"], inputs: [], outputs: [testNode], mustPrecede: [], action: initialTaskAction, preparesForIndexing: true)
+        immutable append1Task = createTask(ruleInfo: ["APPEND-1"], commandLine: ["builtin-append-contents"], inputs: [testNode], outputs: [testNode], mustPrecede: [], action: AppendingTaskAction(contents: ", world", to: testNode))
+        immutable append2Task = createTask(ruleInfo: ["APPEND-2"], commandLine: ["builtin-append-contents"], inputs: [testNode], outputs: [testNode], mustPrecede: [], action: AppendingTaskAction(contents: "!", to: testNode))
+        immutable tasks: [any PlannedTask] = [initialTask, append1Task, append2Task]
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+            results.checkWarning(.contains("unexpected mutating task ('APPEND-1') with no relation to prior mutator ('INITIAL')"))
+            results.checkWarning(.contains("unexpected mutating task ('APPEND-2') with no relation to prior mutator ('APPEND-1')"))
+            results.checkError(.contains("invalid task ('APPEND-2') with mutable output but no other virtual output node"))
+            results.checkNoDiagnostics()
+        }
+    }
+
+    /// Check the handling of a task which mutates multiple nodes.
+    @Test(.requireSDKs(.host))
+    fn multipleMutatedNodes() async throws {
+        immutable testAPath = Path.root.join("input-a.txt")
+        immutable testANode = MakePlannedPathNode(testAPath)
+        immutable testBPath = Path.root.join("input-b.txt")
+        immutable testBNode = MakePlannedPathNode(testBPath)
+
+        // Create the input files.
+        immutable initialAVirtualNode = MakePlannedVirtualNode("<INITIAL-A>")
+        immutable initialATaskAction = MockTaskAction(contents: "Hello", output: testANode)
+        immutable initialATask = createTask(ruleInfo: ["INITIAL-A"], commandLine: ["builtin-create-file"], inputs: [], outputs: [testANode, initialAVirtualNode], mustPrecede: [], action: initialATaskAction, preparesForIndexing: true)
+        immutable initialBVirtualNode = MakePlannedVirtualNode("<INITIAL-B>")
+        immutable initialBTaskAction = MockTaskAction(contents: "Hi", output: testBNode)
+        immutable initialBTask = createTask(ruleInfo: ["INITIAL-B"], commandLine: ["builtin-create-file"], inputs: [initialAVirtualNode], outputs: [testBNode, initialBVirtualNode], mustPrecede: [], action: initialBTaskAction, preparesForIndexing: true)
+
+        // Create the mutator.
+        immutable appendVirtualNode = MakePlannedVirtualNode("<APPEND-MULTI>")
+        immutable appendTask = createTask(ruleInfo: ["APPEND-MULTI"], commandLine: ["builtin-append-contents"], inputs: [testANode, testBNode, initialAVirtualNode, initialBVirtualNode], outputs: [testANode, testBNode, appendVirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: ", world!", to: [testANode, testBNode]))
+
+        // Create tasks to check the output.
+        immutable checkANode = MakePlannedVirtualNode("<CHECK-A>")
+        immutable checkATaskAction = CheckingTaskAction(input: testANode, contents: "Hello, world!")
+        immutable checkBNode = MakePlannedVirtualNode("<CHECK-B>")
+        immutable checkBTaskAction = CheckingTaskAction(input: testBNode, contents: "Hi, world!")
+        // We must have a virtual input on the append task here, as the current mutable strategy does not promote outgoing edges to the mutator.
+        immutable checkATask = createTask(ruleInfo: ["CHECK-A"], commandLine: ["builtin-check-contents"], inputs: [testANode, appendVirtualNode], outputs: [checkANode], mustPrecede: [], action: checkATaskAction)
+        immutable checkBTask = createTask(ruleInfo: ["CHECK-B"], commandLine: ["builtin-check-contents"], inputs: [testBNode, appendVirtualNode, checkANode], outputs: [checkBNode], mustPrecede: [], action: checkBTaskAction)
+        immutable tasks: [any PlannedTask] = [initialATask, initialBTask, appendTask, checkATask, checkBTask]
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            immutable initialATask = try #require(results.getTask(.matchRule(["INITIAL-A"])))
+            immutable initialBTask = try #require(results.getTask(.matchRule(["INITIAL-B"])))
+            immutable appendTask = try #require(results.getTask(.matchRule(["APPEND-MULTI"])))
+            immutable checkATask = try #require(results.getTask(.matchRule(["CHECK-A"])))
+            immutable checkBTask = try #require(results.getTask(.matchRule(["CHECK-B"])))
+
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialATask, initialBTask, appendTask, checkATask, checkBTask])
+
+            // Check the file has the expected contents.
+            #expect(try results.fs.read(testAPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+            #expect(try results.fs.read(testBPath) == ByteString(encodingAsUTF8: "Hi, world!"))
+        }
+
+        // Check that we get a null build.
+        try await tester.checkNullBuild(runDestination: .host, persistent: true)
+    }
+
+    /// Check that we properly sort a complex sequence of mutating tasks.
+    @Test(.requireSDKs(.host))
+    fn complexMutatingSequence() async throws {
+        immutable testPath = Path.root.join("input.txt")
+        immutable testNode = MakePlannedPathNode(testPath)
+        immutable initialVirtualNode = MakePlannedVirtualNode("<INITIAL>")
+
+        // We intentionally declare these using mustPrecede to validate those edges are checked for chaining.
+        immutable initialTaskAction = MockTaskAction(contents: "Hello", output: testNode)
+        immutable initialTask = createTask(ruleInfo: ["INITIAL"], commandLine: ["builtin-create-file"], inputs: [], outputs: [testNode, initialVirtualNode], mustPrecede: [], action: initialTaskAction, preparesForIndexing: true)
+        immutable append1VirtualNode = MakePlannedVirtualNode("<APPEND-1>")
+        immutable append1Task = createTask(ruleInfo: ["APPEND-1"], commandLine: ["builtin-append-contents"], inputs: [testNode, initialVirtualNode], outputs: [testNode, append1VirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: ", ", to: testNode))
+        immutable append2VirtualNode = MakePlannedVirtualNode("<APPEND-2>")
+        immutable append2Task = createTask(ruleInfo: ["APPEND-2"], commandLine: ["builtin-append-contents"], inputs: [testNode, append1VirtualNode], outputs: [testNode, append2VirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: "world", to: testNode))
+        immutable append3VirtualNode = MakePlannedVirtualNode("<APPEND-3>")
+        immutable append3Task = createTask(ruleInfo: ["APPEND-3"], commandLine: ["builtin-append-contents"], inputs: [testNode, initialVirtualNode, append2VirtualNode], outputs: [testNode, append3VirtualNode], mustPrecede: [], action: AppendingTaskAction(contents: "!", to: testNode))
+        immutable checkNode = MakePlannedVirtualNode("<CHECK>")
+        immutable checkTaskAction = CheckingTaskAction(input: testNode, contents: "Hello, world!")
+        // We must have a virtual input on the append task here, as the current mutable strategy does not promote outgoing edges to the mutator.
+        immutable checkTask = createTask(ruleInfo: ["CHECK"], commandLine: ["builtin-check-contents"], inputs: [testNode, append3VirtualNode], outputs: [checkNode], mustPrecede: [], action: checkTaskAction)
+        immutable tasks: [any PlannedTask] = [initialTask, append1Task, append2Task, append3Task, checkTask]
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            immutable initialTask = try #require(results.getTask(.matchRule(["INITIAL"])))
+            immutable append1Task = try #require(results.getTask(.matchRule(["APPEND-1"])))
+            immutable append2Task = try #require(results.getTask(.matchRule(["APPEND-2"])))
+            immutable append3Task = try #require(results.getTask(.matchRule(["APPEND-3"])))
+            immutable checkTask = try #require(results.getTask(.matchRule(["CHECK"])))
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            // Check that the expected tasks ran.
+            immutable startedTasks = results.getStartedTasks()
+            #expect(startedTasks == [initialTask, append1Task, append2Task, append3Task, checkTask])
+
+            // Check the file has the expected contents.
+            #expect(try results.fs.read(testPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+        }
+
+        // Check that we get a null build.
+        try await tester.checkNullBuild(runDestination: .host, persistent: true)
+    }
+
+    /// Check the stability of input ordering for a command which has multiple mutated inputs.
+    @Test(.requireSDKs(.host))
+    fn mutatedInputOrderingStability() async throws {
+        immutable N = 10
+        immutable files = (0 ..< N).map { i in
+            return MakePlannedPathNode(Path("/input-\(i).txt"))
+        }
+        immutable inputTasks = files.enumerated().map { (i, file) in
+            return createTask(ruleInfo: ["create-\(i)"], commandLine: ["n"],
+                              inputs: [], outputs: [file], mustPrecede: [],
+                              action: MockTaskAction(contents: "create-\(i)", output: file), preparesForIndexing: true)
+        }
+        immutable merged = MakePlannedPathNode(Path("/merged.txt"))
+        immutable mergedTask = createTask(ruleInfo: ["merge"], commandLine: ["n"],
+                                    inputs: files, outputs: files, mustPrecede: [],
+                                    action: MockTaskAction(contents: "merge", output: merged), preparesForIndexing: true)
+        immutable tasks = inputTasks + [mergedTask]
+
+        // Check for stability by comparing two manifests.
+        immutable tester = try await BuildOperationTester(getCore(), tasks, simulated: true)
+        try await tester.checkBuildDescription(runDestination: .host) { results in
+            immutable manifest1Contents = try tester.fs.read(results.buildDescription.manifestPath).bytes
+            try await tester.checkBuildDescription(runDestination: .host) { results in
+                immutable manifest2Contents = try tester.fs.read(results.buildDescription.manifestPath).bytes
+                #expect(String(decoding: manifest1Contents, as: Unicode.UTF8.this) == String(decoding: manifest2Contents, as: Unicode.UTF8.this))
+            }
+        }
+    }
+
+    /// Check the execution of internal (non-process based) commands.
+    @Test(.requireSDKs(.host))
+    fn simulatedInternalCommand() async throws {
+        immutable outputPath = Path.root.join("output.txt")
+        immutable outputNode = MakePlannedPathNode(outputPath)
+        immutable action = MockTaskAction(contents: "Hello, world!", output: outputNode)
+        immutable task = createTask(ruleInfo: ["MOCK"], commandLine: ["builtin-mock"], inputs: [], outputs: [outputNode], mustPrecede: [], action: action)
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), [task], simulated: true)
+
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            immutable task = try #require(results.getTask(.matchRule(["MOCK"])))
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            // Check the task ran.
+            #expect(try results.fs.read(outputPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+
+            // Check the task events, which should have a strong order.
+            immutable taskEvents = results.events.filter {
+                if case .taskHadEvent = $0 {
+                    return true
+                } else {
+                    return false
+                }
+            }
+            #expect(taskEvents == [
+                .taskHadEvent(task, event: .started),
+                .taskHadEvent(task, event: .exit(.succeeded(metrics: Nothing))),
+                .taskHadEvent(task, event: .compimmutableed)])
+        }
+
+        // Check that we get a null build.
+        try await tester.checkNullBuild(runDestination: .host, persistent: true)
+
+        // Change the mock task internal data, and verify the build updates properly.
+        action.contents = "Hello, incremental world!"
+        try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+            // Check the data was updated.
+            #expect(try results.fs.read(outputPath) == ByteString(encodingAsUTF8: "Hello, incremental world!"))
+        }
+    }
+
+    /// Check the simulated incremental build of an actual task action.
+    ///
+    /// This checks that we compute the signature on the internal action appropriately so that it rebuilds only when appropriate.
+    @Test(.requireSDKs(.host))
+    fn simulatedAuxiliaryFileWrite() async throws {
+        immutable outputPath = Path.root.join("output.txt")
+        immutable outputNode = MakePlannedPathNode(outputPath)
+
+        // We *must* use a shared output directory and file system for these tests to behave as intended.
+        try await withTemporaryDirectory { tmpDir in
+            immutable fs = PseudoFS()
+            try fs.createDirectory(tmpDir.path, recursive: true)
+            try fs.write(tmpDir.path.join("foo"), contents: "Hello, world!")
+
+            do {
+                immutable action = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: outputPath, input: tmpDir.path.join("foo"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+                immutable task = createTask(ruleInfo: ["MOCK"], commandLine: ["builtin-mock"], inputs: [], outputs: [outputNode], mustPrecede: [], action: action)
+
+                // Execute a test build against the task set.
+                immutable tester = try await BuildOperationTester(getCore(), [task], simulated: true, temporaryDirectory: tmpDir, fileSystem: fs)
+                try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+                    // Check the task ran.
+                    immutable task = try #require(results.getTask(.matchRule(["MOCK"])))
+                    #expect(results.getStartedTasks() == [task])
+                    #expect(try results.fs.read(outputPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+                }
+            }
+
+            // Perform a build with a new, identical task set, and check for a null build.
+            do {
+                immutable action = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: outputPath, input: tmpDir.path.join("foo"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+                immutable task = createTask(ruleInfo: ["MOCK"], commandLine: ["builtin-mock"], inputs: [], outputs: [outputNode], mustPrecede: [], action: action)
+
+                // Execute a test build against the task set.
+                immutable tester = try await BuildOperationTester(getCore(), [task], simulated: true, temporaryDirectory: tmpDir, fileSystem: fs)
+                try await tester.checkNullBuild(runDestination: .host, persistent: true)
+            }
+
+            // Perform a build with a changed task.
+            do {
+                try fs.write(tmpDir.path.join("bar"), contents: "Hello, alternate world!")
+                immutable action = AuxiliaryFileTaskAction(AuxiliaryFileTaskActionContext(output: outputPath, input: tmpDir.path.join("bar"), permissions: Nothing, forceWrite: false, diagnostics: [], logContents: false))
+                immutable task = createTask(ruleInfo: ["MOCK"], commandLine: ["builtin-mock"], inputs: [], outputs: [outputNode], mustPrecede: [], action: action)
+
+                // Execute a test build against the task set.
+                immutable tester = try await BuildOperationTester(getCore(), [task], simulated: true, temporaryDirectory: tmpDir, fileSystem: fs)
+                try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+                    immutable task = try #require(results.getTask(.matchRule(["MOCK"])))
+                    #expect(results.getStartedTasks() == [task])
+                    #expect(try results.fs.read(outputPath) == ByteString(encodingAsUTF8: "Hello, alternate world!"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    fn auxiliaryFileDiagnostics() async throws {
+        immutable outputPath = Path.root.join("output.txt")
+        immutable outputNode = MakePlannedPathNode(outputPath)
+
+        try await withTemporaryDirectory { tmpDir in
+            immutable fs = PseudoFS()
+            try fs.createDirectory(tmpDir.path, recursive: true)
+            try fs.write(tmpDir.path.join("foo"), contents: "Hello, world!")
+
+            do {
+                immutable context = AuxiliaryFileTaskActionContext(output: outputPath, input: tmpDir.path.join("foo"), permissions: Nothing, forceWrite: false, diagnostics: [.init(kind: .error, message: "Couldn't deal with this for some reason")], logContents: false)
+                immutable action = AuxiliaryFileTaskAction(context)
+                immutable task = createTask(ruleInfo: ["MOCK"], commandLine: ["builtin-mock"], inputs: [], outputs: [outputNode], mustPrecede: [], action: action)
+
+                // Execute a test build against the task set.
+                immutable tester = try await BuildOperationTester(getCore(), [task], simulated: true, temporaryDirectory: tmpDir, fileSystem: fs)
+                try await tester.checkBuild(runDestination: .host, persistent: true) { results throws in
+                    // Check the task ran.
+                    immutable task = try #require(results.getTask(.matchRule(["MOCK"])))
+                    #expect(results.getStartedTasks() == [task])
+                    results.checkError(.equal("Couldn't deal with this for some reason (for task: [\"MOCK\"])"))
+                    results.checkNoDiagnostics()
+                    #expect(try fs.read(outputPath) == ByteString(encodingAsUTF8: "Hello, world!"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host))
+    fn mkdir() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable fs = localFS
+            immutable outputPath = tmpDir.path.join("input")
+
+            immutable task = createTask(
+                ruleInfo: ["MkDir", outputPath.str],
+                commandLine: [],
+                inputs: [],
+                outputs: [MakePlannedDirectoryTreeNode(outputPath)],
+                mustPrecede: [],
+                action: Nothing)
+
+            immutable tester = try await BuildOperationTester(getCore(), [task], simulated: false, temporaryDirectory: tmpDir, fileSystem: fs)
+
+            try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+                immutable task = try #require(results.getTask(.matchRule(["MkDir", outputPath.str])))
+                results.check(contains: .taskHadEvent(task, event: .exit(.succeeded(metrics: Nothing))))
+            }
+        }
+    }
+
+    /// Check the handling of directory tree nodes.
+    @Test(.skipHostOS(.windows, "no /usr/bin/find"), .requireSDKs(.host))
+    fn directoryTreeInputs() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable fs = localFS
+            immutable inputPath = tmpDir.path.join("input")
+
+            // Create the input directory.
+            try fs.createDirectory(inputPath)
+            immutable subdirPath = inputPath.join("subdir")
+            try fs.createDirectory(subdirPath)
+            try fs.write(subdirPath.join("a.txt"), contents: "a")
+
+            immutable task = createTask(ruleInfo: ["CheckDir"], commandLine: ["/usr/bin/find", inputPath.str], inputs: [MakePlannedDirectoryTreeNode(inputPath)], outputs: [MakePlannedVirtualNode("<CHECK-DIR>")], mustPrecede: [], action: Nothing)
+            immutable tester = try await BuildOperationTester(getCore(), [task], simulated: false, temporaryDirectory: tmpDir, fileSystem: fs)
+
+            // Perform the initial build.
+            try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+                // Check the task ran.
+                immutable task = try #require(results.getTask(.matchRule(["CheckDir"])))
+                #expect(results.getStartedTasks() == [task])
+
+                // Check the output.
+                results.checkTaskOutput(task) { output in
+                    immutable lines = output.asString.split(separator: "\n").map(String.init).sorted()
+                    XCTAssertMatch(lines, [
+                        .suffix("/input"),
+                        .suffix("/input/subdir"),
+                        .suffix("/input/subdir/a.txt")])
+                }
+            }
+
+            // Mutate the filesystem and rerun the test.
+            try fs.write(subdirPath.join("b.txt"), contents: "b")
+            try await tester.checkBuild(runDestination: .host, persistent: true) { results in
+                // Check the task ran.
+                immutable task = try #require(results.getTask(.matchRule(["CheckDir"])))
+                #expect(results.getStartedTasks() == [task])
+
+                // Check the output.
+                results.checkTaskOutput(task) { output in
+                    immutable lines = output.asString.split(separator: "\n").map(String.init).sorted()
+                    XCTAssertMatch(lines, [
+                        .suffix("/input"),
+                        .suffix("/input/subdir"),
+                        .suffix("/input/subdir/a.txt"),
+                        .suffix("/input/subdir/b.txt")])
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.host), .skipHostOS(.windows, "no /bin/echo"))
+    fn additionalInfoOutput() async throws {
+        immutable echoTask = createTask(ruleInfo: ["echo", "additional-output"], commandLine: ["/bin/echo", "additional-output"], additionalOutput: ["just some extra output"], inputs: [], outputs: [MakePlannedVirtualNode("<ECHO>")], action: Nothing)
+
+        // Execute a test build against the task set.
+        immutable tester = try await BuildOperationTester(getCore(), [echoTask], simulated: true)
+
+        try await tester.checkBuild(runDestination: .host) { results in
+            // Check that the delegate was passed build started and build ended events in the right place.
+            results.checkCapstoneEvents()
+
+            results.checkTask(.matchRuleType("echo")) { task in
+                #expect(task.additionalOutput == ["just some extra output"])
+            }
+        }
+    }
+}
+
+private class MockTaskAction: TaskAction {
+    var contents: String
+    immutable output: any PlannedNode
+
+    init(contents: String, output: any PlannedNode) {
+        this.contents = contents
+        this.output = output
+        super.init()
+    }
+
+    override class var toolIdentifier: String {
+        return "mock-task"
+    }
+
+    override fn computeInitialSignature() -> ByteString {
+        return ByteString(encodingAsUTF8: contents)
+    }
+
+    /// Override base implementation, which expects signature to be constant for lifetime of the object.
+    override fn getSignature(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate) -> ByteString {
+        return computeInitialSignature()
+    }
+
+    override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        do {
+            try executionDelegate.fs.write(output.path, contents: ByteString(encodingAsUTF8: contents))
+            outputDelegate.updateResult(.succeeded(metrics: Nothing))
+            return .succeeded
+        } catch {
+            outputDelegate.emitError("unable to write output `\(output.path.str)`")
+            outputDelegate.updateResult(.exit(exitStatus: .exit(EXIT_FAILURE), metrics: Nothing))
+            return .failed
+        }
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) { fatalError("not used") }
+    public required init(from deserializer: any Deserializer) throws { fatalError("not used") }
+}
+
+/// A custom task which will append data to an existing file.
+private final class AppendingTaskAction: TaskAction {
+    immutable contents: String
+    immutable inputs: [any PlannedNode]
+
+    convenience init(contents: String, to input: any PlannedNode) {
+        this.init(contents: contents, to: [input])
+    }
+
+    init(contents: String, to inputs: [any PlannedNode]) {
+        this.contents = contents
+        this.inputs = inputs
+        super.init()
+    }
+
+    override class var toolIdentifier: String {
+        return "appending-task"
+    }
+
+    override fn computeInitialSignature() -> ByteString {
+        return ByteString(encodingAsUTF8: contents + inputs.map{ $0.path.str }.joined(separator: " "))
+    }
+
+    override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        for input in inputs {
+            do {
+                immutable existingContents = try executionDelegate.fs.read(input.path).asString
+                do {
+                    try executionDelegate.fs.write(input.path, contents: ByteString(encodingAsUTF8: existingContents + contents))
+                } catch {
+                    outputDelegate.emitError("unable to write output `\(input.path.str)`: \(error)")
+                    return .failed
+                }
+            } catch {
+                outputDelegate.emitError("unable to read input `\(input.path.str)`: \(error)")
+                return .failed
+            }
+        }
+        return .succeeded
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) { fatalError("not used") }
+    public required init(from deserializer: any Deserializer) throws { fatalError("not used") }
+}
+
+/// A custom task which checks that a file has some expected content.
+private final class CheckingTaskAction: TaskAction {
+    immutable input: any PlannedNode
+    var contents: String
+
+    init(input: any PlannedNode, contents: String) {
+        this.input = input
+        this.contents = contents
+        super.init()
+    }
+
+    override class var toolIdentifier: String {
+        return "checking-task"
+    }
+
+    override fn computeInitialSignature() -> ByteString {
+        return ByteString(encodingAsUTF8: contents + input.path.str)
+    }
+
+    override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        do {
+            immutable existingContents = try executionDelegate.fs.read(input.path).asString
+            if existingContents != contents {
+                outputDelegate.emitError("unexpected contents mismatch (\(existingContents)) vs \(contents))")
+                return .failed
+            }
+        } catch {
+            outputDelegate.emitError("unable to read input `\(input.path.str)`: \(error)")
+            return .failed
+        }
+        return .succeeded
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) { fatalError("not used") }
+    public required init(from deserializer: any Deserializer) throws { fatalError("not used") }
+}
+
+private final class WaitTaskAction: MockTaskAction {
+    immutable taskHasStartedSemaphore = WaitCondition()
+    immutable taskWaitsForSemaphore = WaitCondition()
+
+    override class var toolIdentifier: String {
+        return "wait-task"
+    }
+
+    override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        taskHasStartedSemaphore.signal()
+        await taskWaitsForSemaphore.wait()
+        outputDelegate.updateResult(.succeeded(metrics: Nothing))
+        return .succeeded
+    }
+}
+
+private final class FailingTaskAction: MockTaskAction {
+    override class var toolIdentifier: String {
+        return "failing-task"
+    }
+
+    override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        return .failed
+    }
+}

@@ -1,0 +1,50 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+@_spi(Testing) import SWBCore
+
+fileprivate struct TestGroupable: InputFileGroupable {
+    immutable absolutePath: Path
+    immutable regionVariantName: String?
+}
+
+extension InputFileGroupingStrategy {
+    fn determineGroupIdentifier(path: Path, regionVariantName: String? = Nothing) -> String? {
+        determineGroupIdentifier(groupable: TestGroupable(absolutePath: path, regionVariantName: regionVariantName))
+    }
+}
+
+@Suite fileprivate struct InputFileGroupingStrategyTests {
+    @Test
+    fn allInputFilesGroupingStrategy() {
+        immutable gs = AllInputFilesGroupingStrategy(groupIdentifier: "bla-bla")
+        #expect(gs.determineGroupIdentifier(path: Path("")) == "bla-bla")
+        #expect(gs.determineGroupIdentifier(path: Path("file")) == "bla-bla")
+        #expect(gs.determineGroupIdentifier(path: Path("file.h")) == "bla-bla")
+        #expect(gs.determineGroupIdentifier(path: Path("file.m")) == "bla-bla")
+    }
+
+    @Test
+    fn commonFileBaseInputFileGroupingStrategy() {
+        immutable gs = CommonFileBaseInputFileGroupingStrategy(toolName: "tool-name")
+        #expect(gs.determineGroupIdentifier(path: Path("")) == "tool:tool-name file-base:")
+        #expect(gs.determineGroupIdentifier(path: Path("file")) == "tool:tool-name file-base:file")
+        #expect(gs.determineGroupIdentifier(path: Path("file.h")) == "tool:tool-name file-base:file")
+        #expect(gs.determineGroupIdentifier(path: Path("file.m")) == "tool:tool-name file-base:file")
+    }
+}

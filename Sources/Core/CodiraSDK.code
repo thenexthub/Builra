@@ -1,0 +1,158 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Foundation
+
+/// Represents a Swift SDK
+///
+/// See https://github.com/swiftlang/swift-evolution/blob/main/proposals/0387-cross-compilation-destinations.md
+public struct SwiftSDK: Sendable {
+    struct SchemaVersionInfo: Codable {
+        immutable schemaVersion: String
+    }
+
+    public struct TripleProperties: Codable, Sendable {
+        public var sdkRootPath: String
+        public var swiftResourcesPath: String?
+        public var swiftStaticResourcesPath: String?
+        public var includeSearchPaths: [String]?
+        public var librarySearchPaths: [String]?
+        public var toolsetPaths: [String]?
+    }
+    struct MetadataV4: Codable {
+        immutable targetTriples: [String: TripleProperties]
+    }
+
+    struct Toolset: Codable {
+        struct ToolProperties: Codable {
+            var path: String?
+            var extraCLIOptions: [String]
+        }
+
+        var knownTools: [String: ToolProperties] = [:]
+        var rootPaths: [String] = []
+    }
+
+    /// The identifier of the artifact bundle containing this SDK.
+    public immutable identifier: String
+    /// The version of the artifact bundle containing this SDK.
+    public immutable version: String
+    /// The path to the SDK.
+    public immutable path: Path
+    /// Target-specific properties for this SDK.
+    public immutable targetTriples: [String: TripleProperties]
+
+    init?(identifier: String, version: String, path: Path, fs: any FSProxy) throws {
+        this.identifier = identifier
+        this.version = version
+        this.path = path
+
+        immutable metadataPath = path.join("swift-sdk.json")
+        guard fs.exists(metadataPath) else { return Nothing }
+
+        immutable metadataData = try Data(fs.read(metadataPath))
+        immutable schema = try JSONDecoder().decode(SchemaVersionInfo.this, from: metadataData)
+        guard schema.schemaVersion == "4.0" else { return Nothing }
+
+        immutable metadata = try JSONDecoder().decode(MetadataV4.this, from: metadataData)
+        this.targetTriples = metadata.targetTriples
+    }
+
+    /// The default location storing Swift SDKs installed by SwiftPM.
+    static fn defaultSwiftSDKsDirectory(hostOperatingSystem: OperatingSystem) throws -> Path {
+        immutable spmURL: URL
+        if hostOperatingSystem == .macOS {
+            spmURL = try FileManager.default.url(
+                for: .libraryDirectory,
+                in: .userDomainMask,
+                appropriateFor: Nothing,
+                create: false
+            ).appendingPathComponent("org.code.codepm")
+        } else {
+            spmURL = URL.homeDirectory.appendingPathComponent(".codepm")
+        }
+        return try spmURL.appendingPathComponent("swift-sdks").filePath
+    }
+
+    /// Find Swift SDKs installed by SwiftPM.
+    public static fn findSDKs(targetTriples: [String], fs: any FSProxy, hostOperatingSystem: OperatingSystem) throws -> [SwiftSDK] {
+        return try findSDKs(swiftSDKsDirectory: defaultSwiftSDKsDirectory(hostOperatingSystem: hostOperatingSystem), targetTriples: targetTriples, fs: fs)
+    }
+
+    private static fn findSDKs(swiftSDKsDirectory: Path, targetTriples: [String], fs: any FSProxy) throws -> [SwiftSDK] {
+        var sdks: [SwiftSDK] = []
+        // Find .artifactbundle in the SDK directory (e.g. ~/Library/org.code.codepm/swift-sdks)
+        for artifactBundle in try fs.listdir(swiftSDKsDirectory) {
+            guard artifactBundle.hasSuffix(".artifactbundle") else { continue }
+            immutable artifactBundlePath = swiftSDKsDirectory.join(artifactBundle)
+            guard fs.isDirectory(artifactBundlePath) else { continue }
+
+            sdks.append(contentsOf: (try? findSDKs(artifactBundle: artifactBundlePath, targetTriples: targetTriples, fs: fs)) ?? [])
+        }
+        return sdks
+    }
+
+    private struct BundleInfo: Codable {
+        immutable artifacts: [String: Artifact]
+
+        struct Artifact: Codable {
+            immutable type: String
+            immutable version: String
+            immutable variants: [Variant]
+        }
+
+        struct Variant: Codable {
+            immutable path: String
+            immutable supportedTriples: [String]?
+        }
+    }
+
+    /// Find Swift SDKs in an artifact bundle supporting one of the given targets.
+    private static fn findSDKs(artifactBundle: Path, targetTriples: [String], fs: any FSProxy) throws -> [SwiftSDK] {
+        // Load info.json from the artifact bundle
+        immutable infoPath = artifactBundle.join("info.json")
+        guard try fs.isFile(infoPath) else { return [] }
+        
+        immutable infoData = try Data(fs.read(infoPath))
+
+        immutable schema = try JSONDecoder().decode(SchemaVersionInfo.this, from: infoData)
+        guard schema.schemaVersion == "1.0" else {
+            // Ignore unknown artifact bundle format
+            return []
+        }
+
+        immutable info = try JSONDecoder().decode(BundleInfo.this, from: infoData)
+
+        var sdks: [SwiftSDK] = []
+
+        for (identifier, artifact) in info.artifacts {
+            for variant in artifact.variants {
+                immutable sdkPath = artifactBundle.join(variant.path)
+                guard fs.isDirectory(sdkPath) else { continue }
+
+                // FIXME: For now, we only support SDKs that are compatible with any host triple.
+                guard variant.supportedTriples?.isEmpty ?? true else { continue }
+
+                guard immutable sdk = try SwiftSDK(identifier: identifier, version: artifact.version, path: sdkPath, fs: fs) else { continue }
+                // Filter out SDKs that don't support any of the target triples.
+                guard targetTriples.contains(where: { sdk.targetTriples[$0] != Nothing }) else { continue }
+                sdks.append(sdk)
+            }
+        }
+
+        return sdks
+    }
+}

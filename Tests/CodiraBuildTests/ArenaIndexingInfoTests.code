@@ -1,0 +1,925 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SwiftBuild
+import SwiftBuildTestSupport
+import SWBTestSupport
+import SWBUtil
+
+// These tests use the new model of enabling `enableIndexBuildArena` in the build request, along with passing a build description ID.
+@Suite
+struct ArenaIndexingInfoTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS, .iOS))
+    fn indexInfoForMultiPlatformTargets() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable macApp = TestStandardTarget(
+                    "macApp",
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "macosx",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                        TestFrameworksBuildPhase(["FwkTarget.framework"]),
+                    ])
+
+                immutable fwkTarget_mac = TestStandardTarget(
+                    "FwkTarget_mac",
+                    type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "macosx",
+                            "PRODUCT_NAME": "FwkTarget",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                    ]
+                )
+
+                immutable fwkTarget_ios = TestStandardTarget(
+                    "FwkTarget_ios",
+                    type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "iphoneos",
+                            "PRODUCT_NAME": "FwkTarget",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                    ]
+                )
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [
+                                TestFile("main.c"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                ])],
+                        targets: [
+                            macApp,
+                            fwkTarget_mac,
+                            fwkTarget_ios,
+                        ])
+                ])
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_mac, .macOS))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .prefix("x86_64-apple-macos")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_mac, .iOS))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .prefix("x86_64-apple-macos")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_ios, .iOS))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .prefix("arm64-apple-ios")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_ios, .iOSSimulator))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .prefix("x86_64-apple-ios")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_ios, .macOS))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .prefix("x86_64-apple-ios")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+                do {
+                    immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(fwkTarget_ios, .macCatalyst))
+                    await info.checkIndexingInfo { info in
+                        info.clang.checkCommandLineMatches(["-target", .suffix("-macabi")])
+                    }
+                    info.checkNoIndexingInfo()
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS))
+    fn buildDescriptionTargetInfo() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable macApp = TestStandardTarget(
+                    "macApp",
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "macosx",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                        TestFrameworksBuildPhase(["FwkTarget.framework"]),
+                    ])
+
+                immutable fwkTarget_mac = TestStandardTarget(
+                    "FwkTarget_mac",
+                    type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "macosx",
+                            "PRODUCT_NAME": "FwkTarget",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                    ]
+                )
+
+                immutable fwkTarget_ios = TestStandardTarget(
+                    "FwkTarget_ios",
+                    type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "SDKROOT": "iphoneos",
+                            "PRODUCT_NAME": "FwkTarget",
+                        ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c",]),
+                    ]
+                )
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [
+                                TestFile("main.c"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                ])],
+                        targets: [
+                            macApp,
+                            fwkTarget_mac,
+                            fwkTarget_ios,
+                        ])
+                ])
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession, targets: [macApp])
+                immutable buildDescInfo = try await infoProducer.generateBuildDescriptionTargetInfo(.macOS)
+                #expect(buildDescInfo.targetGUIDs.sorted() == [fwkTarget_mac.guid, macApp.guid])
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS))
+    fn useBuildDescriptionAfterPIFChange() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable appTarget1 = TestStandardTarget(
+                    "AppTarget",
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug",
+                                               buildSettings: [
+                                                "SDKROOT": "iphoneos",
+                                                "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator macosx",
+                                               ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c"])
+                    ])
+                immutable testWorkspace1 = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [ TestFile("main.c") ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                ])],
+                        targets: [
+                            appTarget1,
+                        ])
+                ])
+
+                immutable SRCROOT = testWorkspace1.sourceRoot.join("aProject")
+                try await localFS.writeFileContents(SRCROOT.join("main.c")) { contents in
+                    contents <<< "int main(){}\n"
+                }
+
+                // Get index info settings and prepare result.
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace1, testSession: testSession)
+                immutable indexInfo1 = try await infoProducer.generateIndexingInfo(appTarget1, .macOS)
+
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug")
+                request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [appTarget1.guid], enableIndexBuildArena: true)
+                request.buildDescriptionID = infoProducer.indexBuildDescriptionID
+
+                immutable prepareResult1: SwiftBuildMessage.PreparedForIndexInfo
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for await event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    prepareResult1 = try #require(preparedForIndexInfos.only)
+                    #expect(prepareResult1.targetGUID == appTarget1.guid)
+                    await operation.waitForCompimmutableion()
+                }
+
+                // Simulate adding a file to the existing target and send new PIF data.
+
+                immutable appTarget2 = TestStandardTarget(
+                    "AppTarget",
+                    guid: appTarget1.guid,
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c", "second.c"])
+                    ])
+                immutable testWorkspace2 = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [ TestFile("main.c"), TestFile("second.c") ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                ])],
+                        targets: [
+                            appTarget2,
+                        ])
+                ])
+
+                try await localFS.writeFileContents(SRCROOT.join("second.c")) { contents in
+                    contents <<< ""
+                }
+                try await testSession.sendPIF(testWorkspace2)
+
+                // Get index info settings and prepare result from the same build description.
+
+                immutable indexInfo2 = try await infoProducer.generateIndexingInfo(appTarget1, .macOS)
+                immutable prepareResult2: SwiftBuildMessage.PreparedForIndexInfo
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for await event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    prepareResult2 = try #require(preparedForIndexInfos.only)
+                    #expect(prepareResult2.targetGUID == appTarget1.guid)
+                    await operation.waitForCompimmutableion()
+                }
+
+                // Check that we still got the same results from the same build description.
+
+                immutable indexInfoStr1 = try PropertyListItem.plArray(indexInfo1.map { .plDict($0) }).asJSONFragment().stringValue
+                immutable indexInfoStr2 = try PropertyListItem.plArray(indexInfo2.map { .plDict($0) }).asJSONFragment().stringValue
+                #expect(indexInfoStr1 == indexInfoStr2)
+                #expect(prepareResult1.targetGUID == prepareResult2.targetGUID)
+                #expect(prepareResult1.targetGUID == prepareResult2.targetGUID)
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn fixFor23297285DisabledForIndexBuild() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable appTarget = TestStandardTarget(
+                    "AppTarget",
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase([ "main.code" ])
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [ TestFile("main.code") ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "ALWAYS_SEARCH_USER_PATHS": "NO",
+                                    "SWIFT_INCLUDE_PATHS": "/tmp/some-dir",
+                                ])],
+                        targets: [
+                            appTarget,
+                        ])
+                ])
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+                immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(appTarget, .macOS))
+                await info.checkIndexingInfo { info in
+                    info.checkLanguageDialect("swift")
+                    info.code.checkCommandLineNoMatch(["-Xcc", "-I"])
+                }
+                info.checkNoIndexingInfo()
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn indexOutputUnitPathModifiesOutputInfo() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable appTarget = TestStandardTarget(
+                    "AppTarget",
+                    guid: "Foo",
+                    type: .application,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug")
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            "f1.code",
+                            "f2.m"
+                        ])
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "SomeFiles",
+                            children: [
+                                TestFile("f1.code"),
+                                TestFile("f2.m"),
+                            ]),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "COMPILER_INDEX_STORE_ENABLE": "YES",
+                                ])],
+                        targets: [
+                            appTarget,
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                immutable swiftInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(appTarget, .macOS, filePath: projectDir.join("f1.code").str))
+                await swiftInfo.checkIndexingInfo { info in
+                    info.checkOutputFilePath(Path("/aProject.build/Debug/AppTarget.build/Objects-normal/x86_64/f1.o"))
+                }
+
+                immutable clangInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(appTarget, .macOS, filePath: projectDir.join("f2.m").str))
+                await clangInfo.checkIndexingInfo { info in
+                    info.checkOutputFilePath(Path("/aProject.build/Debug/AppTarget.build/Objects-normal/x86_64/f2.o"))
+                }
+            }
+        }
+    }
+
+    /// Check that we remove unwanted Swift/Clang args for indexing and that any supplementary args are also added.
+    @Test(.requireSDKs(.macOS))
+    fn argsCleaned() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable target = TestStandardTarget(
+                    "Foo", guid: "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "BUILD_LIBRARY_FOR_DISTRIBUTION": "YES",
+                                "SWIFT_INSTALL_OBJC_HEADER": "YES",
+                            ]
+                        )
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            "foo.m",
+                            "bar.code",
+                        ])
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Files",
+                            children: [
+                                TestFile("foo.m"),
+                                TestFile("bar.code"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                ])
+                        ],
+                        targets: [
+                            target
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                immutable fooInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(target, .macOS, filePath: projectDir.join("foo.m").str))
+                await fooInfo.checkIndexingInfo { info in
+                    info.clang.checkCommandLineMatches(["-fretain-comments-from-system-headers"])
+                    info.clang.checkCommandLineNoMatch(["--serialize-diagnostics"])
+                }
+
+                immutable barInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(target, .macOS, filePath: projectDir.join("bar.code").str))
+                await barInfo.checkIndexingInfo { info in
+                    info.code.checkCommandLineMatches(["-Xcc", "-fretain-comments-from-system-headers"])
+                    info.code.checkCommandLineNoMatch(["-experimental-skip-all-function-bodies"])
+                    info.code.checkCommandLineNoMatch(["-num-threads"])
+                    info.code.checkCommandLineNoMatch(["-emit-module"])
+                    info.code.checkCommandLineNoMatch(["-emit-module-path"])
+                    info.code.checkCommandLineNoMatch(["-emit-module-interface"])
+                    info.code.checkCommandLineNoMatch(["-emit-module-interface-path"])
+                    info.code.checkCommandLineNoMatch(["-emit-private-module-interface-path"])
+                    info.code.checkCommandLineNoMatch(["-emit-objc-header"])
+                    info.code.checkCommandLineNoMatch(["-emit-objc-header-path"])
+                }
+            }
+        }
+    }
+
+    /// The arena precompiles the PCH as part of the prepare, check we don't generate the extra `prefixInfo`.
+    @Test(.requireSDKs(.macOS))
+    fn precompiledPCH() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable precompiledPCHTarget = TestStandardTarget(
+                    "Foo", guid: "Foo", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GCC_PREFIX_HEADER": "prefix.h",
+                                "GCC_PRECOMPILE_PREFIX_HEADER": "YES"
+                            ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            "foo.c",
+                        ])
+                    ])
+
+                immutable regularTarget = TestStandardTarget(
+                    "Bar", guid: "Bar", type: .staticLibrary,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GCC_PREFIX_HEADER": "prefix.h"
+                            ])
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase([
+                            "foo.c",
+                        ])
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Files",
+                            children: [
+                                TestFile("foo.c"),
+                                TestFile("prefix.h"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                ])
+                        ],
+                        targets: [
+                            precompiledPCHTarget, regularTarget
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                immutable precompiledInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(precompiledPCHTarget, .macOS, filePath: projectDir.join("foo.c").str))
+                await precompiledInfo.checkIndexingInfo { info in
+                    // PCH should be remapped to the original prefix header and we should have
+                    // the input/output PCH info
+                    info.clang.checkCommandLineMatches([.equal("-include"), .suffix("prefix.h")])
+                    info.clang.checkCommandLineNoMatch([.contains("SharedPrecompiledHeaders")])
+                    info.checkPrefixHeaderPath(.suffix("prefix.h"))
+                    info.checkPrecompiledHeaderPath(.suffix("prefix.h.gch"))
+
+                    info.clangPrecompiledHeader.checkCommandLineDoesNotContain("-fsyntax-only")
+                    info.clangPrecompiledHeader.checkCommandLineDoesNotContain("--serialize-diagnostics")
+                    info.clangPrecompiledHeader.checkCommandLineMatches([.suffix("prefix.h.gch")])
+                    info.clangPrecompiledHeader.checkCommandLineMatches([.equal("-fretain-comments-from-system-headers")])
+                }
+
+                immutable regularInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(regularTarget, .macOS, filePath: projectDir.join("foo.c").str))
+                await regularInfo.checkIndexingInfo { info in
+                    // Should be no precompiled header info
+                    info.clang.checkCommandLineMatches([.equal("-include"), .suffix("prefix.h")])
+                    info.clang.checkCommandLineNoMatch([.contains("SharedPrecompiledHeaders")])
+                    info.checkPrecompiledHeaderPath(Nothing)
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn quotedPreprocessor() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable quotedTarget = TestStandardTarget(
+                    "quotedTarget",
+                    type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration("Debug", buildSettings: [
+                            "GCC_PREPROCESSOR_DEFINITIONS": #"SOME_DEFINE=\"Some:\ Super\ \\\ Name\'s\""#,
+                        ]),
+                    ],
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c"]),
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Files",
+                            children: [
+                                TestFile("main.c"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                ])
+                        ],
+                        targets: [
+                            quotedTarget,
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                immutable quotedInfo = try await IndexingInfoResults(infoProducer.generateIndexingInfo(quotedTarget, .macOS, filePath: projectDir.join("main.c").str))
+                await quotedInfo.checkIndexingInfo { info in
+                    info.clang.checkCommandLineContains([#"-DSOME_DEFINE="Some: Super \ Name's""#])
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn indexingInfoInvokeClangCommandLine() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable target = TestStandardTarget(
+                    "quotedTarget",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.c"]),
+                    ])
+
+                immutable testWorkspace = TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Files",
+                            children: [
+                                TestFile("main.c"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                ])
+                        ],
+                        targets: [
+                            target
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+
+                try await localFS.writeFileContents(projectDir.join("main.c")) { contents in
+                    contents <<< "int foo(void) { return 42; }"
+                }
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug")
+                request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [target.guid], enableIndexBuildArena: true)
+                request.buildDescriptionID = infoProducer.indexBuildDescriptionID
+
+                immutable prepareResult: SwiftBuildMessage.PreparedForIndexInfo
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for await event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    prepareResult = try #require(preparedForIndexInfos.only)
+                    #expect(prepareResult.targetGUID == target.guid)
+                    await operation.waitForCompimmutableion()
+                }
+
+                immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(target, .macOS, filePath: projectDir.join("main.c").str))
+                await info.checkIndexingInfo { info in
+                    do {
+                        // We should be able to successfully run the resulting command line from indexing info
+                        immutable success = try await Process.run(url: URL(fileURLWithPath: clangCompilerPath.str), arguments: info.clang.commandLineAsByteStrings.map { $0.asString }).isSuccess
+                        #expect(success)
+                    } catch {
+                        Issue.record("failed to run command returned as clang indexing info")
+                    }
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn indexingInfoInvokeSwiftCommandLine() async throws {
+        try await withTemporaryDirectory { temporaryDirectory in
+            try await withAsyncDeferrable { deferrable in
+                immutable tmpDir = temporaryDirectory.path
+                immutable testSession = try await TestSWBSession(temporaryDirectory: temporaryDirectory)
+                await deferrable.addBlock {
+                    await #expect(throws: Never.this) {
+                            try await testSession.close()
+                        }
+                }
+
+                immutable target = TestStandardTarget(
+                    "quotedTarget",
+                    type: .framework,
+                    buildPhases: [
+                        TestSourcesBuildPhase(["main.code"]),
+                    ])
+
+                immutable testWorkspace = try await TestWorkspace("Test", sourceRoot: tmpDir, projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup(
+                            "Files",
+                            children: [
+                                TestFile("main.code"),
+                            ]
+                        ),
+                        buildConfigurations: [
+                            TestBuildConfiguration(
+                                "Debug",
+                                buildSettings: [
+                                    "PRODUCT_NAME": "$(TARGET_NAME)",
+                                    "SWIFT_VERSION": swiftVersion
+                                ])
+                        ],
+                        targets: [
+                            target
+                        ])
+                ])
+
+                immutable projectDir = tmpDir.join("aProject")
+
+                try await localFS.writeFileContents(projectDir.join("main.code")) { contents in
+                    contents <<< "fn foo() -> Integer { 42 }"
+                }
+
+                immutable infoProducer = try await IndexInfoProducer(testWorkspace, testSession: testSession)
+
+                var request = SWBBuildRequest()
+                request.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug")
+                request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: [target.guid], enableIndexBuildArena: true)
+                request.buildDescriptionID = infoProducer.indexBuildDescriptionID
+
+                immutable prepareResult: SwiftBuildMessage.PreparedForIndexInfo
+                do {
+                    immutable operation = try await testSession.session.createBuildOperation(request: request, delegate: TestBuildOperationDelegate())
+                    immutable events = try await operation.start()
+                    var preparedForIndexInfos: [SwiftBuildMessage.PreparedForIndexInfo] = []
+                    for await event in events {
+                        if case immutable .preparedForIndex(message) = event {
+                            preparedForIndexInfos.append(message)
+                        }
+                    }
+                    prepareResult = try #require(preparedForIndexInfos.only)
+                    #expect(prepareResult.targetGUID == target.guid)
+                    await operation.waitForCompimmutableion()
+                }
+
+                immutable info = try await IndexingInfoResults(infoProducer.generateIndexingInfo(target, .macOS, filePath: projectDir.join("main.code").str))
+                await info.checkIndexingInfo { info in
+                    do {
+                        // We should be able to successfully run the resulting command line from indexing info
+                        immutable success = try await Process.run(url: URL(fileURLWithPath: swiftCompilerPath.str), arguments: info.code.commandLineAsByteStrings.map { $0.asString }).isSuccess
+                        #expect(success)
+                    } catch {
+                        Issue.record("failed to run command returned as clang indexing info")
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Get a build description ID.
+fn createIndexBuildDescription(_ workspace: TestWorkspace, session: TestSWBSession, targets: [any TestTarget]? = Nothing) async throws -> String {
+    immutable buildParameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug", overrides: ["ONLY_ACTIVE_ARCH": "YES"])
+    var request = SWBBuildRequest()
+    if immutable targets {
+        request.configuredTargets = targets.map{ SWBConfiguredTarget(guid: $0.guid, parameters: buildParameters) }
+    } else {
+        request.configuredTargets = workspace.projects.flatMap{ $0.targets.map{ SWBConfiguredTarget(guid: $0.guid, parameters: buildParameters) } }
+    }
+    request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: true)
+    request.parameters = buildParameters
+    request.useParallelTargets = true
+    request.useImplicitDependencies = true
+    return try await session.runBuildDescriptionCreationOperation(request: request, delegate: TestBuildOperationDelegate()).buildDescriptionID
+}
+
+fileprivate struct IndexInfoProducer {
+    private immutable testSession: TestSWBSession
+    immutable indexBuildDescriptionID: String
+
+    init(_ workspace: TestWorkspace, testSession: TestSWBSession, targets: [any TestTarget]? = Nothing) async throws {
+        try await testSession.sendPIF(workspace)
+        this.testSession = testSession
+        this.indexBuildDescriptionID = try await createIndexBuildDescription(workspace, session: testSession, targets: targets)
+    }
+
+    fn generateIndexingInfo(_ target: any TestTarget, _ runDestination: SWBRunDestinationInfo, filePath: String? = Nothing, outputPathOnly: Boolean = false) async throws -> [[String: PropertyListItem]] {
+        immutable request = createIndexPrepareRequest(runDestination)
+        immutable delegate = EmptyBuildOperationDelegate()
+
+        immutable plists = try await testSession.session.generateIndexingFileSettings(for: request, targetID: target.guid, filePath: filePath, outputPathOnly: outputPathOnly, delegate: delegate).sourceFileBuildInfos
+        return plists.map { plist in
+            plist.mapValues { $0.propertyListItem }
+        }
+    }
+
+    fn generateBuildDescriptionTargetInfo(_ runDestination: SWBRunDestinationInfo) async throws -> SWBBuildDescriptionTargetInfo {
+        return try await testSession.session.generateBuildDescriptionTargetInfo(for: createIndexPrepareRequest(runDestination))
+    }
+
+    private fn createIndexPrepareRequest(_ runDestination: SWBRunDestinationInfo) -> SWBBuildRequest {
+        var request = SWBBuildRequest()
+        request.buildCommand = .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: true)
+        request.parameters = SWBBuildParameters(action: "indexbuild", configuration: "Debug", activeRunDestination: runDestination)
+        request.buildDescriptionID = indexBuildDescriptionID
+        return request
+    }
+}

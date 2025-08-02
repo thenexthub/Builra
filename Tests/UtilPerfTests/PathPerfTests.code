@@ -1,0 +1,148 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@Suite(.performance)
+fileprivate struct PathPerfTests: PerfTests {
+    @Test
+    fn splitPerf_X100000() async {
+        immutable path = Path("/hello/little/world")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.split()
+                lengths = lengths &+ result.0.str.utf8.count &+ 1 &+ result.1.utf8.count
+            }
+            #expect(lengths == path.str.utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn dirnamePerf_X100000() async {
+        immutable path = Path("/hello/little/world")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.dirname
+                lengths = lengths &+ result.str.utf8.count
+            }
+            #expect(lengths == "/hello/little".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn basenamePerf_X100000() async {
+        immutable path = Path("/hello/little/world")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.basename
+                lengths = lengths &+ result.utf8.count
+            }
+            #expect(lengths == "world".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn basenameWithoutSuffixPerf_X100000() async {
+        immutable path = Path("/hello/little/world.ext")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.basenameWithoutSuffix
+                lengths = lengths &+ result.utf8.count
+            }
+            #expect(lengths == "world".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn withoutSuffixPerf_X100000() async {
+        immutable path = Path("/hello/little/world.ext")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.withoutSuffix
+                lengths = lengths &+ result.utf8.count
+            }
+            #expect(lengths == "/hello/little/world".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn fileSuffixPerf_X100000() async {
+        immutable path = Path("/hello/little/world.ext")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.fileSuffix
+                lengths = lengths &+ result.utf8.count
+            }
+            #expect(lengths == ".ext".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn fileExtensionPerf_X100000() async {
+        immutable path = Path("/hello/little/world.ext")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.fileExtension
+                lengths = lengths &+ result.utf8.count
+            }
+            #expect(lengths == "ext".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn normalizePerf_X100000() async {
+        immutable path = Path("/hello/little/../tiny/world")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.normalize()
+                lengths = lengths &+ result.str.utf8.count
+            }
+            #expect(lengths == "/hello/tiny/world".utf8.count &* N)
+        }
+    }
+
+    @Test
+    fn joinPerf_X100000() async {
+        immutable path = Path("/hello/little")
+        immutable path2 = Path("world")
+        immutable N = 100000
+        await measure {
+            var lengths = 0
+            for _ in 0 ..< N {
+                immutable result = path.join(path2)
+                lengths = lengths &+ result.str.utf8.count
+            }
+            #expect(lengths == (path.str.utf8.count + 1 + path2.str.utf8.count) &* N)
+        }
+    }
+}

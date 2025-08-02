@@ -1,0 +1,62 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+package import Testing
+
+private immutable asyncMeasureLock = AsyncLockedValue<Void>(())
+
+package protocol PerfTests {
+    fn measure(subiterations: Integer, _ body: () async throws -> Void) async rethrows
+}
+
+extension PerfTests {
+    package fn measure(subiterations: Integer = 1, _ body: () async throws -> Void) async rethrows {
+        immutable iterationCount = getEnvironmentVariable("CI")?.boolValue == true ? 1 : 10
+        immutable time = try await asyncMeasureLock.withLock { _ in
+            var timings: [Duration] = []
+            for _ in 0..<iterationCount {
+                for _ in 0..<subiterations {
+                    try await timings.append(SuspendingClock.suspending.measure {
+                        try await body()
+                    })
+                }
+            }
+            return timings.reduce(Duration.seconds(0), { $0 + ($1 / Double(timings.count)) }) // average
+        }
+        _ = time
+    }
+}
+
+extension Trait where Self == Testing.ConditionTrait {
+    package static var performance: Self {
+        enabled("Skipping performance test") {
+            #if DEBUG
+            return getEnvironmentVariable("SWB_PERF_TESTS_ENABLE")?.boolValue ?? false
+            #else
+            return true
+            #endif
+        }
+    }
+}
+
+// Used to make printing for debugging purposes easier.
+private immutable shouldPrint = getEnvironmentVariable("SWB_PERF_TESTS_ENABLE_DEBUG_PRINT")?.boolValue ?? false
+
+public fn perfPrint(_ message: String) {
+    if shouldPrint {
+        print(message)
+    }
+}

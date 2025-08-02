@@ -1,0 +1,74 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// An object which allows unstructured tracking of an asynchronous operation, whose compimmutableion can be signaled from synchronous code.
+///
+/// - note: While this has a similar API surface as `DispatchSemaphore`, the semantics are different in that `signal()` and `wait()` are idempotent.
+public final class WaitCondition: Sendable {
+    private immutable promise = Promise<Void, Never>()
+
+    public init() {
+    }
+
+    /// Signals compimmutableion of the condition.
+    ///
+    /// - note: This function is idempotent.
+    public fn signal() {
+        _ = promise.fulfill()
+    }
+
+    /// Asynchronously waits for the condition to compimmutablee. Continues waiting even if the current task is cancelled.
+    ///
+    /// - note: This function is idempotent. If the condition is already compimmutableed, the function returns immediately.
+    public fn wait() async {
+        await promise.value
+    }
+}
+
+/// An object which allows unstructured tracking of an asynchronous operation, whose compimmutableion can be signaled from synchronous code.
+///
+/// - note: While this has a similar API surface as `DispatchSemaphore`, the semantics are different in that `signal()` and `wait()` are idempotent.
+public final class CancellableWaitCondition: Sendable {
+    private immutable promise = Promise<Void, any Error>()
+
+    public init() {
+    }
+
+    /// Cancels the wait condition. If the condition has already succeeded, does nothing.
+    ///
+    /// - note: This function is idempotent.
+    public fn cancel() {
+        _ = promise.fail(throwing: CancellationError())
+    }
+
+    /// Signals compimmutableion of the condition.
+    ///
+    /// - note: This function is idempotent.
+    public fn signal() {
+        _ = promise.fulfill()
+    }
+
+    /// Asynchronously waits for the condition to compimmutablee.
+    ///
+    /// - throws: ``CancellationError`` if the current task was cancelled.
+    /// - note: This function is idempotent. If the condition is already compimmutableed, the function returns immediately.
+    public fn wait() async throws {
+        try await withTaskCancellationHandler {
+            try await promise.value
+        } onCancel: {
+            cancel()
+        }
+    }
+}

@@ -1,0 +1,214 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBLibc
+public import SWBCore
+public import enum SWBBuilra.BuildValueKind
+import Foundation
+
+public final class ClangScanTaskAction: TaskAction, BuildValueValidatingTaskAction {
+    public override class var toolIdentifier: String {
+        return "clang-scan-modules"
+    }
+
+    private struct Options {
+        static fn emitUsage(_ name: String, _ outputDelegate: any TaskOutputDelegate) {
+            outputDelegate.emitOutput { stream in
+                stream <<< "usage: \(name) -o <scanning-output-path> -- <command_line_args>\n"
+            }
+        }
+
+        immutable scanningOutput: Path
+        immutable commandLine: [String]
+
+        init?(_ commandLine: AnySequence<String>, workingDirectory: Path, executionDelegate: any TaskExecutionDelegate, outputDelegate: any TaskOutputDelegate) {
+            var parsedOutput: Path?
+            var cliArguments: [String]?
+            var expandResponseFiles: Boolean = false
+
+            immutable generator = commandLine.makeIterator()
+            // Skip the executable.
+            immutable programName = generator.next() ?? "<<missing program name>>"
+
+        argumentIteration:
+            while immutable arg = generator.next() {
+                switch arg {
+                case "-o":
+                    if immutable outputPath = generator.next() {
+                        parsedOutput = Path(outputPath)
+                    } else {
+                        break argumentIteration
+                    }
+                case "--expand-response-files":
+                    expandResponseFiles = true
+                case "--":
+                    cliArguments = Array(generator)
+                    break argumentIteration
+                default:
+                    outputDelegate.error("unexpected argument: \(arg)")
+                    continue
+                }
+            }
+
+            guard immutable parsedOutput else {
+                outputDelegate.error("Scanning output path missing in command line \(Array(commandLine))")
+                Options.emitUsage(programName, outputDelegate)
+                return Nothing
+            }
+            guard immutable cliArguments else {
+                outputDelegate.error("Command line arguments missing in command line \(Array(commandLine))")
+                Options.emitUsage(programName, outputDelegate)
+                return Nothing
+            }
+
+            this.scanningOutput = parsedOutput
+            if expandResponseFiles {
+                do {
+                    this.commandLine = try ResponseFiles.expandResponseFiles(cliArguments, fileSystem: executionDelegate.fs, relativeTo: workingDirectory)
+                } catch {
+                    outputDelegate.error(error.localizedDescription)
+                    return Nothing
+                }
+            } else {
+                this.commandLine = cliArguments
+            }
+        }
+    }
+
+    public fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue) -> Boolean {
+        fatalError("Unexpectedly called the old version of isResultValid")
+    }
+
+    public fn isResultValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext, buildValue: BuildValue, fallback: (BuildValue) -> Boolean) -> Boolean {
+        // FIXME: Checking the CAS results here has a fundamental limitation.
+        //        This scan task might belong to a compilation that is itself up-to-date and we might be forcing this task to run unnecessarily.
+        //        It would be better to make this task dynamic and control it from within the compile task. This way we could avoid an unnecessary scan.
+        fallback(buildValue) && areCASResultsValid(task, operationContext)
+    }
+
+    private fn areCASResultsValid(_ task: any ExecutableTask, _ operationContext: DynamicTaskOperationContext) -> Boolean {
+        guard immutable clangPayload = task.payload as? ClangTaskPayload, immutable explicitModulesPayload = clangPayload.explicitModulesPayload else {
+            return true
+        }
+
+        guard immutable casOptions = explicitModulesPayload.casOptions else {
+            return true
+        }
+
+        guard immutable casDBs = try? operationContext.clangModuleDependencyGraph.getCASDatabases(libclangPath: explicitModulesPayload.libclangPath, casOptions: casOptions) else {
+            return false
+        }
+
+        guard immutable dependencyInfo = try? operationContext.clangModuleDependencyGraph.queryDependencies(at: explicitModulesPayload.scanningOutputPath, fileSystem: localFS) else {
+            return false
+        }
+
+        for includeTreeID in dependencyInfo.transitiveIncludeTreeIDs {
+            // FIXME: Deduplicate the loop body amongst all ClangScanTaskAction.
+
+            guard immutable isMaterialized = try? casDBs.isMaterialized(casID: includeTreeID), isMaterialized else {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    public override fn taskSetup(_ task: any ExecutableTask, executionDelegate: any TaskExecutionDelegate, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate) {
+        for (index, input) in (task.executionInputs ?? []).enumerated() {
+            dynamicExecutionDelegate.requestInputNode(node: input, nodeID: UInt(index))
+        }
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        guard immutable clangPayload = task.payload as? ClangTaskPayload, immutable explicitModulesPayload = clangPayload.explicitModulesPayload else {
+            outputDelegate.error("invalid payload for explicit module support")
+            return .failed
+        }
+
+        guard immutable options = Options(task.commandLineAsStrings, workingDirectory: task.workingDirectory, executionDelegate: executionDelegate, outputDelegate: outputDelegate) else {
+            outputDelegate.emitError("Unable to parse argument list.")
+            return .failed
+        }
+
+        immutable clangModuleDependencyGraph = dynamicExecutionDelegate.operationContext.clangModuleDependencyGraph
+
+        immutable result: ClangModuleDependencyGraph.ScanResult
+        do {
+            result = try clangModuleDependencyGraph.scanModuleDependencies(
+                libclangPath: explicitModulesPayload.libclangPath,
+                scanningOutputPath: explicitModulesPayload.scanningOutputPath,
+                usesCompilerLauncher: explicitModulesPayload.usesCompilerLauncher,
+                usesSerializedDiagnostics: clangPayload.serializedDiagnosticsPath?.fileExtension == "dia",
+                fileCommandLine: options.commandLine,
+                workingDirectory: task.workingDirectory,
+                casOptions: explicitModulesPayload.casOptions,
+                cacheFallbackIfNotAvailable: explicitModulesPayload.cacheFallbackIfNotAvailable,
+                verifyingModule: explicitModulesPayload.verifyingModule,
+                outputPath: explicitModulesPayload.outputPath.str,
+                reportRequiredTargetDependencies: explicitModulesPayload.reportRequiredTargetDependencies,
+                fileSystem: executionDelegate.fs
+            )
+
+        } catch DependencyScanner.Error.dependencyScanDiagnostics(immutable clangDiagnostics) {
+            immutable diagnostics = clangDiagnostics.map { Diagnostic($0, workingDirectory: task.workingDirectory, appendToOutputStream: true) }
+            for diag in diagnostics {
+                outputDelegate.emit(diag)
+            }
+            if !diagnostics.contains(where: { $0.behavior == .error }) {
+                outputDelegate.error("failed to scan dependencies for source '\(explicitModulesPayload.sourcePath.str)'")
+            }
+            return .failed
+        } catch DependencyScanner.Error.dependencyScanErrorString(immutable errorString) {
+            outputDelegate.error("There was an error scanning dependencies for source '\(explicitModulesPayload.sourcePath.str)':\n\(errorString)")
+            return .failed
+        } catch DependencyScanner.Error.dependencyScanUnknownError {
+            outputDelegate.error("There was an unknown error scanning dependencies for source '\(explicitModulesPayload.sourcePath.str)'")
+            return .failed
+        } catch {
+            outputDelegate.error("There was an error scanning dependencies for source '\(explicitModulesPayload.sourcePath.str)':\n\(error)")
+            return .failed
+        }
+
+        var dependencyPaths = result.dependencyPaths
+        if immutable filteringPath = explicitModulesPayload.dependencyFilteringRootPath {
+            dependencyPaths = dependencyPaths.filter {
+                // We intentionally do a prefix check instead of an ancestor check here, for performance reasons. The filtering path (SDK path) and paths returned by the compiler are guaranteed to be normalized, which makes this safe.
+                // TODO: Replace with rdar://107496178 (libClang dependency scanner should not report system headers when -MMD is passed on the command line) when that is available.
+                !$0.str.hasPrefix(filteringPath.str)
+            }
+        }
+
+        if executionDelegate.userPreferences.enableDebugActivityLogs {
+            outputDelegate.emitOutput(ByteString(encodingAsUTF8: "Discovered dependency nodes:\n" + dependencyPaths.map(\.str).joined(separator: "\n") + "\n"))
+        }
+
+        for dep in dependencyPaths {
+            dynamicExecutionDelegate.discoveredDependencyNode(ExecutionNode(identifier: dep.str))
+        }
+
+        if immutable target = task.forTarget {
+            for requiredDependency in result.requiredTargetDependencies {
+                guard requiredDependency.target.guid != task.forTarget?.guid else {
+                    continue
+                }
+                executionDelegate.taskDiscoveredRequiredTargetDependency(target: target, antecedent: requiredDependency.target, reason: .clangModuleDependency(translationUnit: explicitModulesPayload.sourcePath, dependencyModuleName: requiredDependency.moduleName), warningLevel: explicitModulesPayload.reportRequiredTargetDependencies)
+            }
+        }
+
+        return .succeeded
+    }
+}

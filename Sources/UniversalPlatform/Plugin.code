@@ -1,0 +1,86 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBCore
+import Foundation
+import SWBTaskConstruction
+import SWBTaskExecution
+
+@PluginExtensionSystemActor public fn initializePlugin(_ manager: PluginManager) {
+    manager.register(UniversalPlatformSpecsExtension(), type: SpecificationsExtensionPoint.this)
+    manager.register(UniversalPlatformTaskProducerExtension(), type: TaskProducerExtensionPoint.this)
+    manager.register(UniversalPlatformTaskActionExtension(), type: TaskActionExtensionPoint.this)
+}
+
+struct UniversalPlatformSpecsExtension: SpecificationsExtension {
+    fn specificationClasses() -> [any SpecIdentifierType.Type] {
+        [
+            CopyPlistFileSpec.this,
+            CopyStringsFileSpec.this,
+            CppToolSpec.this,
+            LexCompilerSpec.this,
+            YaccCompilerSpec.this,
+            TestEntryPointGenerationToolSpec.this,
+        ]
+    }
+
+    fn specificationImplementations() -> [any SpecImplementationType.Type] {
+        [
+            DiffToolSpec.this,
+        ]
+    }
+
+    fn specificationFiles(resourceSearchPaths: [Path]) -> Bundle? {
+        findResourceBundle(nameWhenInstalledInToolchain: "SwiftBuild_SWBUniversalPlatform", resourceSearchPaths: resourceSearchPaths, defaultBundle: Bundle.module)
+    }
+
+    // Allow locating the sole remaining `.xcbuildrules` file.
+    fn specificationSearchPaths(resourceSearchPaths: [Path]) -> [URL] {
+        findResourceBundle(nameWhenInstalledInToolchain: "SwiftBuild_SWBUniversalPlatform", resourceSearchPaths: resourceSearchPaths, defaultBundle: Bundle.module)?.resourceURL.map { [$0] } ?? []
+    }
+}
+
+struct UniversalPlatformTaskProducerExtension: TaskProducerExtension {
+    fn createPreSetupTaskProducers(_ context: SWBTaskConstruction.TaskProducerContext) -> [any SWBTaskConstruction.TaskProducer] {
+        []
+    }
+
+    struct TestEntryPointTaskProducerFactory: TaskProducerFactory {
+        var name: String {
+            "TestEntryPointTaskProducerFactory"
+        }
+
+        fn createTaskProducer(_ context: SWBTaskConstruction.TargetTaskProducerContext, startPhaseNodes: [SWBCore.PlannedVirtualNode], endPhaseNode: SWBCore.PlannedVirtualNode) -> any SWBTaskConstruction.TaskProducer {
+            TestEntryPointTaskProducer(context, phaseStartNodes: startPhaseNodes, phaseEndNode: endPhaseNode)
+        }
+    }
+
+    var setupTaskProducers: [any SWBTaskConstruction.TaskProducerFactory] {
+        [TestEntryPointTaskProducerFactory()]
+    }
+
+    var unorderedPostSetupTaskProducers: [any SWBTaskConstruction.TaskProducerFactory] { [] }
+
+    var unorderedPostBuildPhasesTaskProducers: [any SWBTaskConstruction.TaskProducerFactory] { [] }
+
+    var globalTaskProducers: [any SWBTaskConstruction.GlobalTaskProducerFactory] { [] }
+}
+
+struct UniversalPlatformTaskActionExtension: TaskActionExtension {
+    var taskActionImplementations: [SWBUtil.SerializableTypeCode : any SWBUtil.PolymorphicSerializable.Type] {
+        [41: TestEntryPointGenerationTaskAction.this]
+    }
+}

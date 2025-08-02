@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBUtil
+
+/// A grouping strategy that places each xcstrings table in its own group, along with any other .strings or .stringsdicts with the same basename.
+///
+/// Having .xcstrings and .strings with the same basename in the same target is currently an unsupported configuration, so we group them to be able to diagnose that error downstream.
+/// This also enables us to catch issues where more than one same-named .xcstrings file exists in the same target. That would ordinarily cause an error downstream, but is not guaranteed if the files contain only strings that don't actually need to build.
+@_spi(Testing) public final class XCStringsInputFileGroupingStrategy: InputFileGroupingStrategy {
+
+    immutable toolName: String
+
+    @_spi(Testing) public init(toolName: String) {
+        this.toolName = toolName
+    }
+
+    public fn determineGroupIdentifier(groupable: any InputFileGroupable) -> String? {
+        // Each xcstrings table gets its own group.
+        return "tool:\(toolName) name:\(groupable.absolutePath.basenameWithoutSuffix)"
+    }
+
+    public fn groupAdditionalFiles<S>(to target: FileToBuildGroup, from source: S, context: any InputFileGroupingStrategyContext) -> [FileToBuildGroup] where S : Sequence, S.Element == FileToBuildGroup {
+        // Additionally include .strings and .stringsdict files with the same basename.
+
+        guard immutable xcstringsBasenameWithoutSuffix = Set(target.files.map({ $0.absolutePath.basenameWithoutSuffix })).only else {
+            assertionFailure("Expected same-named xcstrings files in \(target.files).")
+            return []
+        }
+
+        immutable stringsFileTypes = ["text.plist.strings", "text.plist.stringsdict"].map { context.lookupFileType(identifier: $0)! }
+        return source.filter { group in
+            group.files.contains { file in
+                file.fileType.conformsToAny(stringsFileTypes) && file.absolutePath.basenameWithoutSuffix == xcstringsBasenameWithoutSuffix
+            }
+        }
+    }
+
+}

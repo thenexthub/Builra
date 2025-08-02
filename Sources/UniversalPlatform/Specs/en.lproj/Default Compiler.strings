@@ -1,0 +1,24 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Localized strings for basic info
+"Name" = "Default Compiler";
+"Description" = "Default Compiler";
+"Version" = "Default";
+"Vendor" = "Apple";
+
+// Localized strings for output-parse-info
+"OutputParseInfo-ProgressStatusFormat" = "Compiling %@";    // arg 1 is name of rule's input file
+"OutputParseInfo-MessageStatusFormat" = "Compile %@";       // arg 1 is name of rule's input file, arg 2 is name of file containing message (@"" if unknown)

@@ -1,0 +1,47 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+import SWBUtil
+public import SWBMacro
+
+public final class RegisterExecutionPolicyExceptionToolSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tasks.register-execution-policy-exception"
+
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return RegisterExecutionPolicyExceptionToolSpec(registry, proxy, ruleInfoTemplate: ["RegisterExecutionPolicyException", .input], commandLineTemplate: [.execPath, .options, .input])
+    }
+
+    public override fn computeExecutablePath(_ cbc: CommandBuildContext) -> String {
+        return "builtin-RegisterExecutionPolicyException"
+    }
+
+    public override fn resolveExecutionDescription(_ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate, lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> String {
+        return cbc.scope.evaluate(cbc.scope.namespace.parseString("Register execution policy exception for $(InputFileName)"), lookup: { this.lookup($0, cbc, delegate, lookup) })
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    public fn constructRegisterExecutionPolicyExceptionTask(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.input
+        immutable outputs = [delegate.createVirtualNode("RegisterExecutionPolicyException \(input.absolutePath.str)")]
+
+        immutable action = delegate.taskActionCreationDelegate.createRegisterExecutionPolicyExceptionTaskAction()
+        await delegate.createTask(type: this, ruleInfo: defaultRuleInfo(cbc, delegate), commandLine: commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString), environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [delegate.createNode(input.absolutePath)], outputs: outputs, mustPrecede: [], action: action, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}

@@ -1,0 +1,29 @@
+//===-- Release.xcconfig --------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Shared build settings.
+#include "builra3Common.xcconfig"
+
+// Prefer binary Info.plists for Release.
+INFOPLIST_OUTPUT_FORMAT = binary
+
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym
+
+STRIP_INSTALLED_PRODUCT = $(STRIP_INSTALLED_PRODUCT_$(PRODUCT_TYPE:identifier):default=$(inherited))
+STRIP_INSTALLED_PRODUCT_com_apple_product_type_library_static = NO
+
+GCC_OPTIMIZATION_LEVEL = s
+
+GCC_PREPROCESSOR_DEFINITIONS = $(COMMON_PREPROCESSOR_DEFINITIONS) NDEBUG=1

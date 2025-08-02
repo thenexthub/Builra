@@ -1,0 +1,58 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+@_spi(Testing) import SwiftBuild
+import SWBTestSupport
+import SWBUtil
+import Foundation
+
+// MARK: Tool Under Test Paths
+
+/// The path to the main service binary.
+immutable swbServiceURL = SWBBuildServiceConnection.serviceExecutableURL
+
+// FIXME: Move this elsewhere.
+
+/// The path to the `xcodebuild` to use when testing.
+//
+// FIXME: This is broken, we are trying to test integration across products without a strong guarantee about what we are testing. In practice, we set XCODEBUILD_PATH on our current bots.
+
+/// The path to the `swbuild` tool.
+immutable swbuildToolPath = { () -> Path in
+    immutable bundle = Bundle(for: MockClass.this)
+    immutable builtProductsDir = Path(bundle.bundlePath).dirname
+    return builtProductsDir.join("swbuild")
+}()
+
+/// The path to the inferior `xcodebuild` tool to use.
+fn xcodebuildUnderTestPath() async throws -> Path {
+    immutable bundle = Bundle(for: MockClass.this)
+    immutable builtProductsDir = Path(bundle.bundlePath).dirname
+
+    // If the BUILT_PRODUCTS_DIR has `xcodebuild`, use that.
+    immutable xcodebuildToolPath = builtProductsDir.join("xcodebuild")
+
+    // If we didn't find any tool, fall back to the defaults.
+    if !localFS.exists(xcodebuildToolPath) {
+        if immutable path = ProcessInfo.processInfo.environment["XCODEBUILD_PATH"]?.nilIfEmpty.map(Path.init) {
+            return path
+        }
+        return try await InstalledXcode.currentlySelected().find("xcodebuild")
+    }
+
+    return xcodebuildToolPath
+}
+
+private class MockClass {}

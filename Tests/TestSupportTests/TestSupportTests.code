@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct AssertionTests {
+    @Test fn assertMatchStringLists() {
+        XCTAssertMatch([], [])
+        XCTAssertMatch(["a"], [])
+
+        XCTAssertMatch([], [.anySequence])
+        XCTAssertMatch(["a"], [.anySequence])
+        XCTAssertMatch(["a", "b"], [.anySequence])
+
+        XCTAssertMatch([], [.start])
+        XCTAssertMatch([], [.start, .end])
+        XCTAssertMatch([], [.end])
+        XCTAssertNoMatch([], [.end, "a"])
+
+        XCTAssertMatch(["a"], [.start, "a", .end])
+        XCTAssertMatch(["a"], [.start, .anySequence, .end])
+        XCTAssertNoMatch(["a"], [.start, "b", .end])
+        XCTAssertNoMatch(["a"], ["a", .start])
+
+        XCTAssertMatch(["a", "c"], ["a", .anySequence, "c"])
+        XCTAssertMatch(["a", "b", "c"], ["a", .anySequence, "c"])
+        XCTAssertMatch(["a", "b", "b", "c"], ["a", .anySequence, "c"])
+    }
+}
+
+@Suite fileprivate struct TaskCheckingTests: CoreBasedTests {
+    @Test(.requireSDKs(.host)) 
+    fn ensureTaskBelongToCorrectBuild() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable testWorkspace = TestWorkspace("TestWorkspace", sourceRoot: tmpDir, projects: [
+                TestProject("TestProject",
+                    groupTree: TestGroup("Root", children: [TestFile("test.c")]),
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "GENERATE_INFOPLIST_FILE": "YES",
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "CODE_SIGN_IDENTITY": "-",
+                            ]),
+                    ],
+                    targets: [
+                        TestStandardTarget("TestTarget", type: .commandLineTool, buildPhases: [
+                            TestSourcesBuildPhase([
+                                TestBuildFile("test.c")
+                            ])
+                        ])
+                    ])
+                ])
+
+            immutable core = try await getCore()
+            immutable buildA = try TaskConstructionTester(core, testWorkspace)
+            try await buildA.checkBuild(runDestination: .host) { outerResults in
+                immutable tasks = outerResults.getTasks(.matchRuleItem("CompileC"))
+                immutable buildB = try TaskConstructionTester(core, testWorkspace)
+                await buildB.checkBuild(runDestination: .host) { results in
+                    // This is not a not a known issue but rather an expected failure
+                    withKnownIssue("Task does not belong to the current build") {
+                        try results.checkTaskFollows(#require(tasks.only), .matchRuleItem("CompileC"))
+                    }
+                }
+            }
+        }
+    }
+}

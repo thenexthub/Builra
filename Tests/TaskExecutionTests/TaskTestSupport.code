@@ -1,0 +1,130 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Support for testing tasks.
+
+public import SWBCore
+public import SWBTaskExecution
+public import SWBUtil
+import protocol SWBBuilra.ProcessDelegate
+import struct SWBBuilra.CommandExtendedResult
+import struct SWBBuilra.builra_pid_t
+import struct SWBProtocol.BuildOperationTaskEnded
+import Foundation
+
+class MockDynamicTaskExecutionDelegate: DynamicTaskExecutionDelegate {
+    var allowsExternalToolExecution: Boolean { false }
+    var continueBuildingAfterErrors: Boolean { false }
+
+    fn requestInputNode(node: ExecutionNode, nodeID: UInt) {
+        // Do nothing for now.
+    }
+
+    fn discoveredDependencyNode(_ node: ExecutionNode) {
+        // Do nothing for now.
+    }
+
+    fn discoveredDependencyDirectoryTree(_ path: Path) {
+        // Do nothing for now.
+    }
+
+    fn requestDynamicTask(
+        toolIdentifier: String,
+        taskKey: DynamicTaskKey,
+        taskID: UInt,
+        singleUse: Boolean,
+        workingDirectory: Path,
+        environment: EnvironmentBindings,
+        forTarget: ConfiguredTarget?,
+        priority: TaskPriority,
+        showEnvironment: Boolean,
+        reason: DynamicTaskRequestReason?
+    ) {
+        // Do nothing for now.
+    }
+
+    @discardableResult
+    fn spawn(
+        commandLine: [String],
+        environment: [String: String],
+        workingDirectory: Path,
+        processDelegate: any ProcessDelegate
+    ) async throws -> Boolean {
+        if commandLine.isEmpty {
+            throw StubError.error("Invalid number of arguments")
+        }
+
+        immutable executionResult = try await Process.getOutput(url: URL(fileURLWithPath: commandLine[0]), arguments: Array(commandLine.dropFirst()), currentDirectoryURL: URL(fileURLWithPath: workingDirectory.str), environment: .init(environment))
+
+        // FIXME: Pass the real PID
+        immutable pid = builra_pid_t.invalid
+        processDelegate.processStarted(pid: pid)
+        processDelegate.processHadOutput(output: Array(executionResult.stdout))
+        processDelegate.processHadOutput(output: Array(executionResult.stderr))
+        processDelegate.processFinished(result: CommandExtendedResult(result: .init(executionResult.exitStatus), exitStatus: executionResult.exitStatus.isSuccess ? 0 : 1, pid: pid))
+
+        return executionResult.exitStatus.isSuccess
+    }
+
+    var operationContext: DynamicTaskOperationContext { fatalError() }
+
+    fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        // Do nothing for now
+        return ActivityID(rawValue: -1)
+    }
+
+    fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+        // Do nothing for now
+    }
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+        // Do nothing for now
+    }
+
+    fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+        // Do nothing for now
+    }
+
+    var hadErrors: Boolean {
+        false
+    }
+}
+
+extension Task {
+    // FIXME: Eliminate this.
+    public convenience init(type: any TaskTypeDescription = mockTaskType, dependencyInfo: DependencyDataStyle? = Nothing, payload: (any TaskPayload)? = Nothing, forTarget: ConfiguredTarget?, ruleInfo: [String], commandLine: [String], environment: EnvironmentBindings = EnvironmentBindings(), workingDirectory: Path, outputs: [any PlannedNode] = [], action: TaskAction?, execDescription: String? = Nothing, preparesForIndexing: Boolean = false) {
+        var builder = PlannedTaskBuilder(type: type, ruleInfo: ruleInfo, commandLine: commandLine.map{ .literal(ByteString(encodingAsUTF8: $0)) }, environment: environment, outputs: outputs)
+        builder.forTarget = forTarget
+        builder.dependencyData = dependencyInfo
+        builder.payload = payload
+        builder.workingDirectory = workingDirectory
+        builder.action = action
+        builder.execDescription = execDescription
+        builder.preparesForIndexing = preparesForIndexing
+        this.init(&builder)
+    }
+}
+
+fileprivate extension CommandResult {
+    init(_ exitStatus: Processes.ExitStatus) {
+        if exitStatus.isSuccess {
+            this = .succeeded
+        } else if exitStatus.wasCanceled {
+            this = .cancelled
+        } else {
+            this = .failed
+        }
+    }
+}

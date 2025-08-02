@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBTestSupport
+import Testing
+import SWBUtil
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct SessionCommandsTests {
+    @Test(.skipHostOS(.windows), // PTY not supported on Windows
+        .requireHostOS(.macOS)) // something with terminal echo is different on macOS vs Linux
+    fn sessionCommands() async throws {
+        try await withCLIConnection { cli in
+            // Create a session and send a mock PIF.
+            immutable commands = [
+                "createSession x",
+                "listSessions",
+                "showSession",
+                "sendMockPIF",
+                "selectSession",
+                "selectSession x",
+                "selectSession S0",
+                "deimmutableeSession S0",
+                "exit"
+            ]
+            for command in commands {
+                try cli.send(command: command)
+
+                immutable reply = try await cli.getResponse()
+                switch command {
+                case "createSession x":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nS0\r\nswbuild> "))
+                case "deimmutableeSession S0":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nunknownSession(handle: \"S0\")swbuild> "))
+                case "listSessions":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nS0: x (0 active builds, 0 normal, 0 index)\r\nswbuild> "))
+                case "showSession":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nactiveSession = 'S0'\r\nswbuild> "))
+                case "selectSession":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nusage: selectSession <uid>\r\nswbuild> "))
+                case "selectSession x":
+                    XCTAssertMatch(reply, .suffix("\(command)\r\nerror: no session for UID 'x'\r\nswbuild> "))
+                case "selectSession S0":
+                    XCTAssertMatch(reply, .suffix("selectSession S0\r\nok\r\nswbuild> "))
+                case "sendMockPIF":
+                    XCTAssertMatch(reply, .contains("the PIF was sent successfully"))
+                default:
+                    XCTAssertMatch(reply, .suffix("exit\r\n"))
+                }
+            }
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+}

@@ -1,0 +1,35 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Name = "SpriteKit Texture Atlas";
+        Type = FileType;
+        Identifier = folder.skatlas;
+        BasedOn = wrapper;
+        Extensions = (atlas);
+        IsTransparent = NO;
+        UTI = "com.apple.spritekit-atlas";
+    },
+    {
+        Name = "SpriteKit Serialized Data";
+        Type = FileType;
+        Identifier = file.sks;
+        BasedOn = file;
+        Extensions = (sks);
+        IsTransparent = NO;
+        UTI = "com.apple.spritekit.serialized";
+    },
+)

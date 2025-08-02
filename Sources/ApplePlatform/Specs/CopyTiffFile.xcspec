@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Identifier = com.apple.build-tasks.copy-tiff-file;
+        Type = Compiler;
+        Name = "Copy Tiff File";
+        Description = "Copies a .tiff file resource with optional compression of the destination file";
+        CommandLine = "builtin-copyTiff [options] --outdir $(ProductResourcesDir) -- $(InputFileRelativePath)";
+        RuleName = "CopyTiffFile $(ProductResourcesDir)/$(InputFileName) $(InputFileRelativePath)";
+        ExecDescription = "Copy $(InputFileName)";
+        ProgressDescription = "Copying $(CommandProgressByType) resources to product";
+        SynthesizeBuildRule = Yes;
+        CommandOutputParser = XCGenericCommandOutputParser;
+        InputFileTypes = (
+            image.tiff
+        );
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileName)"
+        );
+        Options = (
+            {   Name = COMPRESS_TIFF_FILES_WHILE_COPYING;
+                Type = Boolean;
+                DefaultValue = NO;
+                CommandLineArgs = { NO = ();  YES = ("--compression", "lzw"); };
+            },
+        );
+    }
+)

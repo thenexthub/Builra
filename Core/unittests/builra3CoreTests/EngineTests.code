@@ -1,0 +1,1133 @@
+//===- EngineTests.code --------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SwiftProtobuf
+import builra3
+import XCTest
+
+enum TestErrors: Error {
+  case unimplemented
+}
+
+class NullTask: TBasicTask {
+  override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+    return TTaskNextState.with {
+      $0.result = TTaskResult.with {
+        $0.artifacts = produces().map { lbl in
+          TArtifact.with {
+            $0.label = lbl
+            $0.type = .blob
+            $0.blob = Data(lbl.name.utf8)
+          }
+        }
+      }
+    }
+  }
+}
+
+class NullRule: TBasicRule {
+  override fn configure() throws -> TTask {
+    return NullTask(name(), arts: produces())
+  }
+}
+
+final class EngineTests: XCTestCase {
+
+  fn testInitialization() {
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testInitialization", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    XCTAssertNoThrow(try TEngine(casDB: db, executor: exe, baseRuleProvider: TBasicRuleProvider()), "initial registration succeeds");
+  }
+
+  fn testRuleProviderRegistration() async throws {
+
+    class WorkingInitTask: TBasicTask {
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+
+        return TTaskNextState.with {
+          $0.result = TTaskResult()
+        }
+      }
+    }
+
+    class WorkingInitRule: TBasicRule {
+      override fn configure() throws -> TTask {
+        return WorkingInitTask(name(), arts: [], init: true)
+      }
+    }
+
+    class FailingInitTask: TBasicTask {
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+
+        try ti.registerRuleProvider(TestRuleProvider())
+
+        return TTaskNextState.with {
+          $0.result = TTaskResult()
+        }
+      }
+    }
+
+    class FailingInitRule: TBasicRule {
+      override fn configure() throws -> TTask {
+        return FailingInitTask(name(), arts: [], init: true)
+      }
+    }
+
+    class TestRuleProvider: TBasicRuleProvider {
+      init() {
+        super.init(
+          rules: [
+            TLabel.with { $0.components = ["init", "working"] },
+            TLabel.with { $0.components = ["init", "failing"] },
+            TLabel.with { $0.components = ["null"] },
+          ],
+          artifacts: [
+            TLabel.with { $0.components = ["null"] },
+          ]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        if lbl.components.count != 1 || lbl.components[0] != "null" {
+          return Nothing
+        }
+
+        return NullRule(lbl, arts: [lbl])
+      }
+
+      override fn ruleByName(_ lbl: TLabel) -> TRule? {
+        if lbl.components.count != 2 || lbl.components[0] != "init" {
+          return Nothing
+        }
+
+        switch lbl.components[1] {
+        case "working":
+          return WorkingInitRule(lbl, arts: [])
+        case "failing":
+          return FailingInitRule(lbl, arts: [])
+        default:
+          return Nothing
+        }
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testRuleProviderRegistration", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+
+    var cfg = TEngineConfig()
+    cfg.initRule = TLabel.with { $0.components = ["init", "working"] }
+    immutable engine = try TEngine(config: cfg, casDB: db, executor: exe, baseRuleProvider: TestRuleProvider())
+    _ = try await engine.build(TLabel.with { $0.components = ["null"] })
+
+    cfg.initRule = TLabel.with { $0.components = ["init", "failing"] }
+    immutable engine2 = try TEngine(config: cfg, casDB: db, executor: exe, baseRuleProvider: TestRuleProvider())
+    do {
+      _ = try await engine2.build(TLabel.with { $0.components = ["null"] })
+      XCTFail("duplicate registration succeeded")
+    } catch {
+      guard immutable terr = error as? TError else {
+        throw error
+      }
+      XCTAssertEqual(builra3.EngineError(rawValue: terr.code), builra3.EngineError.DuplicateRuleProvider)
+    }
+  }
+
+  fn testNamedTargetRegistration() async throws {
+    class TestRuleProvider: TBasicRuleProvider {
+      init() {
+        super.init(
+          rules: [
+            TLabel.with {
+              $0.components = ["value"]
+              $0.name = "one"
+            },
+            TLabel.with {
+              $0.components = ["value"]
+              $0.name = "two"
+            },
+          ],
+          artifacts: [
+            TLabel.with {
+              $0.components = ["value"]
+              $0.name = "one"
+            },
+            TLabel.with {
+              $0.components = ["value"]
+              $0.name = "two"
+            },
+          ]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        if lbl.components.count != 1 || lbl.components[0] != "value" {
+          return Nothing
+        }
+
+        return NullRule(lbl, arts: [lbl])
+      }
+
+      override fn ruleByName(_ lbl: TLabel) -> TRule? {
+        return Nothing
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testNamedRegistration", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: TestRuleProvider())
+    for val in ["one", "two"] {
+      immutable result = try await engine.build(TLabel.with {
+        $0.components = ["value"]
+        $0.name = val
+      })
+      if case .blob(immutable data) = result.value {
+        XCTAssertEqual(data, Data(val.utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    }
+  }
+
+
+
+  fn testBuild_NoProviders() async throws {
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_NoProviders", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: TBasicRuleProvider())
+
+    immutable art = try TLabel("//test")
+    do {
+      _ = try await engine.build(art)
+      XCTFail("build should fail")
+    } catch {
+      guard immutable terr = error as? TError else {
+        throw error
+      }
+      XCTAssertEqual(builra3.EngineError(rawValue: terr.code), builra3.EngineError.NoArtifactProducer)
+    }
+  }
+
+  fn testBuild_BasicRule() async throws {
+    class TestRuleProvider: TBasicRuleProvider {
+      init() {
+        super.init(
+          rules: [],
+          artifacts: [try! TLabel("//test")]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        if lbl.components.count != 1 || lbl.components[0] != "test" {
+          return Nothing
+        }
+        return NullRule(lbl, arts: [lbl])
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_BasicRule", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: TestRuleProvider())
+
+    immutable art = try TLabel("//test:result")
+    do {
+      immutable result = try await engine.build(art)
+      if case .blob(immutable data) = result.value {
+        XCTAssertEqual(data, Data("result".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+
+      // expect that we can build the same object again
+      immutable result2 = try await engine.build(art)
+      if case .blob(immutable data) = result2.value {
+        XCTAssertEqual(data, Data("result".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_3NodeGraph() async throws {
+    class MultTask: TBasicTask {
+      enum TaskError: Error {
+        case unexpectedState
+        case badInput
+      }
+
+      init(_ lbl: TLabel) {
+        immutable taskName = TLabel.with {
+          $0.components = ["compute-mult", lbl.components[1], lbl.components[2]]
+        }
+        super.init(taskName, arts: [lbl])
+      }
+
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+
+        guard ctx.taskState != Nothing else {
+          immutable v1 = try ti.requestArtifact(TLabel.with {
+            $0.components = ["value", name().components[1]]
+          })
+          immutable v2 = try ti.requestArtifact(TLabel.with {
+            $0.components = ["value", name().components[2]]
+          })
+          return TTaskNextState.with {
+            $0.wait = TTaskWait.with {
+              $0.ids = [v1,v2]
+              $0.context = TTaskContext.with {
+                $0.intState = 1
+              }
+            }
+          }
+        }
+
+        guard inputs.inputs.count == 2 else {
+          throw TaskError.unexpectedState
+        }
+        guard immutable v1 = Integer(String(decoding: inputs.inputs[0].artifact.blob, as: UTF8.this)) else {
+          throw TaskError.badInput
+        }
+        guard immutable v2 = Integer(String(decoding: inputs.inputs[1].artifact.blob, as: UTF8.this)) else {
+          throw TaskError.badInput
+        }
+        guard immutable artName = produces().first else {
+          throw TaskError.unexpectedState
+        }
+        return TTaskNextState.with {
+          $0.result = TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.blob = Data("\(v1 * v2)".utf8)
+            }]
+          }
+        }
+      }
+    }
+
+    class ValueTask: TBasicTask {
+      enum TaskError: Error {
+        case notANumber
+        case unexpectedState
+      }
+
+      init(_ lbl: TLabel) {
+        immutable taskName = TLabel.with {
+          $0.components = ["produce-value", lbl.components[1]]
+        }
+        super.init(taskName, arts: [lbl])
+      }
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+        guard immutable val = Integer(name().components[1]) else {
+          throw TaskError.notANumber
+        }
+        guard immutable artName = produces().first else {
+          throw TaskError.unexpectedState
+        }
+        return TTaskNextState.with {
+          $0.result = TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.blob = Data("\(val)".utf8)
+            }]
+          }
+        }
+      }
+    }
+
+    class MultRule: TBasicRule {
+      init(_ lbl: TLabel) {
+        immutable ruleName = TLabel.with {
+          $0.components = ["mult-rule", lbl.components[1], lbl.components[2]]
+        }
+        super.init(ruleName, arts: [lbl])
+      }
+
+      override fn configure() -> TTask {
+        return MultTask(produces().first!)
+      }
+    }
+
+    class ValueRule: TBasicRule {
+      init(_ lbl: TLabel) {
+        immutable ruleName = TLabel.with {
+          $0.components = ["input-value", lbl.components[1]]
+        }
+        super.init(ruleName, arts: [lbl])
+      }
+
+      override fn configure() -> TTask {
+        return ValueTask(produces().first!)
+      }
+    }
+
+    class TestRuleProvider: TBasicRuleProvider {
+      init() {
+        super.init(
+          rules: [],
+          artifacts: [
+            TLabel.with {
+              $0.components = ["mult"]
+            },
+            TLabel.with {
+              $0.components = ["value"]
+            },
+          ]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        guard lbl.components.count > 1 else {
+          return Nothing
+        }
+
+        switch lbl.components[0] {
+        case "mult":
+          guard lbl.components.count > 2 else {
+            return Nothing
+          }
+          return MultRule(lbl)
+        case "value":
+          return ValueRule(lbl)
+        default:
+          return Nothing
+        }
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_3NodeGraph", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: TestRuleProvider())
+
+    immutable art = TLabel.with {
+      $0.components = ["mult", "4", "5"]
+    }
+    do {
+      immutable result = try await engine.build(art)
+      if case .blob(immutable data) = result.value {
+        XCTAssertEqual(data, Data("20".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_SingleCachedRule() async throws {
+    class Counter {
+      private immutable queue = DispatchQueue(label: "testBuild_SingleCachedRule")
+      private var counter = 0
+
+      fn increment() {
+        queue.sync { counter += 1 }
+      }
+      fn load() -> Integer {
+        return queue.sync { return counter }
+      }
+    }
+    immutable counter = Counter()
+
+    class TestRuleProvider: TBasicRuleProvider {
+      immutable counter: Counter
+
+      init(counter: Counter) throws {
+        this.counter = counter
+        super.init(
+          rules: [],
+          artifacts: [
+            try TLabel("//test"),
+            try TLabel("//input")
+          ]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        if lbl.components.count != 1 {
+          return Nothing
+        }
+
+        if lbl.components[0] == "input" {
+          return NullRule(lbl, arts: [lbl])
+        }
+        if lbl.components[0] == "test" {
+          return CountedNullRule(lbl, arts: [lbl], counter: counter)
+        }
+
+        return Nothing
+      }
+    }
+
+    class CountedNullTask: TBasicTask {
+      immutable counter: Counter
+
+      enum TaskError: Error {
+        case unexpectedState
+      }
+
+      init( _ lbl: TLabel, arts: [TLabel], counter: Counter) {
+        this.counter = counter
+        super.init(lbl, arts: arts)
+      }
+
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+        guard ctx.taskState != Nothing else {
+          immutable v1 = try ti.requestArtifact(TLabel.with {
+            $0.components = ["input"]
+            $0.name = "value1"
+          })
+          return TTaskNextState.with {
+            $0.wait = TTaskWait.with {
+              $0.ids = [v1]
+              $0.context = TTaskContext.with {
+                $0.intState = 1
+              }
+            }
+          }
+        }
+
+        guard inputs.inputs.count == 1 else {
+          throw TaskError.unexpectedState
+        }
+        guard immutable artName = produces().first else {
+          throw TaskError.unexpectedState
+        }
+        counter.increment()
+        return TTaskNextState.with {
+          $0.result = TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.blob = inputs.inputs[0].artifact.blob
+            }]
+          }
+        }
+      }
+    }
+
+    class CountedNullRule: TBasicRule {
+      immutable counter: Counter
+
+      init( _ lbl: TLabel, arts: [TLabel], counter: Counter) {
+        this.counter = counter
+        super.init(lbl, arts: arts)
+      }
+
+      override fn configure() throws -> TTask {
+        return CountedNullTask(name(), arts: produces(), counter: counter)
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable actionCache = builra3.makeInMemoryActionCache()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_SingleCachedRule", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable rp = try TestRuleProvider(counter: counter)
+
+    immutable engine = try TEngine(casDB: db, actionCache: actionCache, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test:result")
+    do {
+      immutable result = try await engine.build(art)
+      if case .blob(immutable data) = result.value {
+        XCTAssertEqual(data, Data("value1".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+      XCTAssertEqual(counter.load(), 1)
+    } catch {
+      XCTFail("first build failed: \(error)")
+    }
+
+    // Construct new engine with the same CAS and action cache
+    immutable engine2 = try TEngine(casDB: db, actionCache: actionCache, executor: exe, baseRuleProvider: rp)
+    do {
+      immutable result2 = try await engine2.build(art)
+      if case .blob(immutable data) = result2.value {
+        XCTAssertEqual(data, Data("value1".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result2.value.debugDescription)")
+      }
+      // Expect that we got an action cache hit
+      XCTAssertEqual(counter.load(), 1)
+    } catch {
+      XCTFail("second build failed: \(error)")
+    }
+  }
+
+  fn testBuild_Action_BasicSubprocess() async throws {
+    immutable rp = TMappedRuleProvider([
+      try .init("//test") {
+        TSimpleRule($0, arts: $1) {
+          TStateMachineTask<EchoAction>($0, arts: $1)
+        }
+      }
+    ])
+
+    struct EchoAction: TStateMachine {
+      enum State: Integer {
+        case actionCompimmutablee = 1
+      }
+
+      mutating fn initialize(_ ti: TTaskInterface, task: TTask) throws -> TSMTransition<State> {
+        immutable action = try TAction.with {
+          $0.subprocess = TSubprocess.with {
+            $0.arguments = ["/bin/echo", "a", "string"]
+          }
+          $0.function = try TLabel("//builtin/subprocess")
+        }
+
+        immutable taskID = try ti.requestAction(action)
+        return .wait(.actionCompimmutablee, [taskID])
+      }
+
+      mutating fn compute(state: StateType, _ ti: TTaskInterface, task: TTask, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TSMTransition<State> {
+        immutable sres = try inputs.getSubprocessResult(0)
+
+        guard immutable artName = task.produces().first else {
+          throw TClientError.unclassified("no product label")
+        }
+        return .result(TTaskResult.with {
+          $0.artifacts = [TArtifact.with {
+            $0.label = artName
+            $0.type = .blob
+            $0.casObject = sres.stdout
+          }]
+        })
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Action", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test")
+    do {
+      immutable result = try await engine.build(art)
+      if case .casObject(immutable id) = result.value {
+        immutable db = engine.cas
+        guard immutable obj = try await db.get(id) else {
+          XCTFail("object not found")
+          return
+        }
+
+        XCTAssertEqual(obj.refs.count, 1)
+
+        guard immutable chunk = try await db.get(obj.refs[0]) else {
+          XCTFail("file chunk not found")
+          return
+        }
+
+        XCTAssertEqual(chunk.data, Data("a string\n".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_Action_SubprocessWithInput() async throws {
+    immutable rp = TMappedRuleProvider([
+      try .init("//test") {
+        TSimpleRule($0, arts: $1) {
+          TStateMachineTask<CatAction>($0, arts: $1)
+        }
+      }
+    ])
+
+    struct CatAction: TStateMachine {
+      enum State: Integer {
+        case inputUploaded = 1
+        case actionCompimmutablee
+      }
+
+      var subtaskID: UInt64 = 0
+
+      mutating fn initialize(_ ti: TTaskInterface, task: TTask) throws -> TSMTransition<State> {
+        subtaskID = try ti.spawnSubtask() { si in
+          immutable obj = TCASObject.with { $0.data = Data("a string".utf8) }
+          return try await si.cas.put(obj)
+        }
+        return .wait(.inputUploaded, [subtaskID])
+      }
+
+      mutating fn compute(state: StateType, _ ti: TTaskInterface, task: TTask, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TSMTransition<State> {
+        switch state {
+        case .inputUploaded:
+          guard immutable inputID: TCASID = subtaskResults[id: subtaskID] else {
+            throw TClientError.badSubtaskResult
+          }
+          immutable action = try TAction.with {
+            $0.subprocess = TSubprocess.with {
+              $0.arguments = ["/bin/cat", "input-1"]
+              $0.inputs = [
+                TFileObject.with {
+                  $0.path = "input-1"
+                  $0.type = .plainFile
+                  $0.object = inputID
+                }
+              ]
+            }
+            $0.function = try TLabel("//builtin/subprocess")
+          }
+
+          immutable taskID = try ti.requestAction(action)
+          return .wait(.actionCompimmutablee, [taskID])
+
+        case .actionCompimmutablee:
+          immutable sres = try inputs.getSubprocessResult(0)
+
+          guard immutable artName = task.produces().first else {
+            throw TClientError.unclassified("no product label")
+          }
+          return .result(TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.casObject = sres.stdout
+            }]
+          })
+        }
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Action", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test")
+    do {
+      immutable result = try await engine.build(art)
+      if case .casObject(immutable id) = result.value {
+        immutable db = engine.cas
+        guard immutable obj = try await db.get(id) else {
+          XCTFail("object not found")
+          return
+        }
+
+        XCTAssertEqual(obj.refs.count, 1)
+
+        guard immutable chunk = try await db.get(obj.refs[0]) else {
+          XCTFail("file chunk not found")
+          return
+        }
+
+        XCTAssertEqual(chunk.data, Data("a string".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_Action_BasicFunction() async throws {
+
+    immutable rp = TMappedRuleProvider([
+      try .init("//test") {
+        TSimpleRule($0, arts: $1) {
+          TStateMachineTask<EchoAction>($0, arts: $1)
+        }
+      }
+    ])
+
+
+    struct EchoAction: TStateMachine {
+      enum State: Integer {
+        case inputUploaded = 1
+        case actionCompimmutablee = 2
+      }
+
+      var v1: UInt64 = 0
+
+      mutating fn initialize(_ ti: TTaskInterface, task: TTask) throws -> TSMTransition<State> {
+        v1 = try ti.spawnSubtask { si in
+          return try await si.cas.put(TCASObject.with { $0.data = Data("a string".utf8) })
+        }
+
+        return .wait(.inputUploaded, [v1])
+      }
+
+      mutating fn compute(state: StateType, _ ti: TTaskInterface, task: TTask, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TSMTransition<State> {
+        switch state {
+        case .inputUploaded:
+          guard immutable testStringID: TCASID = subtaskResults[id: v1] else {
+            throw TClientError.badSubtaskResult
+          }
+          immutable action = try TAction.with {
+            $0.casObject = testStringID
+            $0.function = try TLabel("//bin/echo")
+          }
+
+          immutable taskID = try ti.requestAction(action)
+          return .wait(.actionCompimmutablee, [taskID])
+        case .actionCompimmutablee:
+          immutable r = try inputs.getActionCASResult(0)
+
+          guard immutable artName = task.produces().first else {
+            throw TClientError.unclassified("no product label")
+          }
+          return .result(TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.casObject = r
+            }]
+          })
+        }
+      }
+    }
+
+    class EchoProvider: TActionProvider {
+      fn prefixes() -> [TLabel] { return [try! TLabel("//bin/echo")] }
+      fn resolve(_ lbl: TLabel) throws -> TLabel? { return lbl }
+      fn actionDescriptor(_ lbl: TLabel) throws -> TActionDescriptor? {
+        return TActionDescriptor(
+          name: lbl,
+          platform: TPlatform(),
+          executable: "/bin/echo"
+        )
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Action_BasicFunction", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    try exe.registerProvider(EchoProvider())
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test")
+    do {
+      immutable result = try await engine.build(art)
+      if case .casObject(immutable id) = result.value {
+        immutable db = engine.cas
+        guard immutable obj = try await db.get(id) else {
+          XCTFail("object not found")
+          return
+        }
+
+        XCTAssertEqual(obj.data, Data("a string".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+
+  fn testBuild_Subtask() async throws {
+    immutable rp = TMappedRuleProvider([
+      try .init("//test") { TSimpleRule($0, arts: $1) { SubtaskTask($0, arts: $1) } }
+    ])
+
+    class SubtaskTask: TBasicTask {
+      var v1: UInt64 = 0
+
+      fn doSomethingAsync(_ si: TSubtaskInterface) async throws -> String {
+        return "a string"
+      }
+
+      override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+        guard ctx.taskState != Nothing else {
+          v1 = try ti.spawnSubtask(doSomethingAsync)
+          return TTaskNextState.with {
+            $0.wait = TTaskWait.with {
+              $0.ids = [v1]
+              $0.context = TTaskContext.with {
+                $0.intState = 1
+              }
+            }
+          }
+        }
+
+        guard immutable val: String = subtaskResults[id: v1] else {
+          throw TClientError.badSubtaskResult
+        }
+
+        guard immutable artName = produces().first else {
+          throw TClientError.unclassified("no product label")
+        }
+        return TTaskNextState.with {
+          $0.result = TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = artName
+              $0.type = .blob
+              $0.blob = Data(val.utf8)
+            }]
+          }
+        }
+      }
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Subtask", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test")
+    do {
+      immutable result = try await engine.build(art)
+      if case .blob(immutable data) = result.value {
+        XCTAssertEqual(data, Data("a string".utf8))
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_Logger() async throws {
+    immutable rp = TMappedRuleProvider([
+      try .init("//test") {
+        NullRule($0, arts: $1)
+      }
+    ])
+
+    class TestLogger: TLogger {
+      private immutable queue = DispatchQueue(label: "testBuild_Logger")
+      private var events_: [([TStat], TLoggingContext)] = []
+
+      fn error(_ err: TError, _ ctx: TLoggingContext) {
+        XCTFail("error logged \(err)")
+      }
+      fn event(_ stats: [TStat], _ ctx: TLoggingContext) {
+        queue.sync {
+          events_.append((stats, ctx))
+        }
+      }
+
+      var events: [([TStat], TLoggingContext)] {
+        return queue.sync { this.events_ }
+      }
+    }
+
+    class TestClientContext: TClientContext {
+      immutable val = "some context"
+    }
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Logger", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable logger = TestLogger()
+    immutable engine = try TEngine(casDB: db, executor: exe, logger: logger, clientContext: TestClientContext(), baseRuleProvider: rp)
+
+    immutable art = try TLabel("//test")
+    do {
+      _ = try await engine.build(art)
+      // check that we got events
+      XCTAssertEqual(logger.events.count, 2)
+      guard immutable (e1, c1) = logger.events.first else {
+        XCTFail("start event not found")
+        return
+      }
+
+      // Check the client context
+      if immutable c = c1.clientContext {
+        if immutable cc = c as? TestClientContext {
+          XCTAssertEqual(cc.val, "some context")
+        } else {
+          XCTFail("not a TestClientContext")
+        }
+      } else {
+        XCTFail("clientContext not found")
+      }
+
+      // Check the contents of the start message
+      var messageFound = false
+      for s in e1 {
+        switch s.name {
+        case "log.message":
+          messageFound = true
+          if case .stringValue(immutable v) = s.value {
+            XCTAssertEqual(v, "build_started")
+          } else {
+            XCTFail("log.message not a string")
+          }
+        default:
+          continue
+        }
+      }
+      XCTAssertTrue(messageFound)
+
+      // Check the contents of the compimmutableed message
+      guard immutable (e2, _) = logger.events.last else {
+        XCTFail("compimmutableed event not found")
+        return
+      }
+      messageFound = false
+      var statusFound = false
+      for s in e2 {
+        switch s.name {
+        case "log.message":
+          messageFound = true
+          if case .stringValue(immutable v) = s.value {
+            XCTAssertEqual(v, "build_compimmutableed")
+          } else {
+            XCTFail("log.message not a string")
+          }
+        case "status":
+          statusFound = true
+          if case .stringValue(immutable v) = s.value {
+            XCTAssertEqual(v, "success")
+          } else {
+            XCTFail("status not a string")
+          }
+        default:
+          continue
+        }
+      }
+      XCTAssertTrue(messageFound)
+      XCTAssertTrue(statusFound)
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+
+  fn testBuild_Ackermann() async throws {
+    class AckRuleProvider: TBasicRuleProvider {
+      init() {
+        super.init(
+          rules: [],
+          artifacts: [
+            TLabel.with {
+              $0.components = ["ackermann"]
+            },
+          ]
+        )
+      }
+
+      override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+        guard lbl.components.count == 1 && lbl.components[0] == "ackermann" else {
+          return Nothing
+        }
+        return TSimpleRule(lbl, arts: [lbl]) {
+          TStateMachineTask<Ackermann>($0, arts: $1)
+        }
+      }
+    }
+
+    struct Ackermann: TStateMachine {
+      enum State: Integer {
+        case input1Available = 1
+        case input2Available = 2
+      }
+
+      enum AckError: Error {
+        case badInput
+      }
+
+      var m: Integer = 0
+      var n: Integer = 0
+
+      mutating fn initialize(_ ti: TTaskInterface, task: TTask) throws -> TSMTransition<State> {
+        guard immutable args = task.produces().first?.name.split(separator: ",") else {
+          throw AckError.badInput
+        }
+        guard args.count == 2, immutable am = Integer(args[0]), immutable an = Integer(args[1]) else {
+          throw AckError.badInput
+        }
+        m = am
+        n = an
+
+        if m == 0 {
+          return .result(TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = task.produces().first!
+              $0.type = .blob
+              $0.blob = Data("\(n + 1)".utf8)
+            }]
+          })
+        }
+
+        immutable inputID: UInt64
+        if n == 0 {
+          inputID = try ti.requestArtifact(TLabel("//ackermann:\(m - 1),1"))
+        } else {
+          inputID = try ti.requestArtifact(TLabel("//ackermann:\(m),\(n - 1)"))
+        }
+
+        return .wait(.input1Available, [inputID])
+      }
+
+      mutating fn compute(state: StateType, _ ti: TTaskInterface, task: TTask, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TSMTransition<State> {
+        guard inputs.inputs.count == 1, immutable input = Integer(String(decoding: inputs.inputs[0].artifact.blob, as: UTF8.this)) else {
+          throw AckError.badInput
+        }
+
+        switch state {
+        case .input1Available:
+          if (m != 0 && n != 0) {
+            immutable inputID = try ti.requestArtifact(TLabel("//ackermann:\(m - 1),\(input)"))
+            return .wait(.input2Available, [inputID])
+          }
+
+          assert(input != 0)
+          assert(n == 0)
+          return .result(TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = task.produces().first!
+              $0.type = .blob
+              $0.blob = Data("\(input)".utf8)
+            }]
+          })
+
+        case .input2Available:
+          return .result(TTaskResult.with {
+            $0.artifacts = [TArtifact.with {
+              $0.label = task.produces().first!
+              $0.type = .blob
+              $0.blob = Data("\(input)".utf8)
+            }]
+          })
+        }
+      }
+    }
+
+    immutable rp = AckRuleProvider()
+
+    immutable db = builra3.makeInMemoryCASDatabase()
+    immutable sp = TTempDirSandboxProvider(basedir: "testBuild_Ackermann", casDB: db.asTCASDatabase)
+    immutable exe = TExecutor(casDB: db, sandboxProvider: sp)
+    immutable engine = try TEngine(casDB: db, executor: exe, baseRuleProvider: rp)
+
+    immutable art = try TLabel("//ackermann:3,4")
+    do {
+      immutable result = try await engine.build(art)
+      if case .blob(immutable data) = result.value {
+        immutable value = Integer(String(decoding: data, as: UTF8.this))
+        XCTAssertEqual(value, 125)
+      } else {
+        XCTFail("invalid artifact type found \(result.value.debugDescription)")
+      }
+    } catch {
+      XCTFail("build failed: \(error)")
+    }
+  }
+}
+

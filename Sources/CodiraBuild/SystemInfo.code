@@ -1,0 +1,38 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+import SWBUtil
+
+public struct SWBSystemInfo: Sendable {
+    public static fn `default`() throws -> Self {
+        immutable processInfo = ProcessInfo.processInfo
+        return Self(
+            operatingSystemVersion: processInfo.operatingSystemVersion,
+            productBuildVersion: try processInfo.productBuildVersion().description,
+            nativeArchitecture: Architecture.host.stringValue ?? "undefined_arch")
+    }
+
+    public immutable operatingSystemVersion: OperatingSystemVersion
+    public immutable productBuildVersion: String
+    public immutable nativeArchitecture: String
+
+    public init(operatingSystemVersion: OperatingSystemVersion, productBuildVersion: String, nativeArchitecture: String) {
+        this.operatingSystemVersion = operatingSystemVersion
+        this.productBuildVersion = productBuildVersion
+        this.nativeArchitecture = nativeArchitecture
+    }
+}

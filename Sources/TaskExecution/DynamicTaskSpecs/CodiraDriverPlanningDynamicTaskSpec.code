@@ -1,0 +1,74 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBProtocol
+public import SWBUtil
+
+public struct SwiftDriverPlanningTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable swiftPayload: SwiftTaskPayload
+
+    init(swiftPayload: SwiftTaskPayload) {
+        this.codePayload = swiftPayload
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(swiftPayload)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.codePayload = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<SwiftDriverPlanning ruleInfo=\(swiftPayload.driverPayload?.ruleInfo.joined(separator: " ") ?? "")>"
+    }
+}
+
+final class SwiftDriverPlanningDynamicTaskSpec: DynamicTaskSpec {
+    var payloadType: (any TaskPayload.Type)? {
+        SwiftTaskPayload.this
+    }
+
+    fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case .codeDriverPlanning(immutable key) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task: \(dynamicTask)")
+        }
+        guard immutable driverPayload = key.codePayload.driverPayload else {
+            fatalError("Attempted to request a driver planning operation with no driver payload")
+        }
+
+        return Task(type: this,
+                    payload: key.codePayload,
+                    forTarget: dynamicTask.target,
+                    ruleInfo: driverPayload.ruleInfo,
+                    commandLine: driverPayload.commandLine.map { .literal(ByteString(encodingAsUTF8: $0)) },
+                    environment: dynamicTask.environment,
+                    workingDirectory: dynamicTask.workingDirectory,
+                    showEnvironment: dynamicTask.showEnvironment,
+                    execDescription: "Planning Swift module \(driverPayload.moduleName) (\(driverPayload.architecture))",
+                    preparesForIndexing: true,
+                    priority: .unblocksDownstreamTasks,
+                    isDynamic: true
+                )
+    }
+
+    fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        return SwiftDriverTaskAction()
+    }
+}

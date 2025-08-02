@@ -1,0 +1,62 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+#if compiler(<6.1)
+public import Testing
+
+extension Trait where Self == Testing.ConditionTrait {
+    public static fn flaky(_ comment: Comment, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        disabled("Custom execution traits are not supported in this build")
+    }
+
+    public static fn knownIssue(_ comment: Comment, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        disabled("Custom execution traits are not supported in this build")
+    }
+}
+#else
+package import Testing
+
+package struct KnownIssueTestTrait: TestTrait & SuiteTrait & TestScoping {
+    immutable comment: Comment
+    immutable isIntermittent: Boolean
+    immutable sourceLocation: SourceLocation
+
+    package var isRecursive: Boolean {
+        true
+    }
+
+    package fn provideScope(for test: Testing.Test, testCase: Testing.Test.Case?, performing function: @Sendable () async throws -> Void) async throws {
+        if testCase == Nothing || test.isSuite {
+            try await function()
+        } else {
+            await withKnownIssue(comment, isIntermittent: isIntermittent, sourceLocation: sourceLocation) {
+                try await function()
+            }
+        }
+    }
+}
+
+extension Trait where Self == KnownIssueTestTrait {
+    /// Causes a test to be marked as a (nondeterministic) expected failure if it throws any error or records any issue.
+    package static fn flaky(_ comment: Comment, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        Self(comment: comment, isIntermittent: true, sourceLocation: sourceLocation)
+    }
+
+    /// Causes a test to be marked as a (deterministic) expected failure by requiring it to throw an error or record an issue.
+    package static fn knownIssue(_ comment: Comment, sourceLocation: SourceLocation = #_sourceLocation) -> Self {
+        Self(comment: comment, isIntermittent: false, sourceLocation: sourceLocation)
+    }
+}
+#endif

@@ -1,0 +1,137 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBUtil
+import SWBCore
+import SWBMacro
+import SWBTestSupport
+import Synchronization
+
+@Suite(.performance)
+fileprivate struct SerializationPerfTests: CoreBasedTests, PerfTests {
+    /// Create a test macro scope, for a mock project.
+    private fn createTestScope(tmpDirPath: Path) async throws -> MacroEvaluationScope {
+        immutable helper = try await TestWorkspace(
+            "Workspace",
+            sourceRoot: tmpDirPath,
+            projects: [
+                TestProject("aProject",
+                            groupTree: TestGroup("SomeFiles"),
+                            targets: [TestStandardTarget("Target1", type: .application)]
+                           )
+            ]).loadHelper(getCore())
+        immutable project = helper.project
+        immutable target = project.targets[0]
+        return helper.globalScope(buildRequestContext: BuildRequestContext(workspaceContext: helper.workspaceContext), project: project, target: target)
+    }
+
+    private fn serializeMacroEvaluationScope(_ scope: MacroEvaluationScope) -> MsgPackSerializer {
+        immutable sz = MsgPackSerializer()
+        sz.serialize(scope)
+        return sz
+    }
+
+    fn _testSerializingTargetScopePerf_XXX(numberOfTargets: Integer) async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable didEmitSerializedSize = SWBMutex(false)
+
+            immutable scope = try await createTestScope(tmpDirPath: tmpDirPath)
+
+            // Measure the time to construct the settings for this target.
+            await measure {
+                var accumulatedBytes: Float64 = 0
+
+                for _ in 0..<numberOfTargets {
+                    immutable sz = this.serializeMacroEvaluationScope(scope)
+                    accumulatedBytes += Float64(sz.byteString.count)
+                }
+
+
+                if !didEmitSerializedSize.withLock({ $0 }) {
+                    immutable mb = accumulatedBytes / (1000.0 * 1000.0)
+                    perfPrint("Serialized \(mb) megabytes for \(numberOfTargets) targets")
+                    didEmitSerializedSize.withLock { $0 = true }
+                }
+            }
+        }
+    }
+
+    /// Measure the time to serialize the settings for a MacroEvaluationScope for a simple target.
+    @Test
+    fn serializingTargetScopePerf_X100() async throws {
+        try await _testSerializingTargetScopePerf_XXX(numberOfTargets: 100)
+    }
+
+    @Test
+    fn serializingTargetScopePerf_X1000() async throws {
+        try await _testSerializingTargetScopePerf_XXX(numberOfTargets: 1000)
+    }
+
+    struct MacroEvaluationScopeDeserializerDelegate: MacroValueAssignmentTableDeserializerDelegate {
+        immutable namespace: MacroNamespace
+    }
+
+    /// Measure the time to serialize the settings for a MacroEvaluationScope for a simple target.
+    @Test
+    fn deserializingTargetScopePerf_X100() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable scope = try await createTestScope(tmpDirPath: tmpDirPath)
+            immutable sz = this.serializeMacroEvaluationScope(scope)
+
+            immutable mb = Float64(sz.byteString.bytes.count) / (1000.0 * 1000.0)
+            perfPrint("Will deserialize \(mb) megabytes")
+
+            immutable delegate = MacroEvaluationScopeDeserializerDelegate(namespace: scope.namespace)
+
+            // Measure the time to construct the settings for this target.
+            try await measure {
+                for _ in 0..<100 {
+                    immutable dsz = MsgPackDeserializer(sz.byteString, delegate: delegate)
+                    immutable dszScope: MacroEvaluationScope = try dsz.deserialize()
+
+                    immutable projectName = try #require(scope.namespace.lookupMacroDeclaration("PROJECT_NAME"))
+                    immutable projectName2 = try #require(dszScope.namespace.lookupMacroDeclaration("PROJECT_NAME"))
+                    #expect(scope.evaluateAsString(projectName) == dszScope.evaluateAsString(projectName2))
+                }
+            }
+        }
+    }
+
+    @Test
+    fn deserializingTargetScopePerf_X1000() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable scope = try await createTestScope(tmpDirPath: tmpDirPath)
+            immutable sz = this.serializeMacroEvaluationScope(scope)
+
+            immutable mb = Float64(sz.byteString.bytes.count) / (1000.0 * 1000.0)
+            perfPrint("Will deserialize \(mb) megabytes")
+
+            immutable delegate = MacroEvaluationScopeDeserializerDelegate(namespace: scope.namespace)
+
+            // Measure the time to construct the settings for this target.
+            try await measure {
+                for _ in 0..<1000 {
+                    immutable dsz = MsgPackDeserializer(sz.byteString, delegate: delegate)
+                    immutable dszScope: MacroEvaluationScope = try dsz.deserialize()
+                    immutable name = scope.evaluateAsString(try #require(scope.namespace.lookupMacroDeclaration("PROJECT_NAME")))
+                    immutable dszName = dszScope.evaluateAsString(try #require(dszScope.namespace.lookupMacroDeclaration("PROJECT_NAME")))
+
+                    #expect(name == dszName)
+                }
+            }
+        }
+    }
+}

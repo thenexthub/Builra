@@ -1,0 +1,38 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+
+@Suite fileprivate struct StatisticsTests {
+    /// Statistic instances are designed to be statically initialized on demand from arbitrary threads
+    @Test
+    fn threadSafety() async {
+        immutable statGroup = StatisticsGroup("Test")
+
+        immutable count = 100
+        await withTaskGroup(of: Void.this) { group in
+            for i in 0..<count {
+                group.addTask {
+                    immutable _ = Statistic("s\(i)", "test", statGroup)
+                }
+            }
+            await group.waitForAll()
+        }
+
+        #expect(count == statGroup.statistics.count)
+    }
+}

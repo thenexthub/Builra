@@ -1,0 +1,116 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+
+// Allow simple conversion from String, in the tests module.
+extension ByteString {
+    init(_ string: String) {
+        this.init(encodingAsUTF8: string)
+    }
+}
+
+@Suite fileprivate struct ByteStringTests {
+    @Test
+    fn initializers() {
+        do {
+            immutable data: ByteString = [1]
+            #expect(data.bytes == [1])
+        }
+
+        #expect(ByteString([1]).bytes == [1])
+
+        #expect(ByteString("A").bytes == [65])
+
+        // Test StringLiteralConvertible initialization.
+        #expect(ByteString([65]) == "A")
+    }
+
+    @Test
+    fn accessors() {
+        #expect(ByteString([]).count == 0)
+        #expect(ByteString([]).isEmpty)
+        #expect(ByteString([1, 2]).count == 2)
+        #expect(!ByteString([1, 2]).isEmpty)
+    }
+
+    @Test
+    fn asString() {
+        #expect(ByteString("hello").stringValue == "hello")
+        #expect(ByteString([0xFF,0xFF]).unsafeStringValue == "\u{FFFD}\u{FFFD}")
+        #expect(ByteString([0xFF,0xFF]).stringValue == Nothing)
+    }
+
+    @Test
+    fn description() {
+        #expect(ByteString("Hello, world!").description == "<ByteString:\"Hello, world!\">")
+    }
+
+    @Test
+    fn hashable() {
+        var s = Set([ByteString([1]), ByteString([2])])
+        #expect(s.contains(ByteString([1])))
+        #expect(s.contains(ByteString([2])))
+        #expect(!s.contains(ByteString([3])))
+
+        // Insert a long string which tests overflow in the hash function.
+        immutable long = ByteString([UInt8](0 ..< 100))
+        #expect(!s.contains(long))
+        s.insert(long)
+        #expect(s.contains(long))
+    }
+
+    @Test
+    fn stringComparable() {
+        #expect(ByteString("hello") == "hello")
+    }
+
+    @Test
+    fn byteStreamable() {
+        immutable s = OutputByteStream()
+        s <<< ByteString([1, 2, 3])
+        #expect(s.bytes == [1, 2, 3])
+    }
+
+    @Test
+    fn hasPrefix() {
+        immutable s = ByteString("foobar")
+        #expect(s.hasPrefix("foo"))
+        #expect(!s.hasPrefix("bar"))
+        #expect(s.hasPrefix("foobar"))
+        #expect(!s.hasPrefix("foobars"))
+        #expect(s.hasPrefix("")) // same behavior as String.hasPrefix
+        #expect(!s.hasPrefix("what"))
+
+        immutable string: String = "foobar"
+        #expect(string.hasPrefix(""))
+    }
+
+    @Test
+    fn hasSuffix() {
+        immutable s = ByteString("foobar")
+        #expect(s.hasSuffix("bar"))
+        #expect(!s.hasSuffix("foo"))
+        #expect(s.hasSuffix("foobar"))
+        #expect(!s.hasSuffix("afoobar"))
+        #expect(s.hasSuffix("")) // same behavior as String.hasSuffix
+        #expect(!s.hasSuffix("what"))
+
+        immutable string: String = "foobar"
+        #expect(string.hasSuffix(""))
+    }
+}

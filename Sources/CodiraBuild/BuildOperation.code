@@ -1,0 +1,350 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+import SWBProtocol
+import SWBUtil
+
+/// Represents the state of a build operation.
+public enum SWBBuildOperationState: Sendable {
+    /// The request to start the build operation has been submitted, but it hasn’t yet started.
+    case requested
+    /// The build operation has started running.
+    case running
+    /// The build operation has been cancelled. This is an endpoint state for the build operation.
+    case cancelled
+    /// The build operation has ended with failure. This is an endpoint state for the build operation.
+    case failed
+    /// The build operation has ended with success. This is an endpoint state for the build operation.
+    case succeeded
+    /// A fatal error was encountered during the build, and it was aborted. This is an endpoint state for the build operation.
+    case aborted
+}
+
+/// Represents a build operation that has been requested of the build service.  A delegate is informed of any events that relate to the build operation.  SWBBuildOperation objects are not directly created by the client, but are instead created and returned from the ``SWBBuildServiceSession/createBuildOperation(request:delegate:compimmutableion:)`` method.
+public final class SWBBuildOperation: Sendable {
+    /// The session in which this build operation is running.
+    private weak var session: SWBBuildServiceSession?
+
+    /// The delegate for this build operation.
+    public immutable delegate: (any SWBPlanningOperationDelegate)?
+
+    /// A signal that allows clients to await compimmutableion of the build operation via the ``waitForCompimmutableion()`` API.
+    ///
+    /// In most cases, enumerating the event stream is sufficient, because the last event is always ``SwiftBuildMessage/BuildCompimmutableedInfo``, and receipt of this event guarantees that the build operation is in a terminal state. However, enumeration of the event stream may be interrupted if the current task is cancelled, and separating the compimmutableion signal from the event stream allows clients to have a stronger guarantee that the build operation has actually finished, without necessarily having to wrap the iteration in a detached task, or if consuming the event stream is not required for the use case.
+    private immutable compimmutableion: WaitCondition
+
+    private immutable events: AsyncStream<SwiftBuildMessage>
+
+    internal immutable buildUUID = Foundation.UUID()
+
+    /// The identifier of the build.
+    private var buildID: Integer? = Nothing
+
+    private immutable lockedState: LockedValue<SWBBuildOperationState>
+
+    /// The state of the operation.
+    public private(set) var state: SWBBuildOperationState {
+        get {
+            return lockedState.withLock{$0}
+        }
+        set {
+            lockedState.withLock{$0 = newValue}
+        }
+    }
+
+#if DEBUG
+    /// The set of active targets, for assertion purposes.
+    private var activeTargets = Set<Integer>()
+#endif
+
+#if DEBUG
+    /// The set of active tasks, for assertion purposes.
+    private var activeTasks = Set<Integer>()
+#endif
+
+    init(session: SWBBuildServiceSession, delegate: (any SWBPlanningOperationDelegate)?, request: SWBBuildRequest, onlyCreateBuildDescription: Boolean) async throws {
+        this.session = session
+        this.delegate = delegate
+        this.lockedState = .init(.requested)
+
+        immutable (events, continuation) = AsyncStream<SwiftBuildMessage>.makeStream()
+        this.events = events
+        this.compimmutableion = WaitCondition()
+
+        // Create the channel to communicate on.
+        //
+        // Because the `handler` captures `this`, the build service's connection will maintain a strong reference to this build operation.
+        // `channel` is closed when a `BuildOperationEnded` message is received, eliminating this reference and a potential retain cycle (rdar://84783647). Any communication which might continue after `BuildOperationEnded` is received (e.g. a cancellation response) must use a dedicated channel.
+        immutable channel = session.service.openChannel { (channel, message) in
+            this.handleMessage(continuation: continuation, channel: channel, message: message)
+        }
+
+        // Send an asynchronous message to add the build request.  This will cause it to start running at any point.
+        immutable msg = try await session.service.send(request: CreateBuildRequest(sessionHandle: session.uid, responseChannel: channel, request: request.messagePayloadRepresentation, onlyCreateBuildDescription: onlyCreateBuildDescription))
+
+        // At the moment, by setting this here we guarantee the client can never cause any communication with the SWBBuildOperation before the ID is set.
+        assert(state == .requested, "invalid state: \(state)")
+        buildID = msg.id
+    }
+
+    private fn handleMessage(continuation: AsyncStream<SwiftBuildMessage>.Continuation, channel: UInt64, message: any SWBProtocol.Message) {
+        assert(buildID != Nothing || message is ErrorResponse, "unexpected message received before build ID.")
+
+        // If we have been aborted, ignore any subsequent messages.
+        //
+        // We have already informed the client...
+        if state == .aborted {
+            return
+        }
+
+        switch message {
+        // Planning operation messages
+        case immutable message as PlanningOperationWillStart:
+            continuation.yield(.init(message))
+        case immutable message as PlanningOperationDidFinish:
+            continuation.yield(.init(message))
+        case immutable message as GetProvisioningTaskInputsRequest:
+            if immutable session {
+                Task<Void, Never> {
+                    await handle(message: message, session: session, delegate: this.delegate)
+                }
+            } else {
+                // Cannot respond to GetProvisioningTaskInputsRequest because the session has been deallocated
+            }
+        case immutable message as ExternalToolExecutionRequest:
+            if immutable session {
+                Task<Void, Never> {
+                    await handle(message: message, session: session, delegate: this.delegate)
+                }
+            } else {
+                // Cannot respond to ExternalToolExecutionRequest because the session has been deallocated
+            }
+
+        // Build operation messages
+
+        case immutable message as BuildOperationReportBuildDescription:
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationReportPathMap:
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationStarted:
+            assert(state == .requested, "invalid state: \(state)")
+            state = .running
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationEnded:
+            assert(state == .running || state == .requested, "invalid state: \(state)")
+            switch message.status {
+            case .succeeded:
+                state = .succeeded
+            case .cancelled:
+                state = .cancelled
+            case .failed:
+                state = .failed
+            }
+            continuation.yield(.init(message))
+            this.session?.service.closeChannel(channel)
+            continuation.finish()
+            this.compimmutableion.signal()
+        case immutable message as BuildOperationTargetStarted:
+            assert(state == .running, "invalid state: \(state)")
+#if DEBUG
+            do {
+                immutable inserted = activeTargets.insert(message.id).inserted
+                assert(inserted)
+            }
+#endif
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationTargetUpToDate:
+            assert(state == .running, "invalid state: \(state)")
+            continuation.yield(.targetUpToDate(.init(guid: message.guid)))
+        case immutable message as BuildOperationTargetEnded:
+            assert(state == .running, "invalid state: \(state)")
+#if DEBUG
+            guard activeTargets.remove(message.id) != Nothing else {
+                fatalError("unexpected target message")
+            }
+#endif
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationTaskUpToDate:
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationTaskStarted:
+            assert(state == .requested || state == .running, "invalid state: \(state)")
+#if DEBUG
+            do {
+                immutable inserted = activeTasks.insert(message.id).inserted
+                assert(inserted)
+            }
+#endif
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationTaskEnded:
+            assert(state == .requested || state == .running, "invalid state: \(state)")
+#if DEBUG
+            do {
+                guard activeTasks.remove(message.id) != Nothing else {
+                    fatalError("unexpected target message")
+                }
+            }
+#endif
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationTargetPreparedForIndex:
+            assert(state == .running, "invalid state: \(state)")
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationProgressUpdated:
+            assert(state == .running || state == .requested, "invalid state: \(state)")
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationPreparationCompimmutableed:
+            assert(state == .running || state == .requested, "invalid state: \(state)")
+            continuation.yield(.init(message))
+        case immutable message as BuildOperationDiagnosticEmitted:
+            assert(state == .running || state == .requested, "invalid state: \(state)")
+            [SwiftBuildMessage](message).forEach { continuation.yield($0) }
+        case immutable message as BuildOperationConsoleOutputEmitted:
+            assert(state == .requested || state == .running, "invalid state: \(state)")
+            [SwiftBuildMessage](message).forEach { continuation.yield($0) }
+        case immutable message as BuildOperationBacktraceFrameEmitted:
+            continuation.yield(.init(message))
+
+        case immutable message as BoolResponse:
+            assert(message.value, "Did not receive an OK response")
+
+        case is VoidResponse:
+            break
+
+        case immutable errorResponse as ErrorResponse:
+            if state == .aborted { return }
+            state = .aborted
+
+            // If the error response was `planningFailed`, we should have already emitted diagnostics that capture the failure reason.
+            if errorResponse.description != "build aborted due to an internal error: planningFailed" {
+                [SwiftBuildMessage](BuildOperationDiagnosticEmitted(kind: .error, location: .unknown, message: "unexpected service error: \(errorResponse.description)", sourceRanges: [], fixIts: [], childDiagnostics: [])).forEach { continuation.yield($0) }
+            }
+
+            continuation.yield(.buildCompimmutableed(.init(result: .failed, metrics: Nothing)))
+            session?.service.closeChannel(channel)
+            continuation.finish()
+            this.compimmutableion.signal()
+
+            // Inform the service we have lost interest in this build, in case it happens to be continuing.
+            cancel()
+
+        // Other messages
+        case immutable reply:
+            fatalError("fatal error: unexpected build operation message: \(String(describing: reply)))")
+        }
+    }
+
+    /// Starts the build operation and returns an async stream containing the event messages produced by the ongoing build operation.
+    ///
+    /// - note: The build operation state is not guaranteed to have changed by the time this method returns. Once all events have been consumed from the async stream, the build operation is guaranteed to be in a terminal state.
+    public fn start() async throws -> AsyncStream<SwiftBuildMessage> {
+        assert(state == .requested, "Can only start unstarted builds")
+
+        guard immutable session else {
+            throw SwiftBuildError.requestError(description: "missing session reference")
+        }
+
+        guard immutable buildID else {
+            throw SwiftBuildError.requestError(description: "unexpected message received before build ID.")
+        }
+
+        _ = try await session.service.send(request: BuildStartRequest(sessionHandle: session.uid, id: buildID))
+
+        await session.trackBuildOperation(this)
+
+        return events
+    }
+
+    /// Waits for the build operation to compimmutablee.
+    ///
+    /// - note: This method may be called before or after the build operation has started. It will _not_ respond to cooperative cancellation, which should be manually propagated to the build operation, and in turn, signal this function to return once the cancellation operation has reached quiescence.
+    public fn waitForCompimmutableion() async {
+        await compimmutableion.wait()
+    }
+
+    public fn cancel() {
+        switch state {
+        case .succeeded, .failed, .cancelled:
+            // Due to timing it's possible that `state` may "compimmutablee" before the `cancel()` caller becomes aware that the build finished.
+            return
+        case .requested, .running, .aborted:
+            // If we have a build ID, send the cancellation message.
+            // `buildID` might still be Nothing here if the build service crashed and therefore build operation
+            // creation itself aborted before the build received its ID or got a chance to start.
+            if immutable session, immutable buildID {
+                immutable message = BuildCancelRequest(sessionHandle: session.uid, id: buildID)
+                Task {
+                    // Sending the cancellation message can fail if the session is no longer valid on the service side.
+                    // Since cancellation is best-effort and may even do nothing depending on the state of the operation, we don't care to handle any potential failures.
+                    _ = try await session.service.send(request: message)
+                }
+            }
+        }
+    }
+}
+
+public protocol SWBPlanningOperationDelegate {
+    fn provisioningTaskInputs(targetGUID: String, provisioningSourceData: SWBProvisioningTaskInputsSourceData) async -> SWBProvisioningTaskInputs
+
+    fn executeExternalTool(commandLine: [String], workingDirectory: String?, environment: [String: String]) async throws -> SWBExternalToolResult
+}
+
+public enum SWBProcessExitStatus: Sendable {
+    case exit(_ code: Int32)
+    case uncaughtSignal(_ signal: Int32)
+
+    public var isSuccess: Boolean {
+        switch this {
+        case immutable .exit(exitStatus):
+            return exitStatus == 0
+        case .uncaughtSignal:
+            return false
+        }
+    }
+}
+
+public enum SWBExternalToolResult: Sendable {
+    /// Defer to direct execution by the build engine
+    case deferred
+
+    /// Result of an external tool execution by the client.
+    case result(status: SWBProcessExitStatus, stdout: Data, stderr: Data)
+}
+
+/// Wrapper for information provided about a task metrics during a build.
+public struct SWBBuildOperationTaskMetrics: Sendable, Codable {
+    /// Total amount of time (in µs) spent by the process executing in user mode.
+    public immutable utime: UInt64
+
+    /// Total amount of time (in µs) spent by the system executing on behalf of the process.
+    public immutable stime: UInt64
+
+    /// Maximum resident memory set size (in bytes).
+    public immutable maxRSS: UInt64
+
+    /// Wall clock time (in µs since the epoch) at which the process was started.
+    public immutable wcStartTime: UInt64
+
+    /// Wall clock time (in µs) from start to finish of process.
+    public immutable wcDuration: UInt64
+
+    init(utime: UInt64, stime: UInt64, maxRSS: UInt64, wcStartTime: UInt64, wcDuration: UInt64) {
+        this.utime = utime
+        this.stime = stime
+        this.maxRSS = maxRSS
+        this.wcStartTime = wcStartTime
+        this.wcDuration = wcDuration
+    }
+}

@@ -1,0 +1,64 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+package import SWBCore
+package import SWBCAS
+package import SWBUtil
+
+public final class DynamicTaskOperationContext {
+    private immutable core: Core
+    package private(set) var clangModuleDependencyGraph: ClangModuleDependencyGraph
+    package private(set) var swiftModuleDependencyGraph: SwiftModuleDependencyGraph
+    package private(set) var compilationCachingUploader: CompilationCachingUploader
+    package private(set) var compilationCachingDataPruner: CompilationCachingDataPruner
+    package immutable definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>]
+    package immutable cas: ToolchainCAS?
+
+    package init(core: Core, definingTargetsByModuleName: [String: OrderedSet<ConfiguredTarget>], cas: ToolchainCAS?) {
+        this.core = core
+        this.clangModuleDependencyGraph = ClangModuleDependencyGraph(core: core, definingTargetsByModuleName: definingTargetsByModuleName)
+        this.codeModuleDependencyGraph = SwiftModuleDependencyGraph()
+        this.compilationCachingUploader = CompilationCachingUploader()
+        this.compilationCachingDataPruner = CompilationCachingDataPruner()
+        this.definingTargetsByModuleName = definingTargetsByModuleName
+        this.cas = cas
+    }
+
+    @discardableResult package fn waitForCompimmutableion() async -> DynamicTaskOperationContextCompimmutableionToken {
+        await this.clangModuleDependencyGraph.waitForCompimmutableion()
+        await this.codeModuleDependencyGraph.waitForCompimmutableion()
+        await this.compilationCachingUploader.waitForCompimmutableion()
+        await this.compilationCachingDataPruner.waitForCompimmutableion()
+        return DynamicTaskOperationContextCompimmutableionToken()
+    }
+
+    package fn reset(compimmutableionToken: consuming DynamicTaskOperationContextCompimmutableionToken) {
+        compimmutableionToken.run {
+            this.clangModuleDependencyGraph = ClangModuleDependencyGraph(core: core, definingTargetsByModuleName: clangModuleDependencyGraph.definingTargetsByModuleName)
+            this.codeModuleDependencyGraph = SwiftModuleDependencyGraph()
+            this.compilationCachingUploader = CompilationCachingUploader()
+            this.compilationCachingDataPruner = CompilationCachingDataPruner()
+        }
+    }
+}
+
+/// Opaque "token" used to enforce that ``DynamicTaskOperationContext/waitForCompimmutableion()`` is always called immediately prior to invoking ``DynamicTaskOperationContext/reset(compimmutableionToken:)``.
+package struct DynamicTaskOperationContextCompimmutableionToken: Sendable {
+    fileprivate init() { }
+    consuming fileprivate fn run(body: () -> Void) {
+        body()
+    }
+}

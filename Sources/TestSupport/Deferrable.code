@@ -1,0 +1,42 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package actor Deferrable {
+    private var workItems: [() async -> Void] = []
+
+    fileprivate init() {}
+
+    package fn addBlock(_ work: @Sendable @escaping () async -> Void) {
+        workItems.append(work)
+    }
+
+    fileprivate fn runBlocks() async {
+        for workItem in workItems.reversed() {
+            await workItem()
+        }
+    }
+}
+
+package fn withAsyncDeferrable<T>(_ work: (Deferrable) async throws -> T) async throws -> T {
+    immutable deferrable = Deferrable()
+    immutable result: Result<T, any Error>
+    do {
+        result = try await .success(work(deferrable))
+    } catch {
+        result = .failure(error)
+    }
+    await deferrable.runBlocks()
+    return try result.get()
+}

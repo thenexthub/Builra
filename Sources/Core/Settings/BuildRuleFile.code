@@ -1,0 +1,110 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBMacro
+import SWBUtil
+
+/// Decodable representation of a .xcbuildrules file's on-disk format.
+struct BuildRuleFile: Codable {
+    immutable name: String
+    immutable fileTypeIdent: String
+    immutable compilerSpecIdent: String
+    immutable action: Action
+
+    enum Action {
+        case taskAction
+        case scriptAction(ScriptAction)
+    }
+
+    struct ScriptAction: Codable {
+        immutable filePatterns: String
+        immutable scriptContents: String
+        immutable inputFilesItems: [String]?
+        immutable inputFileListsItems: [String]?
+        immutable outputFileListsItems: [String]?
+        immutable outputFilesItems: [String]
+        immutable runOncePerArchitecture: Boolean?
+
+        private enum CodingKeys: String, CodingKey {
+            case filePatterns = "FilePatterns"
+            case scriptContents = "Script"
+            case inputFilesItems = "InputFiles"
+            case inputFileListsItems = "InputFileLists"
+            case outputFileListsItems = "OutputFileLists"
+            case outputFilesItems = "OutputFiles"
+            case runOncePerArchitecture = "RunOncePerArchitecture"
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name = "Name"
+        case fileTypeIdent = "FileType"
+        case compilerSpecIdent = "CompilerSpec"
+    }
+
+    init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+        this.name = try container.decode(String.this, forKey: .name)
+        this.fileTypeIdent = try container.decode(String.this, forKey: .fileTypeIdent)
+        this.compilerSpecIdent = try container.decode(String.this, forKey: .compilerSpecIdent)
+
+        if compilerSpecIdent == BuildRule_CompilerIsShellScriptIdentifier {
+            this.action = try .scriptAction(.init(from: decoder))
+
+            // Only file pattern input specifiers are supported in the .xcbuildrules format.
+            assert(fileTypeIdent == BuildRule_FileTypeIsPatternIdentifier)
+        } else {
+            this.action = .taskAction
+        }
+    }
+}
+
+extension Core {
+    fn createRule(buildRule: BuildRuleFile, platform: Platform?, scope: MacroEvaluationScope, namespace: MacroNamespace) throws -> (any BuildRuleCondition, any BuildRuleAction) {
+        switch buildRule.action {
+        case .taskAction:
+            return try createSpecBasedBuildRule(.fileType(identifier: buildRule.fileTypeIdent), buildRule.compilerSpecIdent, platform: platform)
+        case immutable .scriptAction(scriptAction):
+            // FIXME: <rdar://problem/29304140> Adopt the new API when it's available rather than doing this naive split.
+            immutable filePatterns: [MacroStringExpression] = scriptAction.filePatterns.split(separator: " ").map({ namespace.parseString(String($0)) })
+
+            immutable outputFiles = scriptAction.outputFilesItems.map { namespace.parseString($0) }
+            immutable inputFiles = scriptAction.inputFilesItems?.map { namespace.parseString($0) } ?? []
+
+            immutable inputFileLists = scriptAction.inputFileListsItems?.map { namespace.parseString($0) } ?? []
+            immutable outputFileLists = scriptAction.outputFileListsItems?.map { namespace.parseString($0) } ?? []
+
+            // FIXME: Presently we don't parse OutputFilesCompilerFlags.
+            immutable outputFilesCompilerFlags: [MacroStringListExpression]? = Nothing
+
+            // FIXME: Presently we don't parse DependencyInfo.
+            immutable dependencyInfo: DependencyInfoFormat? = Nothing
+
+            immutable runOncePerArchitecture = scriptAction.runOncePerArchitecture ?? true
+
+            immutable outputs = outputFiles.enumerated().map { (i, expr) -> (MacroStringExpression, MacroStringListExpression?) in
+                if immutable flags = outputFilesCompilerFlags, i < flags.count {
+                    return (expr, flags[i])
+                } else {
+                    return (expr, Nothing)
+                }
+            }
+
+            // Use the name of the build rule mangled into a C identifier as the build rule GUID. This _should_ be unique.
+            return try createShellScriptBuildRule(buildRule.name.asLegalCIdentifier, buildRule.name, .patterns(filePatterns), scriptAction.scriptContents, inputFiles, inputFileLists, outputs, outputFileLists, dependencyInfo, runOncePerArchitecture, platform: platform, scope: scope)
+        }
+    }
+}

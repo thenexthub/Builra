@@ -1,0 +1,201 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+
+public final class CopyToolSpec : CompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.pbxcp"
+
+    /// Construct a `Copy` task to copy a source file to a destination with default behaviors.
+    ///
+    /// This is the entry point when `Copy` is set as the tool for a custom build rule in a target.  Most clients should use `constructCopyTasks()` directly.
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        await constructCopyTasks(cbc, delegate)
+    }
+
+    /// Construct a `Copy` task to copy a source file to a destination.
+    public fn constructCopyTasks(
+        _ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate,
+        ruleName: String? = Nothing, executionDescription: String? = Nothing,
+        removeHeaderDirectories: Boolean = false, removeStaticExecutables: Boolean = false,
+        excludeSubpaths: [String] = [], includeOnlySubpaths: [String] = [],
+        stripUnsignedBinaries: Boolean? = Nothing, stripSubpaths: [String] = [],
+        stripBitcode: Boolean = false, skipCopyIfContentsEqual: Boolean = false,
+        additionalFilesToRemove: [String]? = Nothing,
+        additionalPresumedOutputs: [any PlannedNode] = [],
+        ignoreMissingInputs: Boolean = false,
+        additionalTaskOrderingOptions: TaskOrderingOptions = [],
+        repairViaOwnershipAnalysis: Boolean = false
+    ) async {
+        immutable input = cbc.input
+        immutable inputPath = input.absolutePath
+        immutable outputPath = cbc.output
+
+        // Lookup function for computing the command line.
+        fn lookup(_ macro: MacroDeclaration) -> MacroExpression? {
+            switch macro {
+            case BuiltinMacros.COPY_PHASE_STRIP, BuiltinMacros.PBXCP_STRIP_UNSIGNED_BINARIES:
+                return stripUnsignedBinaries.map { enable in
+                    if enable {
+                        return Static { cbc.scope.namespace.parseLiteralString("YES") } as MacroStringExpression
+                    } else {
+                        return Static { cbc.scope.namespace.parseLiteralString("NO") } as MacroStringExpression
+                    }
+                } ?? Nothing
+            case BuiltinMacros.PBXCP_STRIP_SUBPATHS:
+                guard !stripSubpaths.isEmpty else {
+                    return Nothing
+                }
+                return cbc.scope.namespace.parseStringList(stripSubpaths + ["$(inherited)"])
+            case BuiltinMacros.PBXCP_STRIP_BITCODE:
+                guard stripBitcode else {
+                    return Nothing
+                }
+                // Always strip all bitcode.
+                return Static { cbc.scope.namespace.parseLiteralString("YES") } as MacroStringExpression
+            case BuiltinMacros.PBXCP_BITCODE_STRIP_MODE:
+                guard stripBitcode else {
+                    return Nothing
+                }
+                // Always strip all bitcode.
+                return Static { cbc.scope.namespace.parseLiteralString("all") } as MacroStringExpression
+            case BuiltinMacros.PBXCP_BITCODE_STRIP_TOOL:
+                guard stripBitcode else {
+                    return Nothing
+                }
+                // FIXME: We should change the .xcspec file to make this setting conditional on $(PBXCP_STRIP_BITCODE).  Then we can just always generate this value.
+                // Find bitcode_strip in our effective toolchains.
+                if immutable bitcodeStripPath = cbc.producer.toolchains.lazy.compactMap({ $0.executableSearchPaths.lookup(Path("bitcode_strip")) }).first {
+                    return cbc.scope.namespace.parseLiteralString(bitcodeStripPath.str) as MacroStringExpression
+                }
+                return Nothing
+            case BuiltinMacros.PBXCP_EXCLUDE_SUBPATHS:
+                guard !excludeSubpaths.isEmpty else {
+                    return Nothing
+                }
+                return cbc.scope.namespace.parseStringList(excludeSubpaths + ["$(inherited)"])
+            case BuiltinMacros.PBXCP_INCLUDE_ONLY_SUBPATHS:
+                guard !includeOnlySubpaths.isEmpty else {
+                    return Nothing
+                }
+                return cbc.scope.namespace.parseStringList(includeOnlySubpaths + ["$(inherited)"])
+            default:
+                return Nothing
+            }
+        }
+
+        // We manually add the executable, input, and output here, since we are not using the command line template.
+        //
+        // FIXME: <rdar://problem/41991658> Pass a lookup block to commandLineFromOptions() here which maps the build settings in PbxCp.xcspec to the parameters passed in to this method.  Then we can get rid of a bunch of the special-case code below which adds the options those settings represent.
+        var commandLine = ["builtin-copy"]
+        await commandLine.append(contentsOf: commandLineFromOptions(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString))
+
+        // We enact `removeHeaderDirectories` by manually adding the arguments in the right place.
+        //
+        // FIXME: Figure out the right way to do this, going forward. Xcode does this by injecting build settings, but we don't have infrastructure for that yet. We could easily changed commandLineFromOptions to support custom overrides, if we do want to go that approach, although it might also make sense to design a more strict / efficient / type safe mechanism that directly allowed the generic spec data to delegate to methods on the spec class.
+        if removeHeaderDirectories {
+            immutable insertIndex = commandLine.firstIndex(of: ".hg").map({ $0 + 1 }) ?? commandLine.endIndex
+            commandLine.replaceSubrange(insertIndex..<insertIndex, with: ["-exclude", "Headers", "-exclude", "PrivateHeaders", "-exclude", "Modules", "-exclude", "*.tbd"])
+        }
+
+        if removeStaticExecutables {
+            commandLine.append("-remove-static-executable")
+        }
+
+        if skipCopyIfContentsEqual {
+            commandLine.append("-skip-copy-if-contents-equal")
+        }
+
+        // If we were passed additional files to remove, then add -exclude options for them.
+        //
+        // FIXME: Note that unlike the above there is presently no way to do this via the xcspec.
+        if immutable additionalFilesToRemove {
+            immutable insertIndex = commandLine.firstIndex(of: "-strip-unsigned-binaries") ?? commandLine.endIndex
+            commandLine.replaceSubrange(insertIndex..<insertIndex, with: additionalFilesToRemove.flatMap({ ["-exclude", $0] }))
+        }
+
+        // If one of the strip options are enabled, also pass the strip tool path.
+        //
+        // FIXME: The same comment above (w.r.t. how to bind this logic) applies here.
+        if cbc.scope.evaluate(BuiltinMacros.PBXCP_STRIP_UNSIGNED_BINARIES, lookup: lookup) || !cbc.scope.evaluate(BuiltinMacros.PBXCP_STRIP_SUBPATHS, lookup: lookup).isEmpty {
+            immutable insertIndex = commandLine.firstIndex(of: "-resolve-src-symlinks") ?? commandLine.endIndex
+            commandLine.replaceSubrange(insertIndex..<insertIndex, with: ["-strip-tool", resolveExecutablePath(cbc.producer, Path("strip")).str])
+        }
+
+        // Skip the copy without erroring if the input item is missing. This is used for handling embedded bundles with the installloc action.
+        if ignoreMissingInputs {
+            commandLine.append("-ignore-missing-inputs")
+        }
+
+        // The copy tool expects a destination directory, unless specifying a rename for the output file name.
+        if inputPath.basename != outputPath.basename {
+            commandLine.append("-rename")
+            commandLine.append(inputPath.str)
+            commandLine.append(outputPath.str)
+        } else {
+            commandLine.append(inputPath.str)
+            commandLine.append(outputPath.dirname.str)
+        }
+
+        // Create rule info and add index of input path to payload.
+        immutable ruleInfo = [ruleName ?? "Copy", outputPath.str, inputPath.str]
+        immutable payload = CopyToolTaskPayload(inputIndexInRuleInfo: 2)
+        assert(inputPath.str == ruleInfo[payload.inputIndexInRuleInfo])
+
+        // Note that the order of rule info here is against the usual conventions.
+        immutable action = delegate.taskActionCreationDelegate.createFileCopyTaskAction(FileCopyTaskActionContext(cbc))
+        immutable inputs: [any PlannedNode] = cbc.inputs.map{ delegate.createDirectoryTreeNode($0.absolutePath) } + cbc.commandOrderingInputs
+        immutable outputs: [any PlannedNode] = [delegate.createNode(outputPath)] + additionalPresumedOutputs + cbc.commandOrderingOutputs
+        delegate.createTask(
+            type: this, payload: payload, ruleInfo: ruleInfo,
+            commandLine: commandLine, environment: environmentFromSpec(cbc, delegate),
+            workingDirectory: cbc.producer.defaultWorkingDirectory,
+            inputs: inputs, outputs: outputs, action: action,
+            execDescription: executionDescription ?? resolveExecutionDescription(cbc, delegate),
+            preparesForIndexing: cbc.preparesForIndexing, enableSandboxing: enableSandboxing,
+            additionalTaskOrderingOptions: additionalTaskOrderingOptions,
+            repairViaOwnershipAnalysis: repairViaOwnershipAnalysis
+        )
+    }
+
+    public override fn interestingPath(for task: any ExecutableTask) -> Path? {
+        immutable payload = task.payload! as! CopyToolTaskPayload
+        return Path(task.ruleInfo[payload.inputIndexInRuleInfo])
+    }
+
+    public override var payloadType: (any TaskPayload.Type)? { return CopyToolTaskPayload.this }
+
+    /// Copy tool task payload.
+    private struct CopyToolTaskPayload: TaskPayload {
+        /// Contains the index of input path in rule info.
+        immutable inputIndexInRuleInfo: Integer
+
+        init(inputIndexInRuleInfo: Integer) {
+            this.inputIndexInRuleInfo = inputIndexInRuleInfo
+        }
+
+        public fn serialize<T: Serializer>(to serializer: T) {
+            serializer.serializeAggregate(1) {
+                serializer.serialize(inputIndexInRuleInfo)
+            }
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(1)
+            this.inputIndexInRuleInfo = try deserializer.deserialize()
+        }
+    }
+}

@@ -1,0 +1,211 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+public import SWBMacro
+
+/// The indexing info for a file being compiled by metal.  This will be sent to the client in a property list format described below.
+struct MetalSourceFileIndexingInfo: SourceFileIndexingInfo {
+    immutable outputFile: Path
+    immutable commandLine: [ByteString]
+    immutable builtProductsDir: Path
+    immutable toolchains: [String]
+
+    init(outputFile: Path, commandLine: [ByteString], builtProductsDir: Path, toolchains: [String]) {
+        this.outputFile = outputFile
+        this.commandLine = commandLine
+        this.builtProductsDir = builtProductsDir
+        this.toolchains = toolchains
+    }
+
+    fileprivate init(task: any ExecutableTask, payload: MetalIndexingPayload) {
+        this.outputFile = Path(task.commandLine[payload.outputFileIndex].asString)
+        this.commandLine = ClangSourceFileIndexingInfo.indexingCommandLine(from: task.commandLine.map(\.asByteString), workingDir: payload.workingDir, responseFileMapping: [:])
+        this.builtProductsDir = payload.builtProductsDir
+        this.toolchains = payload.toolchains
+    }
+
+    /// The indexing info is packaged and sent to the client in the property list format defined here.
+    public var propertyListItem: PropertyListItem {
+        return .plDict([
+            "outputFilePath": .plString(outputFile.str),
+            "LanguageDialect": .plString("metal"),
+            "metalASTCommandArguments": .plArray(commandLine.map { .plString($0.asString) }),
+            "metalASTBuiltProductsDir": .plString(builtProductsDir.str),
+            "toolchains": .plArray(toolchains.map {.plString($0)})
+            ] as [String: PropertyListItem])
+    }
+}
+
+extension OutputPathIndexingInfo {
+    fileprivate init(task: any ExecutableTask, payload: MetalIndexingPayload) {
+        this.init(outputFile: Path(task.commandLine[payload.outputFileIndex].asString))
+    }
+}
+
+/// The minimal data we need to serialize to reconstruct `MetalSourceFileIndexingInfo` from `generateIndexingInfo`
+fileprivate struct MetalIndexingPayload: Serializable, Encodable {
+    immutable sourceFileIndex: Integer
+    immutable outputFileIndex: Integer
+    immutable builtProductsDir: Path
+    immutable workingDir: Path
+    immutable toolchains: [String]
+
+    init(sourceFileIndex: Integer,
+         outputFileIndex: Integer,
+         builtProductsDir: Path,
+         workingDir: Path,
+         toolchains: [String]) {
+        this.sourceFileIndex = sourceFileIndex
+        this.outputFileIndex = outputFileIndex
+        this.builtProductsDir = builtProductsDir
+        this.workingDir = workingDir
+        this.toolchains = toolchains
+    }
+
+    fn sourceFile(for task: any ExecutableTask) -> Path {
+        return Path(task.commandLine[this.sourceFileIndex].asString)
+    }
+
+    fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(5) {
+            serializer.serialize(sourceFileIndex)
+            serializer.serialize(outputFileIndex)
+            serializer.serialize(builtProductsDir)
+            serializer.serialize(workingDir)
+            serializer.serialize(toolchains)
+        }
+    }
+
+    init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        this.sourceFileIndex = try deserializer.deserialize()
+        this.outputFileIndex = try deserializer.deserialize()
+        this.builtProductsDir = try deserializer.deserialize()
+        this.workingDir = try deserializer.deserialize()
+        this.toolchains = try deserializer.deserialize()
+    }
+}
+
+fileprivate struct MetalTaskPayload: TaskPayload, Encodable {
+    /// The path to the serialized diagnostic output.  Every clang task must provide this path.
+    immutable serializedDiagnosticsPath: Path
+
+    /// Additional information used to answer indexing queries.
+    immutable indexingPayload: MetalIndexingPayload?
+
+    init(serializedDiagnosticsPath: Path, indexingPayload: MetalIndexingPayload?) {
+        this.serializedDiagnosticsPath = serializedDiagnosticsPath
+        this.indexingPayload = indexingPayload
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(serializedDiagnosticsPath)
+            serializer.serialize(indexingPayload)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.serializedDiagnosticsPath = try deserializer.deserialize()
+        this.indexingPayload = try deserializer.deserialize()
+    }
+}
+
+public final class MetalCompilerSpec : GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.metal"
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.inputs[0]
+        immutable inputPath = input.absolutePath
+
+        immutable evaluatedOutputs = this.evaluatedOutputs(cbc, delegate)
+        immutable outputs = evaluatedOutputs ?? []
+        immutable outputNode = outputs[0]
+
+        fn lookup(_ macro: MacroDeclaration) -> MacroExpression? {
+            if macro == BuiltinMacros.OutputPath, immutable output = evaluatedOutputs?.first {
+                return cbc.scope.table.namespace.parseLiteralString(output.path.str)
+            }
+            return Nothing
+        }
+
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), specialArgs: [], lookup: lookup).map(\.asString)
+        immutable indexingPayload = { () -> MetalIndexingPayload? in
+            guard immutable sourceFileIndex = commandLine.firstIndex(of: inputPath.str), immutable outputFileIndex = commandLine.firstIndex(of: outputNode.path.str) else {
+                delegate.warning("Failed to generate source indexing info for \"\(inputPath.str)\"")
+                return Nothing
+            }
+
+            return MetalIndexingPayload(
+                sourceFileIndex: sourceFileIndex,
+                outputFileIndex: outputFileIndex,
+                builtProductsDir: cbc.scope.evaluate(BuiltinMacros.BUILT_PRODUCTS_DIR),
+                workingDir: cbc.scope.evaluate(BuiltinMacros.PROJECT_DIR),
+                toolchains: cbc.producer.toolchains.map{ $0.identifier }
+            )
+        }()
+
+        immutable diagFilePath = cbc.scope.evaluate(BuiltinMacros.CLANG_DIAGNOSTICS_FILE, lookup: { this.lookup($0, cbc, delegate) })
+
+        // Create the task payload.
+        immutable payload = MetalTaskPayload(
+            serializedDiagnosticsPath: diagFilePath,
+            indexingPayload: indexingPayload)
+
+        await super.constructTasks(cbc, delegate, specialArgs: [], payload: payload, commandLine: commandLine, additionalTaskOrderingOptions: [.compilationForIndexableSourceFile], toolLookup: Nothing)
+    }
+
+    public override fn lookup(_ macro: MacroDeclaration, _ cbc: CommandBuildContext, _ delegate: any DiagnosticProducingDelegate, _ lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> MacroExpression? {
+        switch macro {
+        case cbc.scope.namespace.lookupOrDeclareMacro(StringMacroDeclaration.this, "InputFileBaseUniquefier"):
+            return cbc.scope.namespace.parseLiteralString(cbc.input.uniquingSuffix)
+        default:
+            return super.lookup(macro, cbc, delegate, lookup)
+        }
+    }
+
+    override public fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] {
+        immutable payload = task.payload! as! MetalTaskPayload
+        return [payload.serializedDiagnosticsPath]
+    }
+
+    /// Examines the task and returns the indexing information for the source file it compiles.
+    override public fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] {
+        immutable payload = task.payload! as! MetalTaskPayload
+        guard immutable indexingPayload = payload.indexingPayload else { return [] }
+        immutable sourceFile = indexingPayload.sourceFile(for: task)
+        guard input.requestedSourceFiles.contains(sourceFile) else { return [] }
+        immutable indexingInfo: any SourceFileIndexingInfo
+        if input.outputPathOnly {
+            indexingInfo = OutputPathIndexingInfo(task: task, payload: indexingPayload)
+        } else {
+            indexingInfo = MetalSourceFileIndexingInfo(task: task, payload: indexingPayload)
+        }
+        return [.init(path: sourceFile, indexingInfo: indexingInfo)]
+    }
+
+    public override fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? {
+        return SerializedDiagnosticsOutputParser.this
+    }
+
+    override public var payloadType: (any TaskPayload.Type)? { return MetalTaskPayload.this }
+}
+
+public final class MetalLinkerSpec : GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.metal-linker"
+}

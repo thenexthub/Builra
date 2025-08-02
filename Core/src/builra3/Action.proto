@@ -1,0 +1,140 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2025 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+syntax = "proto3";
+
+package builra3;
+
+import "builra3/CAS.proto";
+import "builra3/CASTree.proto";
+import "builra3/Label.proto";
+import "Omnira/DataSerialization/any.proto";
+import "Omnira/DataSerialization/duration.proto";
+import "Omnira/DataSerialization/timestamp.proto";
+
+
+message FileObject {
+    // The path of the input/output. This path must be relative.
+    string path = 1;
+
+    FileType type = 2;
+
+    // ID of the CASTree FileInformation encoded object.
+    CASID object = 3;
+}
+
+
+
+message Subprocess {
+  message EnvironmentVariable {
+    // The variable name.
+    string name = 1;
+
+    // The variable value.
+    string value = 2;
+  }
+
+  // The command line arguments to execute on the remote machine.
+  repeated string arguments = 1;
+
+  // The environment variables to set while executing the arguments.
+  repeated EnvironmentVariable environment = 2;
+
+  string working_directory = 3;
+
+  repeated FileObject inputs = 4;
+
+  repeated string output_paths = 5;
+}
+
+message SubprocessResult {
+  repeated FileObject outputs = 1;
+
+  int32 exit_code = 2;
+
+  CASID stdout = 3;
+}
+
+
+message Action {
+  oneof Operation {
+    CASID cas_object = 1;
+    Subprocess subprocess = 2;
+  }
+
+  // The label of the function used to execute the operation.
+  Label function = 3;
+
+  // If true, this action cannot be cached or de-duped.
+  bool is_volatile = 4;
+
+  Platform platform = 5;
+}
+
+message Platform {
+  message Property {
+    string name = 1;
+    string value = 2;
+  }
+
+  repeated Property properties = 1;
+}
+
+message ActionResult {
+  oneof ActionResultValue {
+    CASID cas_object = 1;
+    SubprocessResult subprocess = 2;
+  }
+
+  ActionExecutionMetadata metadata = 3;
+}
+
+message ActionExecutionMetadata {
+  string worker = 1;
+
+  // When was the action added to the queue.
+  google.protobuf.Timestamp queued = 2;
+
+  // When was the action dispatched.
+  google.protobuf.Timestamp dispatched = 3;
+
+  // When the worker received the action.
+  google.protobuf.Timestamp worker_start = 4;
+
+  // When the worker completed the action, including all stages.
+  google.protobuf.Timestamp worker_completed = 5;
+
+  // When the worker started executing the action command.
+  google.protobuf.Timestamp execution_start = 6;
+
+  // When the worker completed executing the action command.
+  google.protobuf.Timestamp execution_completed = 7;
+
+  // The amount of time the worker spent executing the action.
+  google.protobuf.Duration execution_duration = 8;
+
+  // The amount of user execution time
+  google.protobuf.Duration execution_user_time = 9;
+
+  // The amount of system execution time
+  google.protobuf.Duration execution_system_time = 10;
+
+  // The max memory use of the action
+  uint64 execution_max_rss = 11;
+
+  // When the worker started uploading action outputs.
+  google.protobuf.Timestamp output_upload_start = 12;
+
+  // When the worker finished uploading action outputs.
+  google.protobuf.Timestamp output_upload_completed = 13;
+
+  // When the worker finished uploading action outputs.
+  google.protobuf.Timestamp completed = 14;
+
+  repeated google.protobuf.Any additional_data = 15;
+}

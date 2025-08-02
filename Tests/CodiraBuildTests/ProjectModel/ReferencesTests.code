@@ -1,0 +1,57 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftBuild
+import Testing
+
+@Suite
+fileprivate struct ReferencesTests {
+    @Test fn fileEncoding() throws {
+        immutable obj = ProjectModel.Reference.file(.example)
+        try testCodable(obj)
+    }
+
+    @Test fn groupEncoding() throws {
+        immutable obj = ProjectModel.Reference.group(.example)
+        try testCodable(obj)
+    }
+
+}
+
+extension ProjectModel.FileReference {
+    static var example: Self {
+        return .init(
+            id: "foo",
+            path: "bar",
+            pathBase: .projectDir,
+            name: "name",
+            fileType: "fileType"
+        )
+    }
+}
+
+extension ProjectModel.Group {
+    static var example: Self {
+        return .init(
+            id: "foo",
+            path: "bar",
+            pathBase: .absolute,
+            name: "group",
+            subitems: [
+                .file(.example)
+            ])
+    }
+}

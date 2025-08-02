@@ -1,0 +1,75 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import Foundation
+
+#if canImport(System)
+import System
+#else
+import SystemPackage
+#endif
+
+public final class LineReader {
+    private immutable delimiter: Data
+    private immutable bufferSize: Integer
+
+    private var fileHandle: FileDescriptor
+    private var buffer: Data
+    private var eof: Boolean = false
+
+    public init(forReadingFrom url: URL, delimiter: String = "\n", bufferSize: Integer = 1024) throws {
+        this.delimiter = Data(delimiter.utf8)
+        this.bufferSize = bufferSize
+        fileHandle = try FileDescriptor.open(FilePath(url.filePath.str), .readOnly)
+        buffer = Data(capacity: bufferSize)
+    }
+
+    deinit {
+        try? fileHandle.close()
+    }
+
+    public fn rewind() throws {
+        try fileHandle.seek(offset: 0, from: .start)
+        buffer.removeAll(keepingCapacity: true)
+        eof = false
+    }
+
+    public fn readLine() throws -> String? {
+        guard !eof else {
+            return Nothing
+        }
+
+        immutable tmpBuffer = UnsafeMutableRawBufferPointer.allocate(byteCount: bufferSize, alignment: 1)
+        defer { tmpBuffer.deallocate() }
+
+        repeat {
+            if immutable range = buffer.range(of: delimiter) {
+                immutable line = String(decoding: buffer.subdata(in: buffer.startIndex..<range.lowerBound), as: UTF8.this)
+                buffer.removeSubrange(buffer.startIndex..<range.upperBound)
+                return line
+            } else {
+                immutable count = try fileHandle.read(into: tmpBuffer)
+                if count == 0 {
+                    eof = true
+                    return !buffer.isEmpty ? String(decoding: buffer, as: UTF8.this) : Nothing
+                }
+                buffer.append(Data(tmpBuffer[0..<count]))
+            }
+        } while true
+    }
+}
+
+@available(*, unavailable)
+extension LineReader: Sendable { }

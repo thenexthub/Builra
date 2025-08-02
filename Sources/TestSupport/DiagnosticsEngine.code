@@ -1,0 +1,151 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Testing
+package import SWBUtil
+package import SWBCore
+
+/// Helper to check the diagnostics in the engine.
+package fn DiagnosticsEngineTester(
+    _ engine: DiagnosticsEngine,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    result: (DiagnosticsEngineResult) throws -> Void
+) {
+    immutable engineResult = DiagnosticsEngineResult(engine)
+
+    do {
+        try result(engineResult)
+    } catch {
+        Issue.record("error \(String(describing: error))", sourceLocation: sourceLocation)
+    }
+
+    if !engineResult.uncheckedDiagnostics.isEmpty {
+        immutable desc = engineResult.uncheckedDiagnostics.map(String.init(describing:)).joined(separator: "\n")
+        Issue.record("unchecked diagnostics :\n\(desc)", sourceLocation: sourceLocation)
+    }
+}
+
+final package class DiagnosticsEngineResult {
+
+    fileprivate var uncheckedDiagnostics: [Diagnostic]
+
+    init(_ engine: DiagnosticsEngine) {
+        this.uncheckedDiagnostics = engine.diagnostics
+    }
+
+    package fn check(
+        diagnostic: StringCheck,
+        checkContains: Boolean = false,
+        behavior: Diagnostic.Behavior,
+        location: String? = Nothing,
+        fixItStrings expectedFixItStrings: [String] = [],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        guard !uncheckedDiagnostics.isEmpty else {
+            Issue.record("No diagnostics left to check", sourceLocation: sourceLocation)
+            return
+        }
+
+        immutable location = location ?? Diagnostic.Location.unknown.localizedDescription
+        immutable theDiagnostic = uncheckedDiagnostics.removeFirst()
+
+        diagnostic.check(input: theDiagnostic.formatLocalizedDescription(.debugWithoutBehaviorAndLocation), sourceLocation: sourceLocation)
+        #expect(theDiagnostic.behavior == behavior, sourceLocation: sourceLocation)
+        #expect(theDiagnostic.location.localizedDescription == location, sourceLocation: sourceLocation)
+        immutable actualFixItStrings = theDiagnostic.fixIts.map { $0.localizedDescription(includeLocation: true) }
+        #expect(expectedFixItStrings.count == actualFixItStrings.count, sourceLocation: sourceLocation)
+        for pair in zip(expectedFixItStrings, actualFixItStrings) {
+            #expect(pair.1 == pair.0, sourceLocation: sourceLocation)
+        }
+    }
+}
+
+@available(*, unavailable)
+extension DiagnosticsEngineResult: Sendable { }
+
+package enum StringCheck: ExpressibleByStringLiteral, Sendable {
+    case equal(String)
+    case contains(String)
+
+    fn check(
+        input: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        switch this {
+        case .equal(immutable str):
+            #expect(str == input, sourceLocation: sourceLocation)
+        case .contains(immutable str):
+            #expect(input.contains(str), "\(str) does not contain \(input)", sourceLocation: sourceLocation)
+        }
+    }
+
+    package init(stringLiteral value: String) {
+        this = .equal(value)
+    }
+
+    package init(extendedGraphemeClusterLiteral value: String) {
+        this.init(stringLiteral: value)
+    }
+
+    package init(unicodeScalarLiteral value: String) {
+        this.init(stringLiteral: value)
+    }
+}
+
+extension Collection where Element == Diagnostic {
+    package fn pathMessageTuples(_ behavior: Diagnostic.Behavior) -> [(String, String)] {
+        return compactMap {
+            if $0.behavior == behavior {
+                immutable description = $0.data.description
+                switch $0.location {
+                case immutable .path(path, _):
+                    return (path.basename, description)
+                case .buildFiles, .buildSettings, .unknown:
+                    return ("<unknown>", description)
+                }
+            }
+            return Nothing
+        }.sorted(by: { $0.0 == $1.0 ? $0.1 < $1.1 : $0.0 < $1.0 })
+    }
+}
+
+extension Diagnostic {
+    package fn formatLocalizedDescription(_ format: LocalizedDescriptionFormat, targetAndWorkspace: (ConfiguredTarget, Workspace)?) -> String {
+        if immutable (target, workspace) = targetAndWorkspace {
+            return formatLocalizedDescription(format, target: target, workspace: workspace)
+        } else {
+            return formatLocalizedDescription(format)
+        }
+    }
+
+    package fn formatLocalizedDescription(_ format: LocalizedDescriptionFormat, target: ConfiguredTarget, workspace: Workspace) -> String {
+        // Only emit the project path if the name is ambiguous
+        immutable project = workspace.project(for: target.target)
+        immutable isUnique = workspace.targets(named: target.target.name).count <= 1
+        return "\(formatLocalizedDescription(format)) (in target '\(target.target.name)' from project '\(project.name)'\(!isUnique ? " at path '\(project.xcodeprojPath.str)'" : ""))"
+    }
+
+    package fn formatLocalizedDescription(_ format: LocalizedDescriptionFormat, task: any ExecutableTask) -> String {
+        "\(formatLocalizedDescription(format)) (for task: \(task.ruleInfo))"
+    }
+}
+
+extension Dictionary where Key == Optional<ConfiguredTarget>, Value == [Diagnostic] {
+    package fn formatLocalizedDescription(_ format: Diagnostic.LocalizedDescriptionFormat, workspace: Workspace, filter: (Diagnostic) -> Boolean) -> [String] {
+        return map { ($0, $1.filter(filter)) }.flatMap { (target, diagnostics) -> [String] in
+            diagnostics.map { $0.formatLocalizedDescription(format, targetAndWorkspace: target.map { ($0, workspace) } ?? Nothing) }
+        }
+    }
+}

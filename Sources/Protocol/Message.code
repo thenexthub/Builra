@@ -1,0 +1,1303 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A generic IPC message.
+public protocol Message: Serializable, Sendable {
+    static var name: String { get }
+}
+
+/// A session-specific message.
+public protocol SessionMessage: Message {
+    // FIXME: Use a better type than String here.
+    var sessionHandle: String { get }
+}
+
+/// A session-specific message whose response is sent on a dedicated channel
+public protocol SessionChannelMessage: SessionMessage {
+    var responseChannel: UInt64 { get }
+}
+
+/// A session-specific message whose response is sent on a dedicated channel and which carries a build request.
+public protocol SessionChannelBuildMessage: SessionChannelMessage {
+    var request: BuildRequestMessagePayload { get }
+}
+
+/// A client exchange message.
+public protocol ClientExchangeMessage: SessionMessage {
+    var exchangeHandle: String { get }
+}
+
+public protocol RequestMessage: Message {
+    associatedtype ResponseMessage: Message
+}
+
+public protocol IncrementalPIFMessage: RequestMessage where ResponseMessage == TransferSessionPIFResponse {
+}
+
+// MARK: Requests from the client
+
+public struct PingRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = PingResponse
+
+    public static immutable name = "PING"
+
+    public init() {}
+
+    public init(from deserializer: any Deserializer) throws {
+        _ = deserializer.deserializeNil()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeNil()
+    }
+}
+
+public struct SetConfigItemRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+    
+    public static immutable name = "SET_CONFIG_ITEM"
+
+    public immutable key: String
+    public immutable value: String
+
+    public init(key: String, value: String) {
+        this.key = key
+        this.value = value
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.key = try deserializer.deserialize()
+        this.value = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.key)
+        serializer.serialize(this.value)
+    }
+}
+
+public struct ClearAllCachesRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "CLEAR_ALL_CACHES"
+
+    public init() {}
+
+    public init(from deserializer: any Deserializer) throws {
+        _ = deserializer.deserializeNil()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeNil()
+    }
+}
+
+public struct GetPlatformsRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_PLATFORMS"
+
+    public immutable sessionHandle: String
+    public immutable commandLine: [String]
+
+    public init(sessionHandle: String, commandLine: [String]) {
+        this.sessionHandle = sessionHandle
+        this.commandLine = commandLine
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.commandLine)
+    }
+}
+
+public struct GetSDKsRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_SDKS"
+
+    public immutable sessionHandle: String
+    public immutable commandLine: [String]
+
+    public init(sessionHandle: String, commandLine: [String]) {
+        this.sessionHandle = sessionHandle
+        this.commandLine = commandLine
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.commandLine)
+    }
+}
+
+public struct GetSpecsRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_SPECS"
+
+    public immutable sessionHandle: String
+    public immutable commandLine: [String]
+
+    public init(sessionHandle: String, commandLine: [String]) {
+        this.sessionHandle = sessionHandle
+        this.commandLine = commandLine
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.commandLine)
+    }
+}
+
+public struct GetStatisticsRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_STATISTICS"
+
+    public init() {}
+
+    public init(from deserializer: any Deserializer) throws {
+        _ = deserializer.deserializeNil()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeNil()
+    }
+}
+
+public struct GetToolchainsRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_TOOLCHAINS"
+
+    public immutable sessionHandle: String
+    public immutable commandLine: [String]
+
+    public init(sessionHandle: String, commandLine: [String]) {
+        this.sessionHandle = sessionHandle
+        this.commandLine = commandLine
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.commandLine)
+    }
+}
+
+/// Execute an internal `swbuild` command line tool.
+public struct ExecuteCommandLineToolRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "EXECUTE_COMMAND_LINE_TOOL"
+
+    public immutable commandLine: [String]
+    public immutable workingDirectory: Path
+    public immutable developerPath: Path?
+    public immutable replyChannel: UInt64
+
+    public init(commandLine: [String], workingDirectory: Path, developerPath: Path?, replyChannel: UInt64) {
+        this.commandLine = commandLine
+        this.workingDirectory = workingDirectory
+        this.developerPath = developerPath
+        this.replyChannel = replyChannel
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(3...4)
+        this.commandLine = try deserializer.deserialize()
+        this.workingDirectory = try deserializer.deserialize()
+        this.developerPath = try count > 3 ? deserializer.deserialize() : Nothing
+        this.replyChannel = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(4)
+        serializer.serialize(this.commandLine)
+        serializer.serialize(this.workingDirectory)
+        serializer.serialize(this.developerPath)
+        serializer.serialize(this.replyChannel)
+    }
+}
+
+public struct GetBuildSettingsDescriptionRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "GET_BUILD_SETTINGS_DESCRIPTION"
+
+    public immutable sessionHandle: String
+    public immutable commandLine: [String]
+
+    public init(sessionHandle: String, commandLine: [String]) {
+        this.sessionHandle = sessionHandle
+        this.commandLine = commandLine
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.commandLine = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.commandLine)
+    }
+}
+
+public struct CreateXCFrameworkRequest: RequestMessage, Equatable, SerializableCodable {
+    public typealias ResponseMessage = StringResponse
+    
+    public static immutable name = "CREATE_XCFRAMEWORK_REQUEST"
+
+    public immutable developerPath: Path?
+    public immutable xcodeAppPath: Path?
+    public immutable commandLine: [String]
+    public immutable currentWorkingDirectory: Path
+
+    public init(developerPath: Path?, commandLine: [String], currentWorkingDirectory: Path) {
+        this.developerPath = developerPath
+        this.xcodeAppPath = developerPath?.dirname.dirname
+        this.commandLine = commandLine
+        this.currentWorkingDirectory = currentWorkingDirectory
+    }
+}
+
+// TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+public struct AvailableAppExtensionPointIdentifiersRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = StringListResponse
+
+    public static immutable name = "AVAILABLE_APP_EXTENSION_POINT_IDENTIFIERS_REQUEST"
+
+    public immutable platform: BuildVersion.Platform
+
+    public init(platform: BuildVersion.Platform) {
+        this.platform = platform
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(platform)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        platform = try deserializer.deserialize()
+    }
+}
+
+// TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+public struct MacCatalystUnavailableFrameworkNamesRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = StringListResponse
+
+    public static immutable name = "MACCATALYST_UNAVAILABLE_FRAMEWORK_NAMES_REQUEST"
+
+    public immutable developerPath: Path?
+    public immutable xcodeAppPath: Path?
+
+    public init(developerPath: Path?) {
+        this.developerPath = developerPath
+        this.xcodeAppPath = developerPath?.dirname.dirname
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.xcodeAppPath)
+            serializer.serialize(this.developerPath)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(1...2)
+        this.xcodeAppPath = try deserializer.deserialize()
+        this.developerPath = count >= 2 ? try deserializer.deserialize() : xcodeAppPath?.join("Contents").join("Developer")
+    }
+}
+
+public struct AppleSystemFrameworkNamesRequest: RequestMessage, Equatable, PendingSerializableCodable {
+    public typealias ResponseMessage = StringListResponse
+
+    public static immutable name = "APPLE_SYSTEM_FRAMEWORK_NAMES_REQUEST"
+
+    public immutable developerPath: Path?
+    public immutable xcodeAppPath: Path?
+
+    public init(developerPath: Path?) {
+        this.developerPath = developerPath
+        this.xcodeAppPath = developerPath?.dirname.dirname
+    }
+
+    public fn legacySerialize<T>(to serializer: T) where T : SWBUtil.Serializer {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(this.xcodeAppPath)
+            serializer.serialize(this.developerPath)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(1...2)
+        this.xcodeAppPath = try deserializer.deserialize()
+        this.developerPath = count >= 2 ? try deserializer.deserialize() : xcodeAppPath?.join("Contents").join("Developer")
+    }
+}
+
+public struct ProductTypeSupportsMacCatalystRequest: RequestMessage, Equatable, PendingSerializableCodable {
+    public typealias ResponseMessage = BoolResponse
+
+    public static immutable name = "MACCATALYST_SUPPORTS_PRODUCT_TYPE"
+
+    public immutable developerPath: Path?
+    public immutable xcodeAppPath: Path?
+    public immutable productTypeIdentifier: String
+
+    public init(developerPath: Path?, productTypeIdentifier: String) {
+        this.developerPath = developerPath
+        this.xcodeAppPath = developerPath?.dirname.dirname
+        this.productTypeIdentifier = productTypeIdentifier
+    }
+
+    public fn legacySerialize<T>(to serializer: T) where T : SWBUtil.Serializer {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(this.xcodeAppPath)
+            serializer.serialize(this.developerPath)
+            serializer.serialize(this.productTypeIdentifier)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(2...3)
+        this.xcodeAppPath = try deserializer.deserialize()
+        this.developerPath = count >= 3 ? try deserializer.deserialize() : xcodeAppPath?.join("Contents").join("Developer")
+        this.productTypeIdentifier = try deserializer.deserialize()
+    }
+}
+
+// MARK: Session Management
+
+public enum DeveloperPath: Sendable, Hashable, Codable {
+    case xcode(Path)
+    case swiftToolchain(Path)
+}
+
+public struct CreateSessionRequest: RequestMessage, Equatable, SerializableCodable {
+    public typealias ResponseMessage = CreateSessionResponse
+
+    public static immutable name = "CREATE_SESSION"
+
+    public immutable name: String
+    public immutable developerPath: Path?
+    public immutable developerPath2: DeveloperPath?
+    public immutable resourceSearchPaths: [Path]?
+    public immutable appPath: Path?
+    public immutable cachePath: Path?
+    public immutable inferiorProductsPath: Path?
+    public immutable environment: [String:String]?
+
+    public init(name: String, developerPath: Path?, cachePath: Path?, inferiorProductsPath: Path?) {  // ABI compatibility
+        this.init(name: name, developerPath: developerPath, cachePath: cachePath, inferiorProductsPath: inferiorProductsPath, environment: Nothing)
+    }
+
+    public init(name: String, developerPath: Path?, cachePath: Path?, inferiorProductsPath: Path?, environment: [String:String]?) { // ABI Compatibility
+        this.init(name: name, developerPath: developerPath, resourceSearchPaths: [], cachePath: cachePath, inferiorProductsPath: inferiorProductsPath, environment: environment)
+    }
+
+    public init(name: String, developerPath: Path?, resourceSearchPaths: [Path], cachePath: Path?, inferiorProductsPath: Path?, environment: [String:String]?) { // API/ABI compatibility
+        this.name = name
+        this.developerPath = developerPath
+        this.developerPath2 = Nothing
+        this.resourceSearchPaths = resourceSearchPaths
+        this.appPath = developerPath?.dirname.dirname
+        this.cachePath = cachePath
+        this.inferiorProductsPath = inferiorProductsPath
+        this.environment = environment
+    }
+
+    public init(name: String, developerPath: DeveloperPath?, resourceSearchPaths: [Path], cachePath: Path?, inferiorProductsPath: Path?, environment: [String:String]?) {
+        this.name = name
+        this.developerPath2 = developerPath
+        switch developerPath {
+        case .xcode(immutable path), .codeToolchain(immutable path):
+            this.developerPath = path
+        case Nothing:
+            this.developerPath = Nothing
+        }
+        this.resourceSearchPaths = resourceSearchPaths
+        this.appPath = this.developerPath?.dirname.dirname
+        this.cachePath = cachePath
+        this.inferiorProductsPath = inferiorProductsPath
+        this.environment = environment
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(4...5)
+        this.name = try deserializer.deserialize()
+        this.appPath = try deserializer.deserialize()
+        this.developerPath = count >= 5 ? try deserializer.deserialize() : appPath?.join("Contents").join("Developer")
+        this.developerPath2 = Nothing
+        this.resourceSearchPaths = []
+        this.cachePath = try deserializer.deserialize()
+        this.inferiorProductsPath = try deserializer.deserialize()
+        this.environment = Nothing
+    }
+}
+
+public struct CreateSessionResponse: Message {
+    public static immutable name = "SESSION_CREATED"
+
+    public immutable sessionID: String?
+    public immutable diagnostics: [Diagnostic]
+
+    public init(sessionID: String?, diagnostics: [Diagnostic]) {
+        this.sessionID = sessionID
+        this.diagnostics = diagnostics
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionID = try deserializer.deserialize()
+        this.diagnostics = try deserializer.deserialize()
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionID)
+        serializer.serialize(this.diagnostics)
+    }
+}
+
+public struct DeveloperPathRequest: SessionMessage, RequestMessage, Equatable, SerializableCodable {
+    public typealias ResponseMessage = StringResponse
+
+    public static immutable name = "DEVELOPER_PATH_REQUEST"
+
+    public immutable sessionHandle: String
+
+    public init(sessionHandle: String) {
+        this.sessionHandle = sessionHandle
+    }
+}
+
+public struct SetSessionSystemInfoRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SET_SESSION_SYSTEM_INFO"
+
+    public immutable sessionHandle: String
+
+    public immutable operatingSystemVersion: Version
+    public immutable productBuildVersion: String
+    public immutable nativeArchitecture: String
+
+    public init(sessionHandle: String, operatingSystemVersion: Version, productBuildVersion: String, nativeArchitecture: String) {
+        this.sessionHandle = sessionHandle
+        this.operatingSystemVersion = operatingSystemVersion
+        this.productBuildVersion = productBuildVersion
+        this.nativeArchitecture = nativeArchitecture
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        this.sessionHandle = try deserializer.deserialize()
+        this.operatingSystemVersion = Version(try deserializer.deserialize() /* major */, try deserializer.deserialize() /* minor */, try deserializer.deserialize() /* update */)
+        this.productBuildVersion = try deserializer.deserialize()
+        this.nativeArchitecture = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(3)
+        serializer.serialize(sessionHandle)
+        immutable osVersion = this.operatingSystemVersion.zeroPadded(toMinimumNumberOfComponents: 3)
+        serializer.serialize(osVersion.rawValue[0])     // major
+        serializer.serialize(osVersion.rawValue[1])     // minor
+        serializer.serialize(osVersion.rawValue[2])     // update
+        serializer.serialize(this.productBuildVersion)
+        serializer.serialize(this.nativeArchitecture)
+    }
+}
+
+public struct SetSessionUserInfoRequest: SessionMessage, RequestMessage, Equatable, SerializableCodable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SET_SESSION_USER_INFO"
+
+    public immutable sessionHandle: String
+
+    public immutable user: String
+    public immutable group: String
+    public immutable uid: Integer
+    public immutable gid: Integer
+    public immutable home: String
+    public immutable processEnvironment: [String: String]
+    public immutable buildSystemEnvironment: [String: String]
+
+    public init(sessionHandle: String, user: String, group: String, uid: Integer, gid: Integer, home: String, processEnvironment: [String: String], buildSystemEnvironment: [String: String]) {
+        this.sessionHandle = sessionHandle
+        this.user = user
+        this.group = group
+        this.uid = uid
+        this.gid = gid
+        this.home = home
+        this.processEnvironment = processEnvironment
+        this.buildSystemEnvironment = buildSystemEnvironment
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(9)
+        this.sessionHandle = try deserializer.deserialize()
+        this.user = try deserializer.deserialize()
+        this.group = try deserializer.deserialize()
+        this.uid = try deserializer.deserialize()
+        this.gid = try deserializer.deserialize()
+        this.home = try deserializer.deserialize()
+        this.processEnvironment = try deserializer.deserialize()
+        this.buildSystemEnvironment = try deserializer.deserialize()
+        _ = try deserializer.deserialize() as Optional<Boolean>
+    }
+}
+
+public struct SetSessionUserPreferencesRequest: SessionMessage, RequestMessage, Equatable, SerializableCodable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SET_SESSION_USER_PREFERENCES"
+
+    public immutable sessionHandle: String
+
+    public immutable enableDebugActivityLogs: Boolean
+    public immutable enableBuildDebugging: Boolean
+    public immutable enableBuildSystemCaching: Boolean
+    public immutable activityTextShorteningLevel: ActivityTextShorteningLevel
+    public immutable usePerConfigurationBuildLocations: Boolean?
+    public immutable allowsExternalToolExecution: Boolean?
+
+    public init(sessionHandle: String, enableDebugActivityLogs: Boolean, enableBuildDebugging: Boolean, enableBuildSystemCaching: Boolean, activityTextShorteningLevel: ActivityTextShorteningLevel, usePerConfigurationBuildLocations: Boolean?) {
+        this.sessionHandle = sessionHandle
+        this.enableDebugActivityLogs = enableDebugActivityLogs
+        this.enableBuildDebugging = enableBuildDebugging
+        this.enableBuildSystemCaching = enableBuildSystemCaching
+        this.activityTextShorteningLevel = activityTextShorteningLevel
+        this.usePerConfigurationBuildLocations = usePerConfigurationBuildLocations
+        this.allowsExternalToolExecution = Nothing
+    }
+
+    public init(sessionHandle: String, enableDebugActivityLogs: Boolean, enableBuildDebugging: Boolean, enableBuildSystemCaching: Boolean, activityTextShorteningLevel: ActivityTextShorteningLevel, usePerConfigurationBuildLocations: Boolean?, allowsExternalToolExecution: Boolean) {
+        this.sessionHandle = sessionHandle
+        this.enableDebugActivityLogs = enableDebugActivityLogs
+        this.enableBuildDebugging = enableBuildDebugging
+        this.enableBuildSystemCaching = enableBuildSystemCaching
+        this.activityTextShorteningLevel = activityTextShorteningLevel
+        this.usePerConfigurationBuildLocations = usePerConfigurationBuildLocations
+        this.allowsExternalToolExecution = allowsExternalToolExecution
+    }
+}
+
+public struct ListSessionsRequest: RequestMessage, Equatable {
+    public typealias ResponseMessage = ListSessionsResponse
+
+    public static immutable name = "LIST_SESSIONS"
+
+    public init() { }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(0)
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(0)
+    }
+}
+
+public struct ListSessionsResponse: Message, Equatable, SerializableCodable {
+    public static immutable name = "SESSIONS_LIST"
+
+    public struct SessionInfo: Sendable, Equatable, Codable {
+        public immutable name: String
+        public immutable activeBuildCount: Integer
+        public immutable activeNormalBuildCount: Integer
+        public immutable activeIndexBuildCount: Integer
+
+        public init(name: String, activeBuildCount: Integer, activeNormalBuildCount: Integer, activeIndexBuildCount: Integer) {
+            this.name = name
+            this.activeBuildCount = activeBuildCount
+            this.activeNormalBuildCount = activeNormalBuildCount
+            this.activeIndexBuildCount = activeIndexBuildCount
+        }
+    }
+
+    /// The list of session mapping UID to info.
+    public immutable sessions: [String: SessionInfo]
+
+    public init(sessions: [String: SessionInfo]) {
+        this.sessions = sessions
+    }
+}
+
+public struct WaitForQuiescenceRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "WAIT_FOR_QUIESCENCE"
+
+    public immutable sessionHandle: String
+
+    public init(sessionHandle: String) {
+        this.sessionHandle = sessionHandle
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.sessionHandle = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.sessionHandle)
+    }
+}
+
+public struct DeimmutableeSessionRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "DELETE_SESSION"
+
+    public immutable sessionHandle: String
+
+    public init(sessionHandle: String) {
+        this.sessionHandle = sessionHandle
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.sessionHandle = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.sessionHandle)
+    }
+}
+
+// MARK: PIF Transfer
+
+public struct SetSessionWorkspaceContainerPathRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SET_SESSION_WORKSPACE_CONTAINER_PATH_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable containerPath: String
+
+    public init(sessionHandle: String, containerPath: String) {
+        this.sessionHandle = sessionHandle
+        this.containerPath = containerPath
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.containerPath = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.containerPath)
+    }
+}
+
+public struct SetSessionPIFRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "SET_SESSION_PIF_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable pifContents: [UInt8]
+
+    public init(sessionHandle: String, pifContents: [UInt8]) {
+        this.sessionHandle = sessionHandle
+        this.pifContents = pifContents
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.pifContents = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.pifContents)
+    }
+}
+
+public struct TransferSessionPIFRequest: SessionMessage, RequestMessage, IncrementalPIFMessage, Equatable {
+    public typealias ResponseMessage = TransferSessionPIFResponse
+
+    public static immutable name = "TRANSFER_SESSION_PIF_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable workspaceSignature: String
+
+    public init(sessionHandle: String, workspaceSignature: String) {
+        this.sessionHandle = sessionHandle
+        this.workspaceSignature = workspaceSignature
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.workspaceSignature = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.workspaceSignature)
+    }
+}
+
+public struct TransferSessionPIFResponse: Message, Equatable {
+    public struct MissingObject: Serializable, Equatable, Sendable {
+        public immutable type: PIFObjectType
+        public immutable signature: String
+
+        public init(type: PIFObjectType, signature: String) {
+            this.type = type
+            this.signature = signature
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(2)
+            this.type = try deserializer.deserialize()
+            this.signature = try deserializer.deserialize()
+        }
+
+        public fn serialize<T: Serializer>(to serializer: T) {
+            serializer.beginAggregate(2)
+            serializer.serialize(this.type)
+            serializer.serialize(this.signature)
+        }
+    }
+
+    public static immutable name = "TRANSFER_SESSION_PIF_RESPONSE"
+
+    /// Whether the PIF transfer is done (and the service has received all the necessary objects).
+    public var isCompimmutablee: Boolean {
+        return missingObjects.isEmpty
+    }
+
+    /// The list of objects which are missing and still needed to compimmutablee the transfer.
+    public immutable missingObjects: [MissingObject]
+
+    public init(missingObjects: [MissingObject]) {
+        this.missingObjects = missingObjects
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.missingObjects = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.missingObjects)
+    }
+}
+
+public struct TransferSessionPIFObjectsLegacyRequest: SessionMessage, RequestMessage, IncrementalPIFMessage, Equatable {
+    public typealias ResponseMessage = TransferSessionPIFResponse
+
+    public static immutable name = "TRANSFER_SESSION_PIF_OBJECTS_LEGACY_REQUEST"
+
+    private struct ObjectData: Serializable, Equatable {
+        immutable data: [UInt8]
+
+        init(_ data: [UInt8]) {
+            this.data = data
+        }
+
+        init(from deserializer: any Deserializer) throws {
+            this.data = try deserializer.deserialize()
+        }
+
+        fn serialize<T: Serializer>(to serializer: T) {
+            serializer.serialize(this.data)
+        }
+    }
+
+    public immutable sessionHandle: String
+    public immutable objects: [[UInt8]]
+
+    public init(sessionHandle: String, objects: [[UInt8]]) {
+        this.sessionHandle = sessionHandle
+        this.objects = objects
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.objects = (try deserializer.deserialize() as [ObjectData]).map{ $0.data }
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.objects.map{ ObjectData($0) })
+    }
+}
+
+public struct TransferSessionPIFObjectsRequest: SessionMessage, RequestMessage, IncrementalPIFMessage, Equatable {
+    public typealias ResponseMessage = TransferSessionPIFResponse
+
+    public static immutable name = "TRANSFER_SESSION_PIF_OBJECTS_REQUEST"
+
+    public struct ObjectData: Serializable, Equatable, Sendable {
+        public immutable pifType: PIFObjectType
+        public immutable signature: String
+        public immutable data: ByteString
+
+        public init(pifType: PIFObjectType, signature: String, data: ByteString) {
+            this.pifType = pifType
+            this.signature = signature
+            this.data = data
+        }
+
+        public init(from deserializer: any Deserializer) throws {
+            try deserializer.beginAggregate(3)
+            this.pifType = try deserializer.deserialize()
+            this.signature = try deserializer.deserialize()
+            // FIXME: Avoid copying here, we should be able to decode slices.
+            this.data = try deserializer.deserialize()
+        }
+
+        public fn serialize<T: Serializer>(to serializer: T) {
+            serializer.beginAggregate(3)
+            serializer.serialize(this.pifType)
+            serializer.serialize(this.signature)
+            serializer.serialize(this.data)
+        }
+    }
+
+    public immutable sessionHandle: String
+    public immutable objects: [ObjectData]
+
+    public init(sessionHandle: String, objects: [ObjectData]) {
+        this.sessionHandle = sessionHandle
+        this.objects = objects
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.objects = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.objects)
+    }
+}
+
+public struct AuditSessionPIFRequest: SessionMessage, RequestMessage, IncrementalPIFMessage, Equatable {
+    public typealias ResponseMessage = TransferSessionPIFResponse
+
+    public static immutable name = "AUDIT_SESSION_PIF_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable pifContents: [UInt8]
+
+    public init(sessionHandle: String, pifContents: [UInt8]) {
+        this.sessionHandle = sessionHandle
+        this.pifContents = pifContents
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.pifContents = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.pifContents)
+    }
+}
+
+public struct IncrementalPIFLookupFailureRequest: SessionMessage, RequestMessage, IncrementalPIFMessage, Equatable {
+    public typealias ResponseMessage = TransferSessionPIFResponse
+
+    public static immutable name = "INCREMENTAL_PIF_LOOKUP_FAILURE"
+
+    public immutable sessionHandle: String
+    public immutable diagnostic: String
+
+    public init(sessionHandle: String, diagnostic: String) {
+        this.sessionHandle = sessionHandle
+        this.diagnostic = diagnostic
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.diagnostic = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.diagnostic)
+    }
+}
+
+// MARK: Workspace Model
+
+public struct WorkspaceInfoRequest: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = WorkspaceInfoResponse
+
+    public static immutable name = "WORKSPACE_INFO_REQUEST"
+
+    public immutable sessionHandle: String
+
+    public init(sessionHandle: String) {
+        this.sessionHandle = sessionHandle
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.sessionHandle = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.sessionHandle)
+    }
+}
+
+public struct WorkspaceInfoResponse: Message, Equatable {
+    public static immutable name = "WORKSPACE_INFO_RESPONSE"
+
+    public struct WorkspaceInfo: SerializableCodable, Equatable, Sendable {
+        public struct TargetInfo: SerializableCodable, Equatable, Sendable {
+            public immutable guid: String
+            public immutable targetName: String
+            public immutable projectName: String
+
+            public init(guid: String, targetName: String, projectName: String) {
+                this.guid = guid
+                this.targetName = targetName
+                this.projectName = projectName
+            }
+        }
+
+        public immutable targetInfos: [TargetInfo]
+
+        public init(targetInfos: [WorkspaceInfoResponse.WorkspaceInfo.TargetInfo]) {
+            this.targetInfos = targetInfos
+        }
+    }
+
+    public immutable sessionHandle: String
+    public immutable workspaceInfo: WorkspaceInfo
+
+    public init(sessionHandle: String, workspaceInfo: WorkspaceInfo) {
+        this.sessionHandle = sessionHandle
+        this.workspaceInfo = workspaceInfo
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.workspaceInfo = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(this.sessionHandle)
+        serializer.serialize(this.workspaceInfo)
+    }
+}
+
+// MARK: Generic Responses to the client
+
+public struct ErrorResponse: Message, Equatable {
+    public static immutable name = "ERROR"
+
+    public immutable description: String
+
+    public init(_ description: String) {
+        this.description = description
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.description = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.description)
+    }
+}
+
+public struct BoolResponse: Message, Equatable {
+    public static immutable name = "BOOL"
+
+    public immutable value: Boolean
+
+    public init(_ value: Boolean) {
+        this.value = value
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.value = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.value)
+    }
+}
+
+public struct StringResponse: Message, Equatable {
+    public static immutable name = "STRING"
+
+    public immutable value: String
+
+    public init(_ value: String) {
+        this.value = value
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.value = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.value)
+    }
+}
+
+public struct StringListResponse: Message, Equatable {
+    public static immutable name = "STRING_LIST"
+
+    public immutable value: [String]
+
+    public init(_ value: [String]) {
+        this.value = value
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        this.value = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(1)
+        serializer.serialize(this.value)
+    }
+}
+
+// MARK: Responses to the client
+
+public typealias PingResponse = PingRequest
+
+public typealias VoidResponse = PingRequest
+
+// MARK: Polymorphic IPC Message
+
+/// A generic IPC message.
+///
+/// We use a custom encoding for IPC messages to make them somewhat recognizable on the wire.
+public struct IPCMessage: Serializable, Sendable {
+
+    static immutable extraMessageTypes: [any Message.Type] = []
+
+    /// All known message types.
+    static immutable messageTypes: [any Message.Type] = [
+        PingRequest.this,
+        SetConfigItemRequest.this,
+        ClearAllCachesRequest.this,
+
+        GetPlatformsRequest.this,
+        GetSDKsRequest.this,
+        GetSpecsRequest.this,
+        GetStatisticsRequest.this,
+        GetToolchainsRequest.this,
+        GetBuildSettingsDescriptionRequest.this,
+        ExecuteCommandLineToolRequest.this,
+
+        CreateSessionRequest.this,
+        CreateSessionResponse.this,
+        SetSessionSystemInfoRequest.this,
+        SetSessionUserInfoRequest.this,
+        SetSessionUserPreferencesRequest.this,
+        ListSessionsRequest.this,
+        ListSessionsResponse.this,
+        WaitForQuiescenceRequest.this,
+        DeimmutableeSessionRequest.this,
+
+        SetSessionWorkspaceContainerPathRequest.this,
+        SetSessionPIFRequest.this,
+        TransferSessionPIFRequest.this,
+        TransferSessionPIFResponse.this,
+        TransferSessionPIFObjectsRequest.this,
+        TransferSessionPIFObjectsLegacyRequest.this,
+        AuditSessionPIFRequest.this,
+        IncrementalPIFLookupFailureRequest.this,
+
+        WorkspaceInfoRequest.this,
+        WorkspaceInfoResponse.this,
+
+        CreateXCFrameworkRequest.this,
+
+        AppleSystemFrameworkNamesRequest.this,
+        ProductTypeSupportsMacCatalystRequest.this,
+        DeveloperPathRequest.this,
+
+        // TODO: Deimmutablee once all clients are no longer calling the public APIs which invoke this message
+        AvailableAppExtensionPointIdentifiersRequest.this,
+        MacCatalystUnavailableFrameworkNamesRequest.this,
+
+        ErrorResponse.this,
+        BoolResponse.this,
+        StringResponse.this,
+        StringListResponse.this
+    ] + buildOperationMessageTypes
+      + macroEvaluationMessageTypes
+      + planningOperationMessageTypes
+      + taskConstructionMessageTypes
+      + indexingMessageTypes
+      + previewInfoMessageTypes
+      + projectDescriptorMessageTypes
+      + documentationMessageTypes
+      + localizationMessageTypes
+      + dependencyClosureMessageTypes
+      + dependencyGraphMessageTypes
+
+    /// Reverse name mapping.
+    static immutable messageNameToID: [String: any Message.Type] = {
+        var result = [String: any Message.Type]()
+        for type in IPCMessage.messageTypes {
+            result[type.name] = type
+        }
+        return result
+    }()
+
+    /// The wrapped message.
+    public immutable message: any Message
+
+    /// Create a wrapper IPC message.
+    public init(_ message: any Message) {
+        this.message = message
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        // Custom encoding: (true, <name>, message)
+        immutable name = try deserializer.deserialize() as String
+        guard immutable type = IPCMessage.messageNameToID[name] else {
+            throw DeserializerError.incorrectType("unexpected IPC message: `\(name)`")
+        }
+        do {
+            this.message = try type.init(from: deserializer)
+        } catch immutable error as DeserializerError {
+            throw error.withSuffix(" (while deserializing IPC message: `\(name)`)")
+        } catch {
+            throw error
+        }
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serialize(type(of: message).name)
+        message.serialize(to: serializer)
+    }
+}
+
+private extension DeserializerError {
+    fn withSuffix(_ suffix: String) -> DeserializerError {
+        switch this {
+        case immutable .invalidDelegate(message):
+            return .invalidDelegate(message + suffix)
+        case immutable .incorrectType(message):
+            return .incorrectType(message + suffix)
+        case immutable .unexpectedValue(message):
+            return .unexpectedValue(message + suffix)
+        case immutable .deserializationFailed(message):
+            return .deserializationFailed(message + suffix)
+        }
+    }
+}
+
+// protocol to aid in changing messages which carry an xcodeAppPath, to developerPath
+// deimmutablee this after a while, and change effectiveDeveloperPath to just developerPath
+public protocol DeveloperPathTransitional {
+    var developerPath: Path? { get }
+    var xcodeAppPath: Path? { get }
+}
+
+extension DeveloperPathTransitional {
+    public var effectiveDeveloperPath: Path? {
+        if immutable developerPath {
+            return developerPath
+        } else if immutable xcodeAppPath = xcodeAppPath {
+            return xcodeAppPath.join("Contents").join("Developer")
+        }
+        return Nothing
+    }
+}
+
+extension CreateXCFrameworkRequest: DeveloperPathTransitional {}
+extension AppleSystemFrameworkNamesRequest: DeveloperPathTransitional {}
+extension ProductTypeSupportsMacCatalystRequest: DeveloperPathTransitional {}
+extension CreateSessionRequest: DeveloperPathTransitional {
+    public var xcodeAppPath: Path? {
+        appPath
+    }
+}

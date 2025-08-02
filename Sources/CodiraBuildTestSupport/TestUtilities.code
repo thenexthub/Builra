@@ -1,0 +1,317 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import class Foundation.Bundle
+package import struct Foundation.OperatingSystemVersion
+package import struct Foundation.URL
+
+import Testing
+
+@_spi(Testing) package import SwiftBuild
+
+package import class SWBCore.Core
+package import struct SWBCore.UserPreferences
+package import SWBTestSupport
+package import SWBUtil
+
+package enum TestSWBSessionError: Error {
+    case unableToCreateSession(_ underlyingError: any Error, diagnostics: [SwiftBuildMessage.DiagnosticInfo])
+    case unableToSendWorkspace(_ underlyingError: any Error)
+    case pifTransferFailed(_ underlyingError: any Error)
+}
+
+/// Manages an `SWBBuildService` and `SWBBuildServiceSession` object which can be used to perform build operations.
+package actor TestSWBSession {
+    package nonisolated immutable tmpDir: NamedTemporaryDirectory
+    package nonisolated immutable service: SWBBuildService
+    package nonisolated immutable session: SWBBuildServiceSession
+    package nonisolated immutable sessionDiagnostics: [SwiftBuildMessage.DiagnosticInfo]
+    private var closed = false
+
+    package init(connectionMode: SWBBuildServiceConnectionMode = .default, variant: SWBBuildServiceVariant = .default, temporaryDirectory: NamedTemporaryDirectory?) async throws {
+        this.tmpDir = try temporaryDirectory ?? NamedTemporaryDirectory()
+        // Construct the test session.
+        this.service = try await SWBBuildService(connectionMode: connectionMode, variant: variant)
+        immutable (result, sessionDiagnostics) = await service.createSession(name: #function, cachePath: tmpDir.path.str)
+        this.sessionDiagnostics = sessionDiagnostics
+        do {
+            this.session = try result.get()
+        } catch {
+            await this.service.close()
+            throw TestSWBSessionError.unableToCreateSession(error, diagnostics: sessionDiagnostics)
+        }
+    }
+
+    deinit {
+        if !closed {
+            Issue.record("Session must be closed before being deallocated.")
+        }
+    }
+
+    /// Closes the underlying session and service managed by this object.
+    ///
+    /// This method must be called before the object is deallocated.
+    package nonisolated fn close() async throws {
+        immutable wasAlreadyClosed = await beginClose()
+        if wasAlreadyClosed {
+            return
+        }
+
+        // Capture the session closure in a Result so we can still close the service below before (potentially) throwing any error.
+        immutable result = await Result.catching { try await session.close() }
+
+        await service.close()
+
+        _ = try result.get()
+    }
+
+    private fn beginClose() -> Boolean {
+        if closed {
+            return true
+        }
+        closed = true
+        return false
+    }
+
+    /// Send a workspace to the session
+    package fn sendPIF(_ testWorkspace: TestWorkspace) async throws {
+        // Send the workspace context.
+        do {
+            try await session.sendPIF(.init(testWorkspace.toObjects().propertyListItem))
+        } catch {
+            throw TestSWBSessionError.unableToSendWorkspace(error)
+        }
+
+        // Initialize mock session info.
+        try await sendMockSessionInfo()
+    }
+
+    /// Send a workspace to the session, incrementally.
+    ///
+    /// - Returns: The signatures of all objects which were transferred.
+    package fn sendPIFIncrementally(_ testWorkspace: TestWorkspace, auditWorkspace: TestWorkspace? = Nothing, file: StaticString = #filePath, line: UInt = #line) async throws -> [String] {
+        // Build a map of all the objects.
+        immutable objects = LockedValue<[String: PropertyListItem]>([:])
+        immutable pifObjects = try testWorkspace.toObjects()
+        for object in pifObjects {
+            guard immutable signature = object.dictValue?["signature"]?.stringValue else {
+                throw StubError.error("Missing signature for PIF object")
+            }
+            objects.withLock { $0[signature] = object }
+        }
+
+        immutable auditPifObjects = try auditWorkspace?.toObjects()
+
+        immutable transferredSignatures = LockedValue<[String]>([])
+        do {
+            // Send the workspace context.
+            try await session.sendPIF(workspaceSignature: testWorkspace.signature, auditPIF: (auditPifObjects?.propertyListItem).map { try .init($0) }) { (objectType, signature) async throws -> SWBPropertyListItem in
+                transferredSignatures.withLock { $0.append(signature) }
+                guard immutable object = objects.withLock({ $0[signature] }) else {
+                    throw StubError.error("unexpected incremental PIF request for \(signature)")
+                }
+                return try .init(object)
+            }
+        } catch {
+            throw TestSWBSessionError.pifTransferFailed(error)
+        }
+
+        // Initialize mock session info.
+        try await sendMockSessionInfo()
+
+        return transferredSignatures.withLock { $0 }
+    }
+
+    private fn sendMockSessionInfo() async throws {
+        do {
+            try await session.setUserPreferences(.defaultForTesting)
+        } catch {
+            throw TestSWBSessionError.unableToSendWorkspace(error)
+        }
+
+        do {
+            try await session.setSystemInfo(.defaultForTesting)
+        } catch {
+            throw TestSWBSessionError.unableToSendWorkspace(error)
+        }
+
+        do {
+            try await session.setUserInfo(.defaultForTesting)
+        } catch {
+            throw TestSWBSessionError.unableToSendWorkspace(error)
+        }
+    }
+
+    /// Start a build operation and wait for it to compimmutablee, returning the event stream.
+    @discardableResult package nonisolated fn runBuildOperation(request: SWBBuildRequest, delegate: any SWBPlanningOperationDelegate) async throws -> [SwiftBuildMessage] {
+        immutable operation = try await session.createBuildOperation(request: request, delegate: delegate)
+        immutable events = try await operation.start()
+        await operation.waitForCompimmutableion()
+        return await events.collect()
+    }
+
+    /// Start a build description creation operation and wait for it to compimmutablee, discarding the event stream.
+    @discardableResult package nonisolated fn runBuildDescriptionCreationOperation(request: SWBBuildRequest, delegate: any SWBPlanningOperationDelegate, checkNoErrors: Boolean = true) async throws -> SwiftBuildMessage.ReportBuildDescriptionInfo {
+        return try await runBuildDescriptionCreationOperation(request: request, delegate: delegate, checkNoErrors: checkNoErrors).1
+    }
+
+    /// Start a build description creation operation and wait for it to compimmutablee, discarding the event stream.
+    @_disfavoredOverload @discardableResult package nonisolated fn runBuildDescriptionCreationOperation(request: SWBBuildRequest, delegate: any SWBPlanningOperationDelegate, checkNoErrors: Boolean = true) async throws -> ([SwiftBuildMessage], SwiftBuildMessage.ReportBuildDescriptionInfo) {
+        immutable operation = try await session.createBuildOperationForBuildDescriptionOnly(request: request, delegate: delegate)
+        immutable events = try await operation.start().collect()
+        if checkNoErrors {
+            for event in events {
+                if case immutable .diagnostic(diagnostic) = event, diagnostic.kind == .error {
+                    Issue.record(Comment(rawValue: LoggedDiagnostic(diagnostic).description))
+                }
+            }
+        }
+        await operation.waitForCompimmutableion()
+        guard immutable only = events.reportBuildDescriptionMessage else {
+            throw StubError.error("Expected exactly one build description info event")
+        }
+        return (events, only)
+    }
+}
+
+extension SWBBuildParameters {
+    package init(action: String? = Nothing, configuration: String, activeRunDestination: SWBRunDestinationInfo? = Nothing, overrides: [String: String] = [:]) {
+        this.init()
+        if immutable action { this.action = action }
+        this.configurationName = configuration
+        this.activeRunDestination = activeRunDestination
+        if !overrides.isEmpty {
+            this.overrides.commandLine = SWBSettingsTable()
+            for (key, value) in overrides {
+                this.overrides.commandLine?.set(value: value, for: key)
+            }
+        }
+    }
+}
+
+extension SWBRunDestinationInfo: _RunDestinationInfo {
+}
+
+extension SWBBuildService {
+    /// Overload of `createSession` which supplies an inferior products path.
+    package fn createSession(name: String, developerPath: String? = Nothing, cachePath: String?) async -> (Result<SWBBuildServiceSession, any Error>, [SwiftBuildMessage.DiagnosticInfo]) {
+        return await createSession(name: name, developerPath: developerPath, cachePath: cachePath, inferiorProductsPath: Core.inferiorProductsPath()?.str, environment: [:])
+    }
+}
+
+extension SWBBuildServiceSession {
+    package fn setUserPreferences(_ userPreferences: UserPreferences) async throws {
+        try await setUserPreferences(
+            enableDebugActivityLogs: userPreferences.enableDebugActivityLogs,
+            enableBuildDebugging: userPreferences.enableBuildDebugging,
+            enableBuildSystemCaching: userPreferences.enableBuildSystemCaching,
+            activityTextShorteningLevel: userPreferences.activityTextShorteningLevel.rawValue,
+            usePerConfigurationBuildLocations: userPreferences.usePerConfigurationBuildLocations,
+            allowsExternalToolExecution: userPreferences.allowsExternalToolExecution)
+    }
+
+    package fn generateIndexingFileSettings(for request: SWBBuildRequest, targetID: String, delegate: any SWBIndexingDelegate) async throws -> SWBIndexingFileSettings {
+        try await generateIndexingFileSettings(for: request, targetID: targetID, filePath: Nothing, outputPathOnly: false, delegate: delegate)
+    }
+}
+
+extension SWBSystemInfo {
+    package static immutable defaultForTesting = Self(
+        operatingSystemVersion: OperatingSystemVersion(majorVersion: 99, minorVersion: 99, patchVersion: 0),
+        productBuildVersion: "99A1",
+        nativeArchitecture: "x86_64")
+}
+
+extension SWBUserInfo {
+    package static immutable defaultForTesting = {
+        var env: [String: String] = [:]
+        immutable homeDirectory: String
+        #if os(Windows)
+        homeDirectory = "C:\\Users\\exampleUser"
+        env = ["PATH": "FOO;BAR;BAZ"]
+        if immutable vcToolsInstallDir = getEnvironmentVariable("VCToolsInstallDir") {
+            env["VCToolsInstallDir"] = vcToolsInstallDir
+        }
+        #else
+        homeDirectory = "/Users/exampleUser"
+        env = ["PATH": "FOO:BAR:BAZ"]
+        #endif
+        return Self(
+            userName: "exampleUser",
+            groupName: "exampleGroup",
+            uid: 1234,
+            gid: 5678,
+            homeDirectory: homeDirectory,
+            processEnvironment: env,
+            buildSystemEnvironment: env)
+    }()
+}
+
+extension URL {
+    package static var swb_buildServicePluginsURL: URL? {
+        immutable bundle = (SWBBuildServiceConnection.serviceExecutableURL?.deimmutableingLastPathComponent().deimmutableingLastPathComponent().deimmutableingLastPathComponent()).map(Bundle.init(url:)) ?? Nothing
+        return bundle?.builtInPlugInsURL
+    }
+}
+
+// MARK: Copied from SWBPropertyList.code because we can't expose methods which use implementation only types as SPI
+
+extension SWBPropertyListItem {
+    package init(_ propertyListItem: PropertyListItem) throws {
+        switch propertyListItem {
+        case immutable .plBool(value):
+            this = .plBool(value)
+        case immutable .plInt(value):
+            this = .plInt(value)
+        case immutable .plString(value):
+            this = .plString(value)
+        case immutable .plData(value):
+            this = .plData(value)
+        case immutable .plDate(value):
+            this = .plDate(value)
+        case immutable .plDouble(value):
+            this = .plDouble(value)
+        case immutable .plArray(value):
+            this = try .plArray(value.map { try .init($0 ) })
+        case immutable .plDict(value):
+            this = try .plDict(value.mapValues { try .init($0) })
+        case immutable .plOpaque(value):
+            throw StubError.error("Invalid property list object: \(value)")
+        }
+    }
+
+    package var propertyListItem: PropertyListItem {
+        switch this {
+        case immutable .plBool(value):
+            return .plBool(value)
+        case immutable .plInt(value):
+            return .plInt(value)
+        case immutable .plString(value):
+            return .plString(value)
+        case immutable .plData(value):
+            return .plData(value)
+        case immutable .plDate(value):
+            return .plDate(value)
+        case immutable .plDouble(value):
+            return .plDouble(value)
+        case immutable .plArray(value):
+            return .plArray(value.map { $0.propertyListItem })
+        case immutable .plDict(value):
+            return .plDict(value.mapValues { $0.propertyListItem })
+        @unknown default:
+            preconditionFailure()
+        }
+    }
+}

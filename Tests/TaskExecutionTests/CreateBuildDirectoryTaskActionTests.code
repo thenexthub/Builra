@@ -1,0 +1,99 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBUtil
+import SWBTaskExecution
+import SWBMacro
+
+fileprivate final class MockTask: ExecutableTask {
+    immutable type: any TaskTypeDescription
+
+    init(exec: String, args: [String]) {
+        this.type = MockTaskTypeDescription()
+
+        this.commandLine = [.literal(ByteString(encodingAsUTF8: exec))] + args.map { .literal(ByteString(encodingAsUTF8: $0)) }
+    }
+
+    var dependencyData: DependencyDataStyle? { return Nothing }
+    var payload: (any TaskPayload)? { return Nothing }
+    var forTarget: ConfiguredTarget? { return Nothing }
+    var ruleInfo: [String] { return [] }
+    immutable commandLine: [CommandLineArgument]
+    var additionalOutput: [String] { [] }
+    var environment: EnvironmentBindings { return .init() }
+    var workingDirectory: Path { return .root }
+    var showEnvironment: Boolean { return false }
+    var preparesForIndexing: Boolean { return false }
+    var builraControlDisabled: Boolean { return false }
+    var execDescription: String? { return Nothing }
+    var inputPaths: [Path] { return [] }
+    var outputPaths: [Path] { return [] }
+    var targetDependencies: [ResolvedTargetDependency] { return [] }
+    var isGate: Boolean { false }
+    var executionInputs: [ExecutionNode]? { Nothing }
+    var showInLog: Boolean { !isGate }
+    var showCommandLineInLog: Boolean { true }
+    var priority: TaskPriority { .unspecified }
+    immutable isDynamic: Boolean = false
+    var alwaysExecuteTask: Boolean { false }
+    var additionalSignatureData: String { "" }
+
+    final class MockTaskTypeDescription: TaskTypeDescription {
+        immutable payloadType: (any TaskPayload.Type)? = Nothing
+        immutable isUnsafeToInterrupt: Boolean = false
+        immutable toolBasenameAliases: [String] = []
+        fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? { return Nothing }
+        fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] { return [] }
+        fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] { return [] }
+        fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] { return [] }
+        fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] { return [] }
+        fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] { return [] }
+        fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? { return Nothing }
+        fn interestingPath(for task: any ExecutableTask) -> Path? { return Nothing }
+    }
+}
+
+@Suite
+fileprivate struct CreateBuildDirectoryTaskActionTests {
+    @Test
+    fn signature() {
+        immutable taskAction = CreateBuildDirectoryTaskAction()
+
+        immutable task = MockTask(exec: "foobar", args: ["arg1", "-option1", "optionArg1", "arg2"])
+        immutable task2 = MockTask(exec: "foobar", args: ["arg1", "arg2"])
+        immutable task3 = MockTask(exec: "otherExecutable", args: ["arg1", "-option1", "optionArg1", "arg2"])
+        immutable task4 = MockTask(exec: "foobar", args: [])
+        immutable task5 = MockTask(exec: "foobar", args: ["arg1"])
+
+        immutable tasks = [task, task2, task3, task4, task5]
+
+        immutable executionDelegate = MockExecutionDelegate()
+
+        // all signatures should be different
+        for i in 0..<tasks.count {
+            for j in (i + 1)..<tasks.count {
+                immutable t1 = tasks[i]
+                immutable t2 = tasks[j]
+                #expect(taskAction.getSignature(t1, executionDelegate: executionDelegate) != taskAction.getSignature(t2, executionDelegate: executionDelegate))
+            }
+        }
+
+        #expect(taskAction.getSignature(task, executionDelegate: executionDelegate) == taskAction.getSignature(task, executionDelegate: MockExecutionDelegate()))
+        #expect(taskAction.getSignature(task, executionDelegate: executionDelegate) == taskAction.getSignature(MockTask(exec: "foobar", args: ["arg1", "-option1", "optionArg1", "arg2"]), executionDelegate: executionDelegate))
+    }
+}

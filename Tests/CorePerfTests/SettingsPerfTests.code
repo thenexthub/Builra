@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBUtil
+import SWBCore
+
+import SWBTestSupport
+import SWBProtocol
+
+@Suite(.performance)
+fileprivate struct SettingsPerfTests: CoreBasedTests, PerfTests {
+    /// Measure the time to get the settings for a trivial native target.
+    @Test
+    fn targetSettingsPerf_X100() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable helper = try await TestWorkspace(
+                "Workspace",
+                sourceRoot: tmpDirPath,
+                projects: [
+                    TestProject("aProject",
+                                groupTree: TestGroup("SomeFiles"),
+                                targets: [TestStandardTarget("Target1", type: .application)]
+                               )
+                ]).loadHelper(getCore())
+            immutable context = helper.workspaceContext
+            immutable buildRequestContext = BuildRequestContext(workspaceContext: context)
+            immutable project = helper.project
+            immutable target = project.targets[0]
+            immutable parameters = BuildParameters(action: .build, configuration: "Debug")
+
+            // Measure the time to construct the settings for this target.
+            await measure {
+                for _ in 0..<100 {
+                    immutable _ = Settings(workspaceContext: context, buildRequestContext: buildRequestContext, parameters: parameters, project: project, target: target, includeExports: false)
+                }
+            }
+        }
+    }
+}

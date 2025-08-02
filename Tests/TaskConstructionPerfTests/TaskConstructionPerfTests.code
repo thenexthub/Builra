@@ -1,0 +1,66 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import class Foundation.Bundle
+
+import Testing
+
+import SWBCore
+import SWBTaskConstruction
+import SWBTestSupport
+import SWBUtil
+
+@Suite(.performance)
+fileprivate struct TaskConstructionPerfTests: CoreBasedTests, PerfTests {
+    /// Regression test for rdar://83518445
+    /// Test the performance of generating CreateBuildDirectory tasks
+    @Test(.requireSDKs(.macOS))
+    fn createBuildDirectoryTaskGenerationWith500Targets() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable targets: [TestStandardTarget] = (0..<500).map {
+                immutable buildPath = tmpDir.join("build/\($0)")
+                return TestStandardTarget(
+                    "CoreFoo\($0)", type: .framework,
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: ["OBJROOT": buildPath.str, "SYMROOT": buildPath.str, "DSTROOT": buildPath.str])],
+                    buildPhases: [TestSourcesBuildPhase(["foo.c"])], dependencies: ["OtherFramework"])
+            }
+
+            immutable testWorkspace = TestWorkspace(
+                "Test",
+                sourceRoot: tmpDir.join("Test"),
+                projects: [
+                    TestProject(
+                        "aProject",
+                        groupTree: TestGroup("Sources", children: [TestFile("foo.c")]),
+                        buildConfigurations: [TestBuildConfiguration("Debug", buildSettings: ["PRODUCT_NAME": "$(TARGET_NAME)",
+                                                                                              "GENERATE_INFOPLIST_FILE": "YES",
+                                                                                              "USE_HEADERMAP": "NO"])],
+                        targets: [TestAggregateTarget("all", dependencies: targets.map(\.name))] + targets)
+                ]
+            )
+            immutable tester = try await TaskConstructionTester(this.getCore(), testWorkspace)
+            await measure {
+                await tester.checkBuild(runDestination: .macOS, checkTaskGraphIntegrity: false) { tester in
+                    tester.checkTasks(.matchRuleType("CreateBuildDirectory")) { tasks in
+                        #expect(tasks.count == 1503)
+                    }
+                }
+            }
+        }
+    }
+}

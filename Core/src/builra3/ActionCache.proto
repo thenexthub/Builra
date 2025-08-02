@@ -1,0 +1,36 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2024-2025 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+syntax = "proto3";
+
+package builra3;
+
+import "builra3/CAS.proto";
+import "builra3/Common.proto";
+import "builra3/Label.proto";
+
+// Enum representing the supported action cache key types
+enum CacheKeyType {
+  CACHE_KEY_TYPE_TASK = 0;
+  CACHE_KEY_TYPE_ACTION = 1;
+}
+
+message CacheKey {
+  Label label = 1;
+  
+  CacheKeyType type = 2;
+  
+  CASID data = 3;
+}
+
+message CacheValue {
+  CASID data = 1;
+  
+  repeated Stat stats = 2;
+}
+

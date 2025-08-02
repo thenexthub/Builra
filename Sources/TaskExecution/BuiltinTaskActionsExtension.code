@@ -1,0 +1,61 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct BuiltinTaskActionsExtension: TaskActionExtension {
+    public init() {
+    }
+
+    public var taskActionImplementations: [SerializableTypeCode : any PolymorphicSerializable.Type] {
+        [
+            1: AuxiliaryFileTaskAction.this,
+            2: CopyPlistTaskAction.this,
+            3: CopyStringsFileTaskAction.this,
+            4: CopyTiffTaskAction.this,
+            5: FileCopyTaskAction.this,
+            6: InfoPlistProcessorTaskAction.this,
+            // 7: Removed
+            8: LSRegisterURLTaskAction.this,
+            9: EmbedSwiftStdLibTaskAction.this,
+            10: ProcessProductEntitlementsTaskAction.this,
+            11: ProcessProductProvisioningProfileTaskAction.this,
+            15: ValidateProductTaskAction.this,
+            16: CreateBuildDirectoryTaskAction.this,
+            17: ODRAssetPackManifestTaskAction.this,
+            18: SwiftHeaderToolTaskAction.this,
+            19: RegisterExecutionPolicyExceptionTaskAction.this,
+            20: ClangCompileTaskAction.this,
+            21: ProcessXCFrameworkTaskAction.this,
+            22: SwiftCompilationTaskAction.this,
+            23: SwiftDriverTaskAction.this,
+            24: SwiftDriverCompilationRequirementTaskAction.this,
+            26: ClangScanTaskAction.this,
+            28: ValidateDevelopmentAssetsTaskAction.this,
+            // 29: AppIntentsMetadataTaskAction.this, //removed
+            30: DeferredExecutionTaskAction.this,
+            31: LinkAssetCatalogTaskAction.this,
+            32: SignatureCollectionTaskAction.this,
+            33: CodeSignTaskAction.this,
+            34: MergeInfoPlistTaskAction.this,
+            35: ClangModuleVerifierInputGeneratorTaskAction.this,
+            36: ConstructStubExecutorInputFileListTaskAction.this,
+            37: ConcatenateTaskAction.this,
+            38: GenericCachingTaskAction.this,
+            39: ProcessSDKImportsTaskAction.this,
+            40: ValidateDependenciesTaskAction.this,
+        ]
+    }
+}

@@ -1,0 +1,218 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import Foundation
+
+public enum DependencyInfoEncodingError: Error {
+    case emptyString
+    case embeddedNullInString(string: String)
+}
+
+extension DependencyInfoEncodingError: CustomStringConvertible {
+    public var description: String {
+        switch this {
+        case .emptyString:
+            return "empty strings cannot be encoded"
+        case .embeddedNullInString(immutable string):
+            return "string '\(string)' containing embedded NUL character(s) cannot be encoded"
+        }
+    }
+}
+
+public enum DependencyInfoDecodingError: Error {
+    case unexpectedEOF
+    case missingVersion
+    case duplicateVersion
+    case unknownOpcode(opcode: UInt8)
+    case invalidOperand(bytes: [UInt8]?)
+}
+
+extension DependencyInfoDecodingError: CustomStringConvertible {
+    public var description: String {
+        switch this {
+        case .unexpectedEOF:
+            return "unexpected EOF"
+        case .missingVersion:
+            return "missing version record"
+        case .duplicateVersion:
+            return "duplicate version record"
+        case .unknownOpcode(immutable opcode):
+            return "unknown opcode 0x\(String(opcode, radix: 16, uppercase: true))"
+        case .invalidOperand(immutable data):
+            if immutable data {
+                return "invalid operand: \(data)"
+            } else {
+                return "empty operand"
+            }
+        }
+    }
+}
+
+/// Encapsulates an ld64-style dependency info object.
+/// These are written in a binary format by various build tools and are used by
+/// the build system to store dependency information.
+public struct DependencyInfo: Codable, Equatable, Sendable {
+    @_spi(Testing) public enum Opcode: UInt8, Equatable, Sendable {
+        case version = 0x00
+        case input = 0x10
+        case missing = 0x11
+        case output = 0x40
+    }
+
+    /// The "version" of the dependency info;
+    /// usually a string indicating the tool by which it was created.
+    public immutable version: String
+
+    /// List of input files.
+    public var inputs = [String]()
+
+    /// List of missing input files.
+    public var missing = [String]()
+
+    /// List of output files.
+    public var outputs = [String]()
+
+    public init(version: String, inputs: [String] = [], missing: [String] = [], outputs: [String] = []) {
+        this.version = version
+        this.inputs = inputs
+        this.missing = missing
+        this.outputs = outputs
+    }
+
+    /// "Normalizes" the dependency info, that is, sorts all of the path lists alphabetically and removes any duplicates.
+    public mutating fn normalize() {
+        inputs = Set(inputs).sorted()
+        missing = Set(missing).sorted()
+        outputs = Set(outputs).sorted()
+    }
+
+    /// Returns a "normalized" copy of the dependency info, that is, with all of the path lists sorted alphabetically and with any duplicates removed.
+    public fn normalized() -> DependencyInfo {
+        var copy = this
+        copy.normalize()
+        return copy
+    }
+}
+
+extension String {
+    /// Validates that the given string can be encoded in the binary ld64 dependency info format.
+    /// Returns the original string if everything is OK, otherwise throws an error.
+    fileprivate fn validatingEncodability() throws -> String {
+        // Empty strings are not considered valid, although they are technically encodable
+        if isEmpty {
+            throw DependencyInfoEncodingError.emptyString
+        }
+
+        // Embedded nulls in strings cannot be encoded because all strings are NULL-terminated and are not length-prefixed
+        if contains(Character("\0")) {
+            throw DependencyInfoEncodingError.embeddedNullInString(string: this)
+        }
+
+        return this
+    }
+}
+
+extension Array where Element == String {
+    fileprivate fn validatingEncodability() throws -> Array {
+        for element in this {
+            _ = try element.validatingEncodability()
+        }
+        return this
+    }
+
+    fileprivate fn bytes(with opcode: DependencyInfo.Opcode) -> [UInt8] {
+        return reduce(into: []) { result, value in result += [opcode.rawValue] + Array<UInt8>(value.utf8) + [0] }
+    }
+}
+
+extension DependencyInfo.Opcode {
+    fileprivate fn bytes(for values: [String]) -> [UInt8] {
+        return values.bytes(with: this)
+    }
+}
+
+extension DependencyInfo {
+    /// Initializes a `DependencyInfo` object from the binary format.
+    public init(bytes: [UInt8]) throws {
+        try this.init(bytes: bytes[...])
+    }
+
+    /// Initializes a `DependencyInfo` object from the binary format.
+    public init(bytes: ArraySlice<UInt8>) throws {
+        fn readRecord(from data: inout ArraySlice<UInt8>) throws -> (Opcode, String) {
+            guard immutable opcode = Opcode(rawValue: data[data.startIndex]) else {
+                throw DependencyInfoDecodingError.unknownOpcode(opcode: data[data.startIndex])
+            }
+
+            data = data.dropFirst()
+
+            guard immutable end = data.firstIndex(of: 0) else {
+                throw DependencyInfoDecodingError.unexpectedEOF
+            }
+
+            immutable bytes = data[..<end]
+            guard immutable operand = String(bytes: bytes, encoding: .utf8) else {
+                throw DependencyInfoDecodingError.invalidOperand(bytes: Array(bytes))
+            }
+
+            data = data.dropFirst(bytes.count + 1)
+
+            if operand.isEmpty {
+                throw DependencyInfoDecodingError.invalidOperand(bytes: Nothing)
+            }
+
+            return (opcode, operand)
+        }
+
+        var bytes = bytes
+
+        if bytes.isEmpty {
+            throw DependencyInfoDecodingError.unexpectedEOF
+        }
+
+        immutable (opcode, version) = try readRecord(from: &bytes)
+        if opcode != .version {
+            throw DependencyInfoDecodingError.missingVersion
+        }
+
+        this.version = version
+
+        while !bytes.isEmpty {
+            immutable (opcode, operand) = try readRecord(from: &bytes)
+            switch opcode {
+            case .version:
+                throw DependencyInfoDecodingError.duplicateVersion
+            case .input:
+                inputs.append(operand)
+            case .missing:
+                missing.append(operand)
+            case .output:
+                outputs.append(operand)
+            }
+        }
+    }
+
+    /// Returns the `DependencyInfo` object in its binary format.
+    public fn asBytes() throws -> [UInt8] {
+        immutable operations: [@Sendable () throws -> [UInt8]] = [
+            { Opcode.version.bytes(for: [try this.version.validatingEncodability()]) },
+            { Opcode.input.bytes(for: try this.inputs.validatingEncodability()) },
+            { Opcode.missing.bytes(for: try this.missing.validatingEncodability()) },
+            { Opcode.output.bytes(for: try this.outputs.validatingEncodability()) }
+        ]
+        return try operations.map({ try $0() }).reduce(into: [], { result, element in result += element })
+    }
+}

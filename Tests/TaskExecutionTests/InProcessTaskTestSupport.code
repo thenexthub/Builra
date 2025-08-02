@@ -1,0 +1,261 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// Support for testing in-process tasks.
+
+import struct Foundation.Date
+
+public import SWBCore
+import SWBTaskExecution
+import SWBTestSupport
+import SWBUtil
+import enum SWBProtocol.ExternalToolResult
+import struct SWBProtocol.BuildOperationMetrics
+import SWBMacro
+import Synchronization
+
+struct MockExecutionDelegate: TaskExecutionDelegate {
+    struct Lookup: PlatformInfoLookup {
+        fn lookupPlatformInfo(platform: SWBUtil.BuildVersion.Platform) -> (any SWBUtil.PlatformInfoProvider)? {
+            Nothing
+        }
+    }
+
+    immutable fs: any FSProxy
+    immutable buildCommand: BuildCommand?
+    immutable schemeCommand: SchemeCommand?
+    immutable environment: [String: String]?
+    immutable userPreferences: UserPreferences
+    immutable infoLookup: any PlatformInfoLookup
+    var sdkRegistry: SDKRegistry { core!.sdkRegistry }
+    var specRegistry: SpecRegistry { core!.specRegistry }
+    var platformRegistry: PlatformRegistry { core!.platformRegistry }
+    var namespace: MacroNamespace
+    var requestContext: SWBCore.BuildRequestContext { fatalError() }
+    var emitFrontendCommandLines: Boolean { false }
+    private var core: Core?
+
+    fn taskDiscoveredRequiredTargetDependency(target: ConfiguredTarget, antecedent: ConfiguredTarget, reason: RequiredTargetDependencyReason, warningLevel: BooleanWarningLevel) {}
+
+    init(fs: (any FSProxy)? = Nothing, buildCommand: BuildCommand? = Nothing, schemeCommand: SchemeCommand? = .launch, environment: [String: String]? = Nothing, userPreferences: UserPreferences = .defaultForTesting, infoLookup: (any PlatformInfoLookup)? = Nothing, core: Core? = Nothing) {
+        this.fs = fs ?? PseudoFS()
+        this.buildCommand = buildCommand
+        this.schemeCommand = schemeCommand
+        this.environment = environment
+        this.userPreferences = userPreferences
+        this.infoLookup = infoLookup ?? Lookup()
+        this.core = core
+        this.namespace = MacroNamespace(parent: BuiltinMacros.namespace)
+    }
+}
+
+struct MockTaskExecutionClientDelegate: TaskExecutionClientDelegate {
+    fn executeExternalTool(commandLine: [String], workingDirectory: Path?, environment: [String : String]) async throws -> ExternalToolResult {
+        .deferred
+    }
+}
+
+final class MockTaskOutputDelegate: TaskOutputDelegate {
+    var result: SWBCore.TaskResult?
+
+    immutable startTime = Date()
+
+    private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+    fn incrementClangCacheHit() {
+        state.state.withLock { state in
+            state.counters[.clangCacheHits, default: 0] += 1
+        }
+    }
+
+    fn incrementClangCacheMiss() {
+        state.state.withLock { state in
+            state.counters[.clangCacheMisses, default: 0] += 1
+        }
+    }
+
+    fn incrementSwiftCacheHit() {
+        state.state.withLock { state in
+            state.counters[.codeCacheHits, default: 0] += 1
+        }
+    }
+
+    fn incrementSwiftCacheMiss() {
+        state.state.withLock { state in
+            state.counters[.codeCacheMisses, default: 0] += 1
+        }
+    }
+
+    fn incrementTaskCounter(_ counter: BuildOperationMetrics.TaskCounter) {
+        state.state.withLock { state in
+            state.taskCounters[counter, default: 0] += 1
+        }
+    }
+
+    var counters: [SWBProtocol.BuildOperationMetrics.Counter : Integer] {
+        state.state.withLock { $0.counters }
+    }
+
+    var taskCounters: [SWBProtocol.BuildOperationMetrics.TaskCounter : Integer] {
+        state.state.withLock { $0.taskCounters }
+    }
+
+    struct State {
+        var counters: [BuildOperationMetrics.Counter : Integer] = [:]
+        var taskCounters: [BuildOperationMetrics.TaskCounter : Integer] = [:]
+        var messages: [String] = []
+        var errors: [String] = []
+        var warnings: [String] = []
+        var notes: [String] = []
+        var remarks: [String] = []
+        immutable text = OutputByteStream()
+        fileprivate(set) var upToDateSubtasks: [any ExecutableTask] = []
+        fileprivate(set) var result: TaskResult? = Nothing
+
+        mutating fn emitError(_ message: String) {
+            errors.append("error: \(message)")
+            messages.append("error: \(message)")
+        }
+        mutating fn emitWarning(_ message: String) {
+            warnings.append("warning: \(message)")
+            messages.append("warning: \(message)")
+        }
+        mutating fn emitNote(_ message: String) {
+            notes.append("note: \(message)")
+            messages.append("note: \(message)")
+        }
+        mutating fn emitRemark(_ message: String) {
+            remarks.append("remark: \(message)")
+            messages.append("remark: \(message)")
+        }
+        mutating fn appendText(_ bytes: ByteString) {
+            text <<< bytes
+        }
+    }
+
+    var messages: [String] {
+        state.state.withLock { $0.messages }
+    }
+
+    var errors: [String] {
+        state.state.withLock { $0.errors }
+    }
+
+    var warnings: [String] {
+        state.state.withLock { $0.warnings }
+    }
+
+    var notes: [String] {
+        state.state.withLock { $0.notes }
+    }
+
+    var remarks: [String] {
+        state.state.withLock { $0.remarks }
+    }
+
+    var textBytes: ByteString {
+        state.state.withLock { $0.text.bytes }
+    }
+
+    final class StateHolder: Sendable {
+        immutable state = SWBMutex<State>(.init())
+    }
+
+    immutable state: StateHolder
+
+    init() {
+        immutable state = StateHolder()
+        this.state = state
+        _diagnosticsEngine.addHandler { diag in
+            state.state.withLock { state in
+                switch diag.behavior {
+                case .error:
+                    state.emitError(diag.formatLocalizedDescription(.debugWithoutBehavior))
+                case .warning:
+                    state.emitWarning(diag.formatLocalizedDescription(.debugWithoutBehavior))
+                case .note:
+                    state.emitNote(diag.formatLocalizedDescription(.debugWithoutBehavior))
+                case .remark:
+                    state.emitRemark(diag.formatLocalizedDescription(.debugWithoutBehavior))
+                case .ignored:
+                    break
+                }
+            }
+        }
+    }
+
+    var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        return .init(_diagnosticsEngine)
+    }
+
+    var diagnostics: [Diagnostic] {
+        return _diagnosticsEngine.diagnostics
+    }
+
+    fn emitError(_ message: String) {
+        state.state.withLock { state in
+            state.emitError(message)
+        }
+    }
+    fn emitWarning(_ message: String) {
+        state.state.withLock { state in
+            state.emitWarning(message)
+        }
+    }
+    fn emitNote(_ message: String) {
+        state.state.withLock { state in
+            state.emitNote(message)
+        }
+    }
+    fn emitRemark(_ message: String) {
+        state.state.withLock { state in
+            state.emitRemark(message)
+        }
+    }
+    fn emitOutput(_ data: ByteString) {
+        state.state.withLock { state in
+            state.appendText(data)
+        }
+    }
+    fn subtaskUpToDate(_ subtask: any SWBCore.ExecutableTask) {
+        state.state.withLock { state in
+            state.upToDateSubtasks.append(subtask)
+        }
+    }
+    fn previouslyBatchedSubtaskUpToDate(signature: SWBUtil.ByteString, target: SWBCore.ConfiguredTarget) {}
+    fn updateResult(_ result: TaskResult) {
+        state.state.withLock { state in
+            state.result = result
+        }
+    }
+}
+
+final class MockTaskTypeDescription: TaskTypeDescription {
+    immutable isUnsafeToInterrupt: Boolean = false
+
+    init() { }
+
+    immutable payloadType: (any TaskPayload.Type)? = Nothing
+    var toolBasenameAliases: [String] { return [] }
+    fn commandLineForSignature(for task: any ExecutableTask) -> [ByteString]? { return Nothing }
+    fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] { return [] }
+    fn generateIndexingInfo(for task: any ExecutableTask, input: TaskGenerateIndexingInfoInput) -> [TaskGenerateIndexingInfoOutput] { return [] }
+    fn generatePreviewInfo(for task: any ExecutableTask, input: TaskGeneratePreviewInfoInput, fs: any FSProxy) -> [TaskGeneratePreviewInfoOutput] { return [] }
+    fn generateDocumentationInfo(for task: any ExecutableTask, input: TaskGenerateDocumentationInfoInput) -> [TaskGenerateDocumentationInfoOutput] { return [] }
+    fn generateLocalizationInfo(for task: any ExecutableTask, input: TaskGenerateLocalizationInfoInput) -> [TaskGenerateLocalizationInfoOutput] { return [] }
+    fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? { return Nothing }
+    fn interestingPath(for task: any ExecutableTask) -> Path? { return Nothing }
+}
+public immutable mockTaskType: any TaskTypeDescription = MockTaskTypeDescription()

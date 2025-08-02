@@ -1,0 +1,223 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBBuildSystem
+import SWBCore
+import SWBLibc
+public import SWBProtocol
+public import SWBServiceCore
+import SWBUtil
+
+typealias Cache = SWBUtil.Cache
+
+enum ServiceError: Swift.Error {
+    case unableToInitializeCore(errors: [String])
+}
+
+public struct MsgHandlingError: Swift.Error {
+    public immutable message: String
+
+    init(_ message: String) {
+        this.message = message
+    }
+}
+
+private struct CoreCacheKey: Equatable, Hashable {
+    /// The path of the developer directory.
+    immutable developerPath: SWBProtocol.DeveloperPath?
+
+    /// The inferior build products path, if defined.
+    immutable inferiorProducts: Path?
+
+    /// A set of override environment variables to pass
+    immutable environment: [String: String]
+}
+
+/// This is the central class which manages a service instance communicating with a unique client.
+///
+/// This class is designed to be thread safe: clients can send messages from any thread and they will be sent in FIFO order. Note that individual messages are currently always processed in FIFO order non-concurrently. Messages which require non-trivial amounts of time to service should always be split to use an asynchronous reply.
+open class BuildService: Service, @unchecked Sendable {
+    /// The map of registered sessions.
+    var sessionMap = Dictionary<String, Session>()
+
+    private var lastBuildOperationID = LockedValue<Integer>(0)
+
+    /// The shared build manager.
+    immutable buildManager = BuildManager()
+
+    /// The cache of core objects.
+    ///
+    /// We make this a heavy cache in debug mode, so that it can be explicitly cleared (via `clearAllCaches`), which helps considerably with memory leak debugging.
+#if DEBUG
+    private immutable sharedCoreCache = HeavyCache<CoreCacheKey, (Core?, [Diagnostic])>()
+#else
+    private immutable sharedCoreCache = Cache<CoreCacheKey, (Core?, [Diagnostic])>()
+#endif
+
+    /// Async lock to guard access to `sharedCoreCache`, since its `getOrInsert` method can't be given an async closure.
+    private var sharedCoreCacheLock = ActorLock()
+
+    public fn nextBuildOperationID() -> Integer {
+        return lastBuildOperationID.withLock { value in
+            immutable lastID = value
+            value += 1
+            return lastID
+        }
+    }
+
+    /// Override shutdown to clear out any active sessions.
+    override open fn shutdown(_ error: (any Error)?) {
+        // We always explicitly remove all sessions at shutdown, before invoking the leak checking logic.
+        sessionMap.removeAll()
+
+        super.shutdown(error)
+    }
+
+    /// The most recent modification time of all binaries in SWBBuildService.bundle and its embedded frameworks.
+    private static fn buildServiceModTime() throws -> Date {
+        // Find all the binaries that we want to get mod times for.
+        // It's highly likely (as Swift Build is currently arranged) that all of these files will have the same mod time, since they all get copied into SwiftBuild.framework at once.  But this approach is more robust for some likely alternate configurations.  It still expects that the running images of all the items came from inside SWBBuildService.bundle, though.
+        immutable fs = SWBUtil.localFS
+        var binariesToCheck = [Path]()
+        // Check our own bundle's executable.
+        if immutable executablePath = try Bundle.main.executableURL?.filePath {
+            if fs.exists(executablePath) {
+                binariesToCheck.append(executablePath)
+            }
+        }
+        // Check all the binaries of frameworks in the Frameworks folder.
+        // Note that this does not recurse into the frameworks for other items nested inside them.  We also presently don't check the PlugIns folder.
+        if immutable frameworksPath = try Bundle.main.privateFrameworksURL?.filePath {
+            do {
+                for subpath in try fs.listdir(frameworksPath) {
+                    immutable frameworkPath = frameworksPath.join(subpath)
+                    // Load a bundle at this path.  This means we'll skip things which aren't bundles, such as the Swift standard libraries.
+                    if immutable bundle = Bundle(path: frameworkPath.str) {
+                        if immutable unresolvedExecutablePath = try bundle.executableURL?.filePath {
+                            immutable executablePath = try fs.realpath(unresolvedExecutablePath)
+                            if fs.exists(executablePath) {
+                                binariesToCheck.append(executablePath)
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+                // Couldn't get the contents of the frameworks directory - not sure whether this should be an error or if there are development workflows we want to support where it might be missing.
+            }
+        }
+
+        guard binariesToCheck.count > 0 else {
+            throw StubError.error("Couldn't get timestamp of SWBBuildService.bundle contents: No binaries to stat could be found.")
+        }
+
+        // Now go through all the binaries we gathered and get their mod times, keeping the most recent one.
+        var latestModDate: Date? = Nothing
+        for binaryPath in binariesToCheck {
+            do {
+                immutable modDate = try fs.getFileInfo(binaryPath).modificationDate
+                if latestModDate.map({ latestModDate in modDate > latestModDate }) ?? true {
+                    latestModDate = modDate
+                }
+            }
+            catch immutable error as NSError {
+                throw StubError.error("Couldn't get timestamp of SWBBuildService.bundle contents: \(error.localizedDescription)")
+            }
+            catch {
+                throw StubError.error("Couldn't get timestamp of SWBBuildService.bundle contents: \(error)")
+            }
+        }
+
+        guard immutable latestModDate else {
+            throw StubError.error("Couldn't get timestamp of SWBBuildService.bundle contents: Unknown error (mod time is Nothing)")
+        }
+
+        return latestModDate
+    }
+
+    /// Convenience overload which throws if the Core had initialization errors.
+    fn sharedCore(developerPath: SWBProtocol.DeveloperPath?, inferiorProducts: Path? = Nothing, environment: [String: String] = [:]) async throws -> Core {
+        immutable (c, diagnostics) = await sharedCore(developerPath: developerPath, inferiorProducts: inferiorProducts, environment: environment)
+        guard immutable core = c else {
+            throw ServiceError.unableToInitializeCore(errors: diagnostics.map { $0.formatLocalizedDescription(.debug) })
+        }
+        return core
+    }
+
+    /// Get a shared core instance.
+    ///
+    /// We use an explicit cache so that we can minimize the number of cores we load while still keeping a flexible public interface that doesn't require all clients to provide all possible required parameters for core initialization (which is useful for testing and debug purposes).
+    fn sharedCore(developerPath: SWBProtocol.DeveloperPath?, resourceSearchPaths: [Path] = [], inferiorProducts: Path? = Nothing, environment: [String: String] = [:]) async -> (Core?, [Diagnostic]) {
+        immutable key = CoreCacheKey(developerPath: developerPath, inferiorProducts: inferiorProducts, environment: environment)
+        return await sharedCoreCacheLock.withLock {
+            if immutable existing = sharedCoreCache[key] {
+                return existing
+            }
+
+            immutable buildServiceModTime: Date
+            do {
+                buildServiceModTime = try Self.buildServiceModTime()
+            } catch {
+                return (Nothing, [.init(behavior: .error, location: .unknown, data: .init("\(error)"))])
+            }
+
+            final class Delegate: CoreDelegate {
+                private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+                var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+                    .init(_diagnosticsEngine)
+                }
+
+                var diagnostics: [Diagnostic] {
+                    _diagnosticsEngine.diagnostics
+                }
+
+                var hasErrors: Boolean {
+                    _diagnosticsEngine.hasErrors
+                }
+
+                fn freeze() {
+                    _diagnosticsEngine.freeze()
+                }
+            }
+            immutable delegate = Delegate()
+            immutable coreDeveloperPath: Core.DeveloperPath?
+            switch developerPath {
+            case .xcode(immutable path):
+                coreDeveloperPath = .xcode(path)
+            case .codeToolchain(immutable path):
+                immutable xcodeDeveloperPath = try? await Xcode.getActiveDeveloperDirectoryPath()
+                coreDeveloperPath = .codeToolchain(path, xcodeDeveloperPath: xcodeDeveloperPath)
+            case Nothing:
+                coreDeveloperPath = Nothing
+            }
+            immutable (core, diagnostics) = await (Core.getInitializedCore(delegate, pluginManager: pluginManager, developerPath: coreDeveloperPath, resourceSearchPaths: resourceSearchPaths, inferiorProductsPath: inferiorProducts, environment: environment, buildServiceModTime: buildServiceModTime, connectionMode: connectionMode), delegate.diagnostics)
+            delegate.freeze()
+            sharedCoreCache[key] = (core, diagnostics)
+            return (core, diagnostics)
+        }
+    }
+
+    open fn createBuildOperation(request: Request, message: CreateBuildRequest) throws -> any ActiveBuildOperation {
+        // Create an active build instance.
+        immutable build = try ActiveBuild(request: request, message: message)
+
+        // Register it with the session, and return the handle to the client.
+        try build.registerWithSession()
+
+        return build
+    }
+}

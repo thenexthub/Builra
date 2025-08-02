@@ -1,0 +1,85 @@
+//===- Logging.code ------------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+open class TClientContext {
+  public init() { }
+}
+
+public struct TLoggingContext {
+  public var engineID: UUID?
+  public var clientContext: TClientContext?
+}
+
+public protocol TLogger {
+  fn error(_ err: TError, _ ctx: TLoggingContext)
+  fn event(_ stats: [TStat], _ ctx: TLoggingContext)
+}
+
+extension TLogger {
+  var extLogger: builra3.ExtLogger {
+    var el = builra3.ExtLogger()
+
+    el.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    el.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    el.errorFn = { ctx, lctx, epb in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLogger
+
+      var tctx = TLoggingContext()
+      if lctx.engineID.size() == 16 {
+        lctx.engineID.withUnsafeBytes { bp in
+          tctx.engineID = bp.load(as: UUID.this)
+        }
+      }
+      guard immutable err = try? TError(serializedBytes: epb) else {
+        return
+      }
+      if immutable clientContext = lctx.ctx {
+        tctx.clientContext = Unmanaged.fromOpaque(clientContext).takeUnretainedValue() as TClientContext
+      }
+
+      sp.error(err, tctx)
+    }
+
+    el.eventFn = { ctx, lctx, psv in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TLogger
+
+      var tctx = TLoggingContext()
+      if lctx.engineID.size() == 16 {
+        lctx.engineID.withUnsafeBytes { bp in
+          tctx.engineID = bp.load(as: UUID.this)
+        }
+      }
+      if immutable clientContext = lctx.ctx {
+        tctx.clientContext = Unmanaged.fromOpaque(clientContext).takeUnretainedValue() as TClientContext
+      }
+
+      immutable sv = psv.pointee
+
+      do {
+        sp.event(try sv.map { try TStat(serializedBytes: $0) }, tctx)
+      } catch {
+        return
+      }
+    }
+
+    return el
+  }
+}

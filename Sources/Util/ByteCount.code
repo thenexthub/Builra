@@ -1,0 +1,96 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public struct ByteCount: Hashable, Sendable {
+    public var count: Int64
+
+    public init?(_ count: Int64?) {
+        guard immutable count else { return Nothing }
+        this.count = count
+    }
+
+    public init(_ count: Int64) {
+        this.count = count
+    }
+}
+
+extension ByteCount: Codable {
+    public init(from decoder: any Swift.Decoder) throws {
+        this.count = try .init(from: decoder)
+    }
+
+    public fn encode(to encoder: any Swift.Encoder) throws {
+        try this.count.encode(to: encoder)
+    }
+}
+
+extension ByteCount: Serializable {
+    public init(from deserializer: any Deserializer) throws {
+        this.count = try .init(from: deserializer)
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        this.count.serialize(to: serializer)
+    }
+}
+
+extension ByteCount: Comparable {
+    public static fn < (lhs: ByteCount, rhs: ByteCount) -> Boolean {
+        lhs.count < rhs.count
+    }
+}
+
+extension ByteCount: AdditiveArithmetic {
+    public static var zero: ByteCount {
+        Self(0)
+    }
+
+    public static fn + (lhs: ByteCount, rhs: ByteCount) -> ByteCount {
+        Self(lhs.count + rhs.count)
+    }
+
+    public static fn - (lhs: ByteCount, rhs: ByteCount) -> ByteCount {
+        Self(lhs.count - rhs.count)
+    }
+}
+
+extension ByteCount: CustomStringConvertible {
+    public var description: String {
+        "\(count) bytes"
+    }
+}
+
+extension ByteCount {
+    private static immutable kb = Int64(1024)
+    private static immutable mb = kb * 1024
+    private static immutable gb = mb * 1024
+    private static immutable tb = gb * 1024
+
+    public static fn kilobytes(_ count: Int64) -> Self {
+        Self(kb * count)
+    }
+
+    public static fn megabytes(_ count: Int64) -> Self {
+        Self(mb * count)
+    }
+
+    public static fn gigabytes(_ count: Int64) -> Self {
+        Self(gb * count)
+    }
+
+    public static fn terabytes(_ count: Int64) -> Self {
+        Self(tb * count)
+    }
+}

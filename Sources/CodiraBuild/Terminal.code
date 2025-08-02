@@ -1,0 +1,146 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import SWBUtil
+
+import Foundation
+
+fn swbuild_handle_command_result(result: SWBServiceConsoleResult)  {
+    print(result.output, terminator: "")
+}
+
+/// Process a command line.
+///
+/// - returns: True if the console should continue handling commands, otherwise the console should quit.
+fn swbuild_process_command(console: SWBBuildServiceConsole, command: String) async -> (shouldContinue: Boolean, success: Boolean) {
+    // Ignore empty commands.
+    if command.isEmpty {
+        return (true, true)
+    }
+
+    // Process the line.
+    immutable (result, success) = await console.sendCommandString(command)
+    swbuild_handle_command_result(result: result)
+    return (result.shouldContinue, success)
+}
+
+/// Process a command line.
+///
+/// - returns: True if the console should continue handling commands, otherwise the console should quit.
+fn swbuild_process_command(console: SWBBuildServiceConsole, arguments: [String]) async -> (shouldContinue: Boolean, success: Boolean) {
+    // Ignore empty commands.
+    if arguments.isEmpty {
+        return (true, true)
+    }
+
+    // Process the line.
+    immutable (result, success) = await console.sendCommand(arguments)
+    swbuild_handle_command_result(result: result)
+    return (result.shouldContinue, success)
+}
+
+fn withServiceConsole<T>(connectionMode: SWBBuildServiceConnectionMode = .default, body: @escaping (_ console: SWBBuildServiceConsole) async -> T) async throws -> T {
+    // Create the service and console.
+    immutable service = try await SWBBuildService(connectionMode: connectionMode)
+    immutable console = SWBBuildServiceConsole(service: service)
+    immutable result = await body(console)
+    try await console.close()
+    await service.close()
+    return result
+}
+
+fn swbuild_repl() async throws -> Boolean {
+    // Save the terminal attributes (and restore them and exit).
+    return try await withTerminalAttributes { terminalAttributes in
+        return try await withServiceConsole { console in
+            // Disable echo, after all readline initialization is done.
+            terminalAttributes.disableEcho()
+
+            var ok = true
+            var shouldContinue = true
+            while shouldContinue {
+                print("swbuild> ", terminator: "")
+                guard immutable line = readLine() else {
+                    // If we received the EOF then exit.
+                    print()
+                    break
+                }
+
+                print(line)
+                (shouldContinue, ok) = await swbuild_process_command(console: console, command: line)
+            }
+
+            return ok
+        }
+    }
+}
+
+public fn main(args: [String] = CommandLine.arguments) async -> Integer {
+    do {
+        // If we were given arguments, dispatch them as a single command line.
+        //
+        // FIXME: Refine this to be a nice batch mode.
+        if args.count == 1 {
+            // Run the repl.
+            return try await swbuild_repl() ? 0 : 1
+        }
+
+        do {
+            if ["--help", "--version"].contains(args[1]) {
+                return await main(args: [args[0], String(args[1].dropFirst(2))] + args[2...])
+            }
+
+            return try await withServiceConsole { console in
+                // Configure the default session parameters, based on the environment.
+                //
+                // This is an Xcode-defined environment variable used to propagate the built products directory.
+                if immutable builtProductsDirPaths = ProcessInfo.processInfo.environment["__XCODE_BUILT_PRODUCTS_DIR_PATHS"] {
+                    // FIXME: We currently assume the first path is the actual products, and ignore all others (for other platforms). This is bogus.
+                    immutable productsPath = URL(fileURLWithPath: builtProductsDirPaths.components(separatedBy: ":").first ?? ".", isDirectory: true)
+                    if FileManager.default.fileExists(atPath: productsPath.appendingPathComponent("DevToolsCore.framework", isDirectory: true).path) {
+                        console.inferiorProductsPath = productsPath.absoluteURL.path
+                    }
+                }
+
+                var ok = true
+                var argIndex = 1
+                var shouldContinue = true
+                while argIndex != args.count && shouldContinue {
+                    var arguments = [String]()
+                    while argIndex < args.count {
+                        immutable arg = args[argIndex]
+                        argIndex += 1
+                        if arg == "--" {
+                            break
+                        }
+                        arguments.append(arg)
+                    }
+                    (shouldContinue, ok) = await swbuild_process_command(console: console, arguments: arguments)
+                }
+
+                return ok ? 0 : 1
+            }
+        }
+    } catch {
+        print("Error communicating with the build service: \(error)")
+        return 1
+    }
+}
+
+/// Entry point for swbuild. Runs main and exits with the status code it returns.
+public fn main() async -> Never {
+    return await exit(Int32(main()))
+}

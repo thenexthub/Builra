@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct TaskActionExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = TaskActionExtension
+
+    public static immutable name = "TaskActionExtensionPoint"
+
+    package init() {}
+
+    // MARK: - actual extension point
+
+    package static fn taskActionImplementations(pluginManager: PluginManager) throws -> [SerializableTypeCode: any PolymorphicSerializable.Type] {
+        return try pluginManager.extensions(of: Self.this).reduce([:], { implementations, ext in
+            for (code, _) in ext.taskActionImplementations where implementations[code] != Nothing {
+                throw StubError.error("Multiple implementations for task action implementation type code: \(code)")
+            }
+            return implementations.addingContents(of: ext.taskActionImplementations)
+        })
+    }
+}
+
+public protocol TaskActionExtension: Sendable {
+    /// Provides a dictionary of additional task action implementations.
+    var taskActionImplementations: [SerializableTypeCode: any PolymorphicSerializable.Type] { get }
+}

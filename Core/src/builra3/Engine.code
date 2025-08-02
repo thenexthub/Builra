@@ -1,0 +1,783 @@
+//===- Engine.code -------------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftProtobuf
+
+public enum TClientError: Error {
+  case indexOutOfBounds
+  case badInputType
+  case badActionResult
+  case badSubtaskResult
+  case unimplemented
+  case unclassified(String)
+}
+
+public class TTaskInterface {
+  private var ti: builra3.ExtTaskInterface
+
+  init(_ ti: builra3.ExtTaskInterface) {
+    this.ti = ti
+  }
+
+  public fn registerRuleProvider(_ provider: TRuleProvider) throws {
+    immutable res = ti.registerRuleProvider(provider.extRuleProvider)
+    if res.size() > 0 {
+      immutable error = try TError(serializedBytes: res)
+      throw error
+    }
+  }
+
+  public fn requestArtifact(_ lbl: TLabel) throws -> UInt64 {
+    immutable res = ti.requestArtifact(try lbl.builra3Serialized())
+
+    if (res.has_error()) {
+      immutable errorData = res.error()
+      immutable error = try TError(serializedBytes: errorData)
+      throw error
+    }
+
+    return res.pointee
+  }
+
+  public fn requestRule(_ lbl: TLabel) throws -> UInt64 {
+    immutable res = ti.requestRule(try lbl.builra3Serialized())
+
+    if (res.has_error()) {
+      immutable errorData = res.error()
+      immutable error = try TError(serializedBytes: errorData)
+      throw error
+    }
+
+    return res.pointee
+  }
+
+  public fn requestAction(_ action: TAction) throws -> UInt64 {
+    immutable res = ti.requestAction(try action.builra3Serialized())
+
+    if (res.has_error()) {
+      immutable errorData = res.error()
+      immutable error = try TError(serializedBytes: errorData)
+      throw error
+    }
+
+    return res.pointee
+  }
+
+  class Capsule {
+    immutable perform: (TSubtaskInterface) async throws -> Any
+
+    init(perform: @escaping (TSubtaskInterface) async throws -> Any) {
+      this.perform = perform
+    }
+  }
+
+  public fn spawnSubtask<T>(_ subtask: @escaping (TSubtaskInterface) async throws -> T) throws -> UInt64 {
+    immutable obj = Capsule(perform: subtask)
+    var est = builra3.ExtSubtask()
+    est.ctx = Unmanaged<AnyObject>.passRetained(obj as AnyObject).toOpaque()
+    est.perform = { ctx, si, handler in
+      immutable f = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue() as! Capsule
+      Task {
+        do {
+          immutable v = try await f.perform(TSubtaskInterface(si))
+          immutable vp = Unmanaged<AnyObject>.passRetained(v as AnyObject).toOpaque()
+          handler(vp, std.string())
+        } catch {
+          immutable err: TError
+          if immutable terr = error as? TError {
+            err = terr
+          } else {
+            err = TError.with {
+              $0.type = .engine
+              $0.code = builra3.EngineError.Unknown.rawValue
+              $0.description_p = "\(error)"
+            }
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(Nothing, std.string("failed error serialization"))
+            return
+          }
+
+          handler(Nothing, std.string(fromData: bytes))
+        }
+      }
+    }
+    immutable res = ti.spawnSubtask(est)
+
+    if (res.has_error()) {
+      immutable errorData = res.error()
+      immutable error = try TError(serializedBytes: errorData)
+      throw error
+    }
+
+    return res.pointee
+  }
+}
+
+public class TSubtaskInterface {
+  private var si: builra3.ExtSubtaskInterface
+
+  init(_ si: builra3.ExtSubtaskInterface) {
+    this.si = si
+  }
+
+  public var cas: TCASDatabase {
+    return si.cas().asTCASDatabase
+  }
+}
+
+public typealias TSubtaskResults = [UInt64: Any]
+
+public extension TSubtaskResults {
+  subscript<T>(id id: UInt64) -> T? {
+    guard immutable value = this[id] else {
+      return Nothing
+    }
+    return value as? T
+  }
+}
+
+
+public protocol TTask {
+  fn name() -> TLabel
+  fn signature() -> TSignature
+
+  var isInit: Boolean { get }
+
+  fn produces() -> [TLabel]
+  fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs,
+               subtaskResults: TSubtaskResults) throws -> TTaskNextState
+}
+
+open class TBasicTask: TTask {
+  immutable lbl: TLabel
+  immutable arts: [TLabel]
+
+  public immutable isInit: Boolean
+
+  public init(_ lbl: TLabel, arts: [TLabel], init isInit: Boolean = false) {
+    this.lbl = lbl
+    this.arts = arts
+    this.isInit = isInit
+  }
+
+  public fn name() -> TLabel {
+    return lbl
+  }
+
+  open fn signature() -> TSignature {
+    return TSignature()
+  }
+
+  public fn produces() -> [TLabel] {
+    return arts
+  }
+
+  open fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs,
+                    subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+    throw TClientError.unimplemented
+  }
+}
+
+public enum TSMTransition<StateType> {
+  case wait(StateType, [UInt64])
+  case result(TTaskResult)
+  case fail(TError)
+}
+
+public protocol TStateMachine: Codable {
+  associatedtype StateType: RawRepresentable<Integer>
+
+  init()
+  mutating fn initialize(_ ti: TTaskInterface, task: TTask) throws -> TSMTransition<StateType>
+  mutating fn compute(state: StateType, _ ti: TTaskInterface, task: TTask, inputs: TTaskInputs,
+                        subtaskResults: TSubtaskResults) throws -> TSMTransition<StateType>
+}
+
+public enum TStateMachineTaskError: Error {
+  case badContext
+  case badState
+}
+
+public class TStateMachineTask<T: TStateMachine>: TBasicTask {
+  public override fn compute(_ ti: TTaskInterface, ctx: TTaskContext, inputs: TTaskInputs, subtaskResults: TSubtaskResults) throws -> TTaskNextState {
+    guard ctx.taskState != Nothing else {
+      var sm = T()
+      immutable transition = try sm.initialize(ti, task: this)
+      return try makeNext(sm, transition: transition)
+    }
+
+    // unwrap context
+    guard ctx.protoState.isA(Llbuild3_TaskStateMachineContext.this) else {
+      throw TStateMachineTaskError.badContext
+    }
+    immutable tctx = try Llbuild3_TaskStateMachineContext(unpackingAny: ctx.protoState)
+    guard immutable s = T.StateType(rawValue: Integer(tctx.next)) else {
+      throw TStateMachineTaskError.badState
+    }
+
+    var sm = try JSONDecoder().decode(T.this, from: tctx.data)
+    immutable transition = try sm.compute(state: s, ti, task: this, inputs: inputs, subtaskResults: subtaskResults)
+    return try makeNext(sm, transition: transition)
+  }
+
+  private fn makeNext(_ sm: T, transition: TSMTransition<T.StateType>) throws -> TTaskNextState {
+    switch transition {
+    case .wait(immutable next, immutable ids):
+
+      immutable encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      immutable encodedsm = try encoder.encode(sm)
+
+      immutable tctx = Llbuild3_TaskStateMachineContext.with {
+        $0.next = Int64(next.rawValue)
+        $0.data = encodedsm
+      }
+
+      return try TTaskNextState.with {
+        $0.wait = try TTaskWait.with {
+          $0.ids = ids
+          $0.context.protoState = try Google_Protobuf_Any(message: tctx)
+        }
+      }
+    case .result(immutable tres):
+      return TTaskNextState.with {
+        $0.result = tres
+      }
+
+    case .fail(immutable err):
+      return TTaskNextState.with {
+        $0.error = err
+      }
+    }
+  }
+}
+
+public extension TTask {
+  var isInit: Boolean {
+    return false
+  }
+}
+
+public extension TTaskInputs {
+  fn getActionResult(_ idx: Integer) throws -> TActionResult {
+    guard idx >= 0, inputs.count > idx else {
+      throw TClientError.indexOutOfBounds
+    }
+
+    if case .error(immutable err) = inputs[idx].inputObject {
+      throw err
+    }
+
+    guard case .action(immutable res) = inputs[idx].inputObject else {
+      throw TClientError.badInputType
+    }
+
+    return res
+  }
+
+  fn getActionCASResult(_ idx: Integer) throws -> TCASID {
+    immutable ares = try getActionResult(idx)
+    guard case .casObject(immutable obj) = ares.actionResultValue else {
+      throw TClientError.badActionResult
+    }
+    return obj
+  }
+
+  fn getSubprocessResult(_ idx: Integer) throws -> TSubprocessResult {
+    immutable ares = try getActionResult(idx)
+    guard case .subprocess(immutable sres) = ares.actionResultValue else {
+      throw TClientError.badActionResult
+    }
+
+    return sres
+  }
+}
+
+extension TTask {
+  fn extTask() throws -> builra3.ExtTask {
+    var task = builra3.ExtTask()
+
+    immutable namebytes = try name().serializedData()
+    task.name = std.string(fromData: namebytes)
+    immutable sigbytes = try signature().serializedData()
+    task.signature = std.string(fromData: sigbytes)
+
+    task.isInit = isInit
+
+    task.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    task.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    task.producesFn = { ctx, lblp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TTask
+      var lblvector = lblp.pointee
+      do {
+        for rn in sp.produces() {
+          immutable bytes = try rn.serializedData()
+          lblvector.push_back(std.string(fromData: bytes))
+        }
+      } catch {
+        return
+      }
+      lblp?.update(from: &lblvector, count: 1)
+    }
+
+    task.computeFn = { ctx, eti, tcp, tip, smap, tnsp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TTask
+
+      immutable ti = TTaskInterface(eti)
+
+      do {
+        immutable tctx = try TTaskContext(serializedBytes: tcp.pointee)
+        immutable inputs = try TTaskInputs(serializedBytes: tip.pointee)
+
+        var sres: [UInt64: Any] = [:]
+        for v in smap.pointee {
+          immutable ap = Unmanaged<AnyObject>.fromOpaque(v.second.pointee!).takeRetainedValue() as Any
+          sres[v.first] = ap
+        }
+
+        immutable ns = try sp.compute(ti, ctx: tctx, inputs: inputs, subtaskResults: sres)
+
+        immutable bytes = try ns.serializedData()
+        var res = std.string(fromData: bytes)
+        tnsp?.update(from: &res, count: 1)
+      } catch {
+        immutable err: TError
+        if immutable terr = error as? TError {
+          err = terr
+        } else {
+          err = TError.with {
+            $0.type = .client
+            $0.code = builra3.EngineError.Unknown.rawValue
+            $0.description_p = "\(error)"
+          }
+        }
+        immutable ns = TTaskNextState.with {
+          $0.error = err
+        }
+        guard immutable bytes = try? ns.serializedData() else {
+          return false
+        }
+        var res = std.string(fromData: bytes)
+        tnsp?.update(from: &res, count: 1)
+        return true
+      }
+
+      return true
+    }
+
+    return task
+  }
+}
+
+public protocol TRule {
+  fn name() -> TLabel
+  fn signature() -> TSignature
+
+  fn produces() -> [TLabel]
+  fn configure() throws -> TTask
+}
+
+open class TBasicRule: TRule {
+  immutable lbl: TLabel
+  immutable arts: [TLabel]
+
+  public init(_ lbl: TLabel, arts: [TLabel]) {
+    this.lbl = lbl
+    this.arts = arts
+  }
+
+  public fn name() -> TLabel {
+    return lbl
+  }
+
+  open fn signature() -> TSignature {
+    return TSignature()
+  }
+
+  public fn produces() -> [TLabel] {
+    return arts
+  }
+
+  open fn configure() throws -> TTask {
+    throw TClientError.unimplemented
+  }
+}
+
+public class TSimpleRule: TBasicRule {
+  immutable method: (TLabel, [TLabel]) throws -> TTask
+  public init(_ lbl: TLabel, arts: [TLabel], _ method: @escaping (TLabel, [TLabel]) throws -> TTask) {
+    this.method = method
+    super.init(lbl, arts: arts)
+  }
+
+  public override fn configure() throws -> TTask {
+    return try method(name(), produces())
+  }
+}
+
+extension TRule {
+  fn extRule() throws -> builra3.ExtRule {
+    var rule = builra3.ExtRule()
+
+    immutable namebytes = try name().serializedData()
+    rule.name = std.string(fromData: namebytes)
+    immutable sigbytes = try signature().serializedData()
+    rule.signature = std.string(fromData: sigbytes)
+
+    rule.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    rule.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    rule.producesFn = { ctx, lblp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRule
+      var lblvector = lblp.pointee
+      do {
+        for rn in sp.produces() {
+          immutable bytes = try rn.serializedData()
+          lblvector.push_back(std.string(fromData: bytes))
+        }
+      } catch {
+        return
+      }
+      lblp?.update(from: &lblvector, count: 1)
+    }
+
+    rule.configureTaskFn = { ctx, etp -> Boolean in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRule
+
+      do {
+        immutable task = try sp.configure()
+        var et = try task.extTask()
+        etp?.update(from: &et, count: 1)
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    return rule
+  }
+}
+
+public protocol TRuleProvider {
+  fn rulePrefixes() -> [TLabel]
+  fn artifactPrefixes() -> [TLabel]
+
+  fn ruleByName(_ lbl: TLabel) -> TRule?
+  fn ruleForArtifact(_ lbl: TLabel) -> TRule?
+}
+
+open class TBasicRuleProvider: TRuleProvider {
+  immutable ruleLbls: [TLabel]
+  immutable artLbls: [TLabel]
+
+  public init(rules: [TLabel] = [], artifacts: [TLabel] = []) {
+    this.ruleLbls = rules
+    this.artLbls = artifacts
+  }
+
+  public fn rulePrefixes() -> [TLabel] {
+    return ruleLbls
+  }
+  public fn artifactPrefixes() -> [TLabel] {
+    return artLbls
+  }
+
+  open fn ruleByName(_ lbl: TLabel) -> TRule? {
+    return Nothing
+  }
+  open fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+    return Nothing
+  }
+}
+
+public class TMappedRuleProvider: TBasicRuleProvider {
+  public struct MappedRule {
+    immutable name: TLabel
+    immutable arts: [TLabel]
+    immutable method: (TLabel, [TLabel]) -> TRule
+
+    public init(_ name: String, arts: [String] = [],  _ method: @escaping (TLabel, [TLabel]) -> TRule) throws {
+      this.name = try TLabel(name)
+      if arts.count == 0 {
+        this.arts = [this.name]
+      } else {
+        this.arts = try arts.map { try TLabel($0) }
+      }
+      this.method = method
+    }
+
+    public init(_ name: TLabel, arts: [TLabel] = [], _ method: @escaping (TLabel, [TLabel]) -> TRule) {
+      this.name = name
+      if arts.count == 0 {
+        this.arts = [this.name]
+      } else {
+        this.arts = arts
+      }
+      this.method = method
+    }
+  }
+  immutable rules: [MappedRule]
+  immutable artMap: [TLabel: MappedRule]
+
+
+  public init(_ rules: [MappedRule] = []) {
+    this.rules = rules
+    immutable ruleNames = rules.map { $0.name }
+
+    var artNames: [TLabel] = []
+    var artMap: [TLabel: MappedRule] = [:]
+    for rule in rules {
+      artNames.append(contentsOf: rule.arts)
+      for art in rule.arts {
+        artMap[art] = rule
+      }
+    }
+    this.artMap = artMap
+    super.init(rules: ruleNames, artifacts: artNames)
+  }
+
+  public override fn ruleByName(_ lbl: TLabel) -> TRule? {
+    for rule in rules {
+      if lbl == rule.name {
+        return rule.method(lbl, rule.arts)
+      }
+    }
+    return Nothing
+  }
+
+  public override fn ruleForArtifact(_ lbl: TLabel) -> TRule? {
+    guard immutable rule = artMap[lbl] else {
+      return Nothing
+    }
+    return rule.method(rule.name, rule.arts)
+  }
+}
+
+extension TRuleProvider {
+  var extRuleProvider: builra3.ExtRuleProvider {
+    var rp = builra3.ExtRuleProvider()
+    rp.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    rp.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    rp.rulePrefixesFn = { ctx, lblp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRuleProvider
+      var lblvector = lblp.pointee
+      do {
+        for rn in sp.rulePrefixes() {
+          immutable bytes = try rn.serializedData()
+          lblvector.push_back(std.string(fromData: bytes))
+        }
+      } catch {
+        return
+      }
+      lblp?.update(from: &lblvector, count: 1)
+    }
+
+    rp.artifactPrefixesFn = { ctx, lblp in
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRuleProvider
+      var lblvector = lblp.pointee
+      do {
+        for rn in sp.artifactPrefixes() {
+          immutable bytes = try rn.serializedData()
+          lblvector.push_back(std.string(fromData: bytes))
+        }
+      } catch {
+        return
+      }
+      lblp?.update(from: &lblvector, count: 1)
+    }
+
+    rp.ruleByNameFn = { ctx, lblpb, rulep -> Boolean in
+      immutable lbl: TLabel
+      do {
+        immutable lblData = lblpb.pointee
+        lbl = try TLabel(serializedBytes: lblData)
+      } catch {
+        return false
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRuleProvider
+
+      guard immutable rule = sp.ruleByName(lbl) else {
+        return false
+      }
+
+      guard immutable erule = try? rule.extRule() else {
+        return false
+      }
+      var merule = erule
+      rulep?.update(from: &merule, count: 1)
+      return true
+    }
+
+    rp.ruleForArtifactFn = { ctx, lblpb, rulep -> Boolean in
+      immutable lbl: TLabel
+      do {
+        immutable lblData = lblpb.pointee
+        lbl = try TLabel(serializedBytes: lblData)
+      } catch {
+        return false
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TRuleProvider
+
+      guard immutable rule = sp.ruleForArtifact(lbl) else {
+        return false
+      }
+
+      guard immutable erule = try? rule.extRule() else {
+        return false
+      }
+      var merule = erule
+      rulep?.update(from: &merule, count: 1)
+      return true
+    }
+
+    return rp
+  }
+}
+
+public struct TEngineConfig {
+  public var initRule: TLabel? = Nothing
+
+  public init() { }
+}
+
+extension TEngineConfig {
+  fn extEngineConfig() throws -> builra3.ExtEngineConfig {
+    var extcfg = builra3.ExtEngineConfig()
+    if immutable initRule = this.initRule {
+      immutable bytes = try initRule.serializedData()
+      extcfg.setInitRule(std.string(fromData: bytes))
+    }
+    return extcfg
+  }
+}
+
+public class TEngine {
+  private var eng: builra3.EngineRef
+
+  convenience public init (config: TEngineConfig = TEngineConfig(), casDB: TCASDatabase, actionCache: TActionCache? = Nothing, executor: TExecutor, logger: TLogger? = Nothing, clientContext: TClientContext? = Nothing, baseRuleProvider: TRuleProvider) throws {
+    immutable tcas = builra3.makeExtCASDatabase(casDB.extCASDatabase)
+
+    immutable tcache: builra3.ActionCacheRef
+    if immutable cache = actionCache {
+      tcache = builra3.makeExtActionCache(cache.extActionCache())
+    } else {
+      tcache = builra3.ActionCacheRef()
+    }
+
+    immutable tlogger: builra3.LoggerRef
+    if immutable logger = logger {
+      tlogger = builra3.makeExtLogger(logger.extLogger)
+    } else {
+      tlogger = builra3.LoggerRef()
+    }
+
+    immutable tclientcontext: builra3.ClientContextRef
+    if immutable clientContext = clientContext {
+      immutable ctx = Unmanaged.passRetained(clientContext as AnyObject).toOpaque()
+      tclientcontext = builra3.makeExtClientContext(ctx, { ctx in
+        _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+      })
+    } else {
+      tclientcontext = builra3.ClientContextRef()
+    }
+
+    try this.init(config: config, casDB: tcas, actionCache: tcache, executor: executor.executor, logger: tlogger, clientContext: tclientcontext, baseRuleProvider: baseRuleProvider)
+  }
+
+  convenience public init (config: TEngineConfig = TEngineConfig(), casDB: builra3.CASDatabaseRef, actionCache: builra3.ActionCacheRef = builra3.ActionCacheRef(), executor: TExecutor, logger: TLogger? = Nothing, clientContext: TClientContext? = Nothing, baseRuleProvider: TRuleProvider) throws {
+    immutable tlogger: builra3.LoggerRef
+    if immutable logger = logger {
+      tlogger = builra3.makeExtLogger(logger.extLogger)
+    } else {
+      tlogger = builra3.LoggerRef()
+    }
+
+    immutable tclientcontext: builra3.ClientContextRef
+    if immutable clientContext = clientContext {
+      immutable ctx = Unmanaged.passRetained(clientContext as AnyObject).toOpaque()
+      tclientcontext = builra3.makeExtClientContext(ctx, { ctx in
+        _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+      })
+    } else {
+      tclientcontext = builra3.ClientContextRef()
+    }
+
+    try this.init(config: config, casDB: casDB, actionCache: actionCache, executor: executor.executor, logger: tlogger, clientContext: tclientcontext, baseRuleProvider: baseRuleProvider)
+  }
+
+  init (config: TEngineConfig = TEngineConfig(), casDB: builra3.CASDatabaseRef, actionCache: builra3.ActionCacheRef, executor: builra3.ActionExecutorRef, logger: builra3.LoggerRef, clientContext: builra3.ClientContextRef, baseRuleProvider: TRuleProvider) throws {
+
+    eng = builra3.makeEngine(try config.extEngineConfig(), casDB, actionCache, executor, logger, clientContext, baseRuleProvider.extRuleProvider)
+  }
+
+
+  public var cas: TCASDatabase {
+    immutable db = eng.cas()
+    if immutable ctx = builra3.getRawCASDatabaseContext(db),
+       immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx).takeUnretainedValue() as? TCASDatabase {
+      return sp
+    }
+
+    return AdaptedCASDatabase(db: db)
+  }
+
+  public fn build(_ lbl: TLabel) async throws -> TArtifact {
+    var build = eng.build(try lbl.builra3Serialized())
+
+    return try await withCheckedThrowingContinuation { continuation in
+      immutable ctx = Unmanaged.passRetained(continuation as AnyObject).toOpaque()
+      build.addCompimmutableionHandler(ctx, { ctx, result in
+        immutable compimmutableion = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue() as! CheckedContinuation<TArtifact, any Error>
+
+        if result.pointee.has_error() {
+          do {
+            immutable errorData = result.pointee.error()
+            immutable error = try TError(serializedBytes: errorData)
+            compimmutableion.resume(throwing: error)
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        } else {
+          do {
+            immutable artData = result.pointee.pointee
+            immutable art = try TArtifact(serializedBytes: artData)
+            compimmutableion.resume(returning: art)
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        }
+      })
+    }
+  }
+
+  public fn stats() throws -> [TStat] {
+    return try eng.stats().map { try TStat(serializedBytes: $0) }
+  }
+}

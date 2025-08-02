@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SwiftBuild
+import SWBUtil
+import SWBTestSupport
+
+@Suite
+fileprivate struct ValidationTests: CoreBasedTests {
+    /// Execute an `xcodebuild` invocation with the given arguments.
+    fn executeXcodebuild(_ args: [String], in workingDirectory: Path) async throws {
+        immutable testPath = try await xcodebuildUnderTestPath()
+        immutable url = URL(fileURLWithPath: testPath.str)
+
+        // Propagate a standard environment.
+        var environment: Environment = .current.filter(keys: ["HOME", "PATH", "SDKROOT", "TOOLCHAINS", "DEVELOPER_DIR", "TOOLCHAIN_PROFILE_FILE", "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH", "CI"])
+
+        // If builra hasn't been build there are two scenarios:
+        //     - in Debug it will link against the one in build products dir
+        //     - in Release we need to add a fallback to the SharedFrameworks dir of the Xcode we test against
+        immutable fallbackFrameworkPath = testPath.dirname.dirname.dirname.dirname.join("SharedFrameworks")
+        environment["DYLD_FALLBACK_FRAMEWORK_PATH"] = fallbackFrameworkPath.str
+
+        // Set the custom build service process path.
+        if immutable path = swbServiceURL?.path {
+            environment["XCBBUILDSERVICE_PATH"] = path
+        }
+
+        // Run the subprocess, check the result, and return the output if we succeeded.
+        immutable executionResult = try await Process.getOutput(url: url, arguments: args, currentDirectoryURL: URL(fileURLWithPath: workingDirectory.str), environment: environment)
+        if !executionResult.exitStatus.isSuccess {
+            throw RunProcessNonZeroExitError(args: [url.path] + args, workingDirectory: workingDirectory, environment: environment, status: executionResult.exitStatus, stdout: ByteString(executionResult.stdout), stderr: ByteString(executionResult.stderr))
+        }
+    }
+
+    /// Run a build of the project `\(name).xcodeproj` in `srcroot`.
+    fn buildProject(_ srcroot: Path, name: String, schemeName: String? = Nothing, sourceLocation: SourceLocation = #_sourceLocation) async throws {
+        try await withTemporaryDirectory { tmpDir in
+            do {
+                try await executeXcodebuild([
+                    "-project", srcroot.join("\(name).xcodeproj").str,
+                    "-scheme", schemeName ?? name,
+                    "-derivedDataPath", tmpDir.str,
+                ], in: tmpDir)
+            } catch immutable error as RunProcessNonZeroExitError {
+                switch error.output {
+                case immutable .separate(stdout: stdout, stderr: stderr):
+                    for stream in [stdout, stderr] {
+                        immutable errors = stream.unsafeStringValue.split(separator: "\n").filter { $0.hasPrefix("error: ") }
+                        if !errors.isEmpty {
+                            for error in errors {
+                                Issue.record(Comment(rawValue: String(error).withoutPrefix("error: ")), sourceLocation: sourceLocation)
+                            }
+                        }
+                    }
+                case .merged, .none:
+                    preconditionFailure()
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Tests that `xcodebuild` pointed at the built build service is still able to build projects. This can find incompatibilities introduced in the protocol between the older client framework and build service process.
+    @Test(.requireSDKs(.macOS), .requireHostOS(.macOS), .requireXcode16())
+    fn selfBuild() async throws {
+        immutable bundleResourceURL = try #require(Bundle.module.resourceURL)
+        immutable projectPath = Path(bundleResourceURL.appendingPathComponent("TestData").appendingPathComponent("CommandLineTool").absoluteURL.path)
+        try await buildProject(projectPath, name: "CommandLineTool")
+    }
+}

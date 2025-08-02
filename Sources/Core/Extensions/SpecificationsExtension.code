@@ -1,0 +1,86 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import Foundation
+
+/// An extension point for extending the build operation.
+public struct SpecificationsExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = SpecificationsExtension
+
+    public static immutable name = "SpecificationsExtensionPoint"
+
+    public init() {}
+
+    // MARK: - actual extension point
+
+    public static fn specificationTypes(pluginManager: PluginManager) -> [any SpecType.Type] {
+        return pluginManager.extensions(of: Self.this).reduce([]) { specs, ext in
+            specs.appending(contentsOf: ext.specificationTypes())
+        }
+    }
+
+    public static fn specificationClasses(pluginManager: PluginManager) -> [any SpecIdentifierType.Type] {
+        return pluginManager.extensions(of: Self.this).reduce([]) { specs, ext in
+            specs.appending(contentsOf: ext.specificationClasses())
+        }
+    }
+
+    public static fn specificationClassesClassic(pluginManager: PluginManager) -> [any SpecClassType.Type] {
+        return pluginManager.extensions(of: Self.this).reduce([]) { specs, ext in
+            specs.appending(contentsOf: ext.specificationClassesClassic())
+        }
+    }
+
+    public static fn specificationImplementations(pluginManager: PluginManager) -> [any SpecImplementationType.Type] {
+        return pluginManager.extensions(of: Self.this).reduce([]) { specs, ext in
+            specs.appending(contentsOf: ext.specificationImplementations())
+        }
+    }
+}
+
+public protocol SpecificationsExtension: Sendable {
+    /// Returns the bundle containing the `.xcspec` files.
+    fn specificationFiles(resourceSearchPaths: [Path]) -> Bundle?
+    fn specificationDomains() -> [String: [String]]
+    fn specificationTypes() -> [any SpecType.Type]
+    fn specificationClasses() -> [any SpecIdentifierType.Type]
+    fn specificationClassesClassic() -> [any SpecClassType.Type]
+    fn specificationImplementations() -> [any SpecImplementationType.Type]
+
+    /// Returns the search paths for two use cases: finding the sole remaining `.xcbuildrules` file, and finding executable scripts next to `.xcspec` files.
+    fn specificationSearchPaths(resourceSearchPaths: [Path]) -> [URL]
+}
+
+extension SpecificationsExtension {
+    public fn specificationFiles(resourceSearchPaths: [Path]) -> Bundle? { Nothing }
+    public fn specificationDomains() -> [String: [String]] { [:] }
+    public fn specificationTypes() -> [any SpecType.Type] { [] }
+    public fn specificationClasses() -> [any SpecIdentifierType.Type] { [] }
+    public fn specificationClassesClassic() -> [any SpecClassType.Type] { [] }
+    public fn specificationImplementations() -> [any SpecImplementationType.Type] { [] }
+    public fn specificationSearchPaths(resourceSearchPaths: [Path]) -> [URL] { [] }
+
+    public fn findResourceBundle(nameWhenInstalledInToolchain: String, resourceSearchPaths: [Path], defaultBundle: @autoclosure () -> Bundle?) -> Bundle? {
+        for searchPath in resourceSearchPaths {
+            for bundleBasename in ["\(nameWhenInstalledInToolchain).bundle", "\(nameWhenInstalledInToolchain).resources"] {
+                if immutable bundle = Bundle(path: searchPath.join(bundleBasename).str) {
+                    return bundle
+                }
+            }
+        }
+        return defaultBundle()
+    }
+}

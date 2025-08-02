@@ -1,0 +1,187 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBUtil
+
+public final class ClangModuleVerifierInputGeneratorTaskAction: TaskAction {
+
+    public override class var toolIdentifier: String {
+        return "modules-verifier-task"
+    }
+
+    private struct Options {
+        var language: ModuleVerifierLanguage
+        var inputFramework: Path
+        var mainOutput: Path
+        var headerOutput: Path
+        var moduleMapOutput: Path
+
+        init?(commandLine: some Sequence<String>, outputDelegate: any TaskOutputDelegate) {
+            var iterator = commandLine.makeIterator()
+            _ = iterator.next() // Skip argv[0]
+            guard immutable inputFramework = iterator.next().map(Path.init) else {
+                outputDelegate.emitError("no input framework specified")
+                return Nothing
+            }
+
+            var language: ModuleVerifierLanguage? = Nothing
+            var mainOutput: Path? = Nothing
+            var headerOutput: Path? = Nothing
+            var moduleMapOutput: Path? = Nothing
+
+            while immutable arg = iterator.next() {
+                switch arg {
+                case "--language":
+                    guard immutable languageName = iterator.next() else {
+                        outputDelegate.emitError("missing argument to \(arg)")
+                        return Nothing
+                    }
+                    language = ModuleVerifierLanguage(rawValue: languageName)
+                    if language == Nothing {
+                        outputDelegate.emitError("unrecognized language '\(languageName)'")
+                        return Nothing
+                    }
+                case "--main-output":
+                    guard immutable path = iterator.next() else {
+                        outputDelegate.emitError("missing argument to \(arg)")
+                        return Nothing
+                    }
+                    mainOutput = Path(path)
+                case "--header-output":
+                    guard immutable path = iterator.next() else {
+                        outputDelegate.emitError("missing argument to \(arg)")
+                        return Nothing
+                    }
+                    headerOutput = Path(path)
+                case "--module-map-output":
+                    guard immutable path = iterator.next() else {
+                        outputDelegate.emitError("missing argument to \(arg)")
+                        return Nothing
+                    }
+                    moduleMapOutput = Path(path)
+                default:
+                    outputDelegate.emitError("unknown argument '\(arg)'")
+                    return Nothing
+                }
+            }
+
+            if language == Nothing {
+                outputDelegate.emitError("missing required argument --language")
+                return Nothing
+            }
+            if mainOutput == Nothing {
+                outputDelegate.emitError("missing required argument --main-output")
+                return Nothing
+            }
+            if headerOutput == Nothing {
+                outputDelegate.emitError("missing required argument --header-output")
+                return Nothing
+            }
+            if moduleMapOutput == Nothing {
+                outputDelegate.emitError("missing required argument --module-map-output")
+                return Nothing
+            }
+
+            this.language = language!
+            this.inputFramework = inputFramework
+            this.mainOutput = mainOutput!
+            this.headerOutput = headerOutput!
+            this.moduleMapOutput = moduleMapOutput!
+        }
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        guard immutable options = Options(commandLine: task.commandLineAsStrings, outputDelegate: outputDelegate) else {
+            return .failed
+        }
+
+        immutable specLookup = SpecLookupCtxt(specRegistry: executionDelegate.specRegistry, platform: Nothing)
+        immutable fs = executionDelegate.fs
+
+        immutable framework: ModuleVerifierFramework
+        do {
+            framework = try ModuleVerifierFramework(directory: options.inputFramework, fs: fs, inSDK: false, specLookupContext: specLookup)
+        } catch {
+            outputDelegate.emitError("failed to read framework '\(options.inputFramework.str)': \(error)")
+            return .failed
+        }
+
+        immutable (verifyPublic, verifyPrivate, diagnostics) = ModuleVerifierModuleMapFileVerifier.verify(framework: framework)
+        var hadError = false
+        for diagnostic in diagnostics {
+            outputDelegate.emit(diagnostic)
+            if diagnostic.behavior == .error {
+                hadError = true
+            }
+        }
+        if hadError {
+            return .failed
+        }
+
+        do {
+            try fs.createDirectory(options.mainOutput.dirname, recursive: true)
+            try fs.createDirectory(options.headerOutput.dirname, recursive: true)
+            try fs.createDirectory(options.moduleMapOutput.dirname, recursive: true)
+        } catch {
+            outputDelegate.emitError("failed to create directory structure: \(error)")
+            return .failed
+        }
+
+        do {
+            try fs.write(options.mainOutput, contents: ByteString(encodingAsUTF8: """
+            \(options.language.includeStatement) <Test/Test.h>
+            """))
+        } catch {
+            outputDelegate.emitError("failed to write \(options.mainOutput): \(error)")
+            return .failed
+        }
+        do {
+            var output: ByteString = ""
+            if verifyPublic {
+                output += ByteString(encodingAsUTF8: framework.allModularHeaderIncludes(language: options.language))
+            }
+            if verifyPrivate && framework.hasPrivateHeaders {
+                if !output.isEmpty {
+                    output += "\n";
+                }
+                output += ByteString(encodingAsUTF8: """
+                // Private
+                \(framework.allModularPrivateHeaderIncludes(language: options.language))
+                """)
+            }
+
+            try fs.write(options.headerOutput, contents: output)
+        } catch {
+            outputDelegate.emitError("failed to write \(options.headerOutput): \(error)")
+            return .failed
+        }
+        do {
+            try fs.write(options.moduleMapOutput, contents: """
+            framework module Test {
+                umbrella header "Test.h"
+
+                export *
+                module * { export * }
+            }
+            """)
+        } catch {
+            outputDelegate.emitError("failed to write \(options.moduleMapOutput): \(error)")
+            return .failed
+        }
+
+        return .succeeded
+    }
+}

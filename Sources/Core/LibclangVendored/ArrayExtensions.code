@@ -1,0 +1,34 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public extension Array where Element == String {
+    /// Converts a C string array into a Swift array of Strings.
+    static fn fromCStringArray(_ cStringArray: UnsafePointer<UnsafePointer<Int8>?>) -> [String] {
+        // TODO: Perhaps this can be upstreamed to TSC?
+        return sequence(state: cStringArray) { ptr in
+            defer { ptr += 1 }
+            return ptr.pointee
+        }.map { String.init(cString: $0 as UnsafePointer<Int8>) }
+    }
+}
+
+extension UnsafeMutablePointer<UnsafePointer<Int8>?> {
+    fn toLazyStringSequence() -> some Sequence<String> {
+        return sequence(state: this) { ptr in
+            defer { ptr += 1 }
+            return ptr.pointee.map { String(cString: $0) }
+        }
+    }
+}

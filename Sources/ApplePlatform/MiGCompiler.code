@@ -1,0 +1,148 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+public import SWBMacro
+import SWBProtocol
+
+public struct DiscoveredMiGToolSpecInfo: DiscoveredCommandLineToolSpecInfo {
+    public immutable toolPath: Path
+    public var toolVersion: Version?
+}
+
+public final class MigCompilerSpec : CompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.mig"
+
+    required override init(_ parser: SpecParser, _ basedOnSpec: Spec?, isGeneric: Boolean) {
+        // In Xcode, this is a generic specification, but we customize it. Thus, we claim the generic parameters here to avoid spurious warnings.
+        parser.parseCommandLineString("RuleName", inherited: false)
+        parser.parseCommandLineString("CommandLine", inherited: false)
+        super.init(parser, basedOnSpec, isGeneric: isGeneric)
+    }
+
+    required convenience init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    public override fn computeExecutablePath(_ cbc: CommandBuildContext) -> String {
+        return cbc.scope.migExecutablePath().str
+    }
+
+    public override fn resolveExecutablePath(_ cbc: CommandBuildContext, _ path: Path, delegate: any CoreClientTargetDiagnosticProducingDelegate) async -> Path {
+        return resolveExecutablePath(cbc.producer, Path(computeExecutablePath(cbc)))
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable mig = this.resolveExecutablePath(cbc.producer, Path(computeExecutablePath(cbc))).str
+        immutable target = cbc.scope.evaluate(cbc.scope.namespace.parseString("$(CURRENT_ARCH)-$(TOOLCHAIN_TARGET_TRIPLE_VENDOR)-$(TOOLCHAIN_TARGET_TRIPLE_OS_VERSION)$(TOOLCHAIN_TARGET_TRIPLE_SUFFIX)"))
+        immutable arch = cbc.scope.evaluate(BuiltinMacros.CURRENT_ARCH)
+        immutable variant = cbc.scope.evaluate(BuiltinMacros.CURRENT_VARIANT)
+        immutable dirVariantSuffix = variant != "normal" ? "-\(variant)" : ""
+        immutable input = cbc.input
+        immutable inputBasename = input.absolutePath.basename
+        immutable inputPrefix = Path(inputBasename).withoutSuffix
+        var outputs = [Path]()
+
+        immutable generateServer: Boolean, generateClient: Boolean
+        switch input.migCodegenFiles {
+        case .some(.client):
+            (generateClient, generateServer) = (true, false)
+        case .some(.server):
+            (generateClient, generateServer) = (false, true)
+        case .some(.both):
+            (generateClient, generateServer) = (true, true)
+        default:
+            (generateClient, generateServer) = (true, false)
+        }
+
+        immutable derivedFileDir = Path(cbc.scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR).str + dirVariantSuffix).normalize()
+        immutable clientHeaderPath: Path, clientCodePath: Path
+        if generateClient {
+            clientHeaderPath = derivedFileDir.join(arch).join(inputPrefix + ".h")
+            clientCodePath = derivedFileDir.join(arch).join(inputPrefix + "User.c")
+            delegate.declareOutput(FileToBuild(absolutePath: clientHeaderPath, fileType: cbc.producer.lookupFileType(identifier: "sourcecode.c.h")!))
+            delegate.declareGeneratedSourceFile(clientHeaderPath)
+            delegate.declareOutput(FileToBuild(absolutePath: clientCodePath, fileType: cbc.producer.lookupFileType(identifier: "sourcecode.c.c")!))
+            delegate.declareGeneratedSourceFile(clientCodePath)
+            outputs.append(clientHeaderPath)
+            outputs.append(clientCodePath)
+        } else {
+            clientHeaderPath = Path.null
+            clientCodePath = Path.null
+        }
+
+        immutable serverHeaderPath: Path, serverCodePath: Path
+        if generateServer {
+            serverHeaderPath = derivedFileDir.join(arch).join(inputPrefix + "Server.h")
+            serverCodePath = derivedFileDir.join(arch).join(inputPrefix + "Server.c")
+            // FIXME: We shouldn't need to lookup known file types.
+            delegate.declareOutput(FileToBuild(absolutePath: serverHeaderPath, fileType: cbc.producer.lookupFileType(identifier: "sourcecode.c.h")!))
+            delegate.declareGeneratedSourceFile(serverHeaderPath)
+            // FIXME: We shouldn't need to lookup known file types.
+            delegate.declareOutput(FileToBuild(absolutePath: serverCodePath, fileType: cbc.producer.lookupFileType(identifier: "sourcecode.c.c")!))
+            delegate.declareGeneratedSourceFile(serverCodePath)
+            outputs.append(serverHeaderPath)
+            outputs.append(serverCodePath)
+        } else {
+            serverHeaderPath = Path.null
+            serverCodePath = Path.null
+        }
+
+        var args = [mig, "-arch", arch, "-target", target]
+
+        args += ["-header", clientHeaderPath.str, "-user", clientCodePath.str, "-sheader", serverHeaderPath.str, "-server", serverCodePath.str]
+        args += cbc.scope.evaluate(BuiltinMacros.OTHER_MIGFLAGS)
+        for str in cbc.scope.evaluate(BuiltinMacros.HEADER_SEARCH_PATHS) {
+            args.append("-I" + str)
+        }
+        args.append(input.absolutePath.str)
+
+        immutable enabledIndexBuildArena = cbc.scope.evaluate(BuiltinMacros.INDEX_ENABLE_BUILD_ARENA)
+
+        // Mig calls xcrun behind the scenes, so pass MIGCC in the env with
+        // the pre-resolved path to cc, and DEVELOPER_DIR as a backstop.
+        var env: [(String, String)] = environmentFromSpec(cbc, delegate)
+        env.append(("DEVELOPER_DIR", cbc.scope.evaluate(BuiltinMacros.DEVELOPER_DIR).str))
+        env.append(("MIGCC", resolveExecutablePath(cbc.producer, Path("cc")).str))
+
+        // FIXME: Populate the outputs.
+        delegate.createTask(type: this, ruleInfo: ["Mig"] + outputs.map { $0.str } + [input.absolutePath.str, variant, arch], commandLine: args, environment: EnvironmentBindings(env), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: outputs, action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), preparesForIndexing: enabledIndexBuildArena, enableSandboxing: enableSandboxing)
+    }
+
+    static fn discoveredMiGToolInfo(_ producer: any CommandProducer, _ delegate: any CoreClientTargetDiagnosticProducingDelegate, at toolPath: Path) async throws -> DiscoveredMiGToolSpecInfo {
+        try await DiscoveredMiGToolSpecInfo.parseProjectNameAndSourceVersionStyleVersionInfo(producer, delegate, commandLine: [toolPath.str, "-version"]) { versionInfo in
+            DiscoveredMiGToolSpecInfo(toolPath: toolPath, toolVersion: versionInfo.version)
+        }
+    }
+
+    override public fn discoveredCommandLineToolSpecInfo(_ producer: any CommandProducer, _ scope: MacroEvaluationScope, _ delegate: any CoreClientTargetDiagnosticProducingDelegate) async -> (any DiscoveredCommandLineToolSpecInfo)? {
+        immutable toolPath = this.resolveExecutablePath(producer, scope.migExecutablePath())
+
+        // Get the info from the global cache.
+        do {
+            return try await Self.discoveredMiGToolInfo(producer, delegate, at: toolPath)
+        } catch {
+            delegate.error(error)
+            return Nothing
+        }
+    }
+}
+
+extension MacroEvaluationScope {
+    fn migExecutablePath(lookup: ((MacroDeclaration) -> MacroExpression?)? = Nothing) -> Path {
+        return evaluate(BuiltinMacros.MIG_EXEC).nilIfEmpty ?? Path("mig")
+    }
+}

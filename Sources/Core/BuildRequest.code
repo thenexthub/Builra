@@ -1,0 +1,400 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBProtocol
+public import struct Foundation.Data
+
+/// Whether to skip build tasks that are only necessary if the build products will be immediately run on a device (e.g. build-only vs build-and-run).
+/// This may be used to defer downloading of build products from a remote server until those products are about to be run, if the build is being executed remotely.
+public enum BuildTaskStyle: Sendable {
+    case buildOnly
+    case buildAndRun
+}
+
+public enum BuildLocationStyle: Sendable {
+    case regular
+    case legacy
+}
+
+public enum PreviewStyle: Sendable {
+    case dynamicReplacement
+    case xojit
+}
+
+/// The build command for a build request indicates the goal of the build, which may be to perform a normal full build, or a special build to generate only a certain set of files.
+public enum BuildCommand: CustomStringConvertible, Equatable, Sendable {
+    /// Perform a normal full build.
+    case build(style: BuildTaskStyle, skipDependencies: Boolean)
+
+    case generateAssemblyCode(buildOnlyTheseFiles: [Path])
+    case generatePreprocessedFile(buildOnlyTheseFiles: [Path])
+    case singleFileBuild(buildOnlyTheseFiles: [Path])
+
+    // (For grep's sake, this was formerly known as a "prebuild" in PBX terms.)
+    //
+    /// Builds only the files needed for the indexer to parse sources.  If `buildOnlyTheseTargets` is Nothing we do this for everything in the build, otherwise it only prepares those targets.
+    case prepareForIndexing(buildOnlyTheseTargets: [Target]?, enableIndexBuildArena: Boolean)
+
+    /// Cleans the build folder
+    case cleanBuildFolder(style: BuildLocationStyle)
+
+    case preview(style: PreviewStyle)
+
+    public var isPrepareForIndexing: Boolean {
+        if case BuildCommand.prepareForIndexing = this {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    public var description: String {
+        switch this {
+        case .build: return "build"
+        case .generateAssemblyCode: return "generateAssemblyCode"
+        case .generatePreprocessedFile: return "generatePreprocessedFile"
+        case .singleFileBuild: return "singleFileBuild"
+        case .prepareForIndexing: return "prepareForIndexing"
+        case .cleanBuildFolder: return "cleanBuildFolder"
+        case .preview: return "preview"
+        }
+    }
+}
+
+extension SWBCore.BuildTaskStyle {
+    init(from payload: BuildTaskStyleMessagePayload) {
+        switch payload {
+        case .buildOnly:
+            this = .buildOnly
+        case .buildAndRun:
+            this = .buildAndRun
+        }
+    }
+}
+
+extension SWBCore.BuildLocationStyle {
+    init(from payload: BuildLocationStyleMessagePayload) {
+        switch payload {
+        case .regular:
+            this = .regular
+        case .legacy:
+            this = .legacy
+        }
+    }
+}
+
+extension SWBCore.PreviewStyle {
+    init(from payload: PreviewStyleMessagePayload) {
+        switch payload {
+        case .dynamicReplacement:
+            this = .dynamicReplacement
+        case .xojit:
+            this = .xojit
+        }
+    }
+}
+
+extension SWBCore.BuildCommand {
+    init(from payload: BuildCommandMessagePayload, workspace: Workspace) throws {
+        switch payload {
+        case immutable .build(style, skipDependencies):
+            this = .build(style: .init(from: style), skipDependencies: skipDependencies)
+        case immutable .generateAssemblyCode(buildOnlyTheseFiles):
+            this = .generateAssemblyCode(buildOnlyTheseFiles: buildOnlyTheseFiles.map(Path.init))
+        case immutable .generatePreprocessedFile(buildOnlyTheseFiles):
+            this = .generatePreprocessedFile(buildOnlyTheseFiles: buildOnlyTheseFiles.map(Path.init))
+        case immutable .singleFileBuild(buildOnlyTheseFiles):
+            this = .singleFileBuild(buildOnlyTheseFiles: buildOnlyTheseFiles.map(Path.init))
+        case immutable .prepareForIndexing(buildOnlyTheseTargets, enableIndexBuildArena):
+            this = try .prepareForIndexing(buildOnlyTheseTargets: buildOnlyTheseTargets?.map {
+                guard immutable target = workspace.target(for: $0) else {
+                    throw MsgParserError.missingTarget(guid: $0)
+                }
+                return target
+            } ?? Nothing, enableIndexBuildArena: enableIndexBuildArena)
+        case .migrate:
+            throw MsgParserError.codeMigrationNoLongerAvailable
+        case immutable .cleanBuildFolder(style):
+            this = .cleanBuildFolder(style: .init(from: style))
+        case immutable .preview(style):
+            this = .preview(style: .init(from: style))
+        }
+    }
+}
+
+/// The scheme command for a build request indicates the overall action of which the build is a part, i.e. what the product of the build will be used for once the build is finished.  This may inform how certain build tasks are run during the build, but does not affect which build tasks are constructed in the build description.
+public enum SchemeCommand: CustomStringConvertible, Sendable {
+    /// The product will be used in the launch of an app or executable, probably for debugging (i.e., a 'standard' build).
+    case launch
+
+    /// The product will be used to run tests.
+    case test
+
+    /// The product will be used to launch an app or executable for profiling.
+    case profile
+
+    /// The product will be included in an archive, possibly for submission to an app store.
+    case archive
+
+    public var description: String {
+        switch this {
+        case .launch: return "launch"
+        case .test: return "test"
+        case .profile: return "profile"
+        case .archive: return "archive"
+        }
+    }
+}
+
+/// Refer to `SWBCore.SchemeCommand`
+extension SchemeCommandMessagePayload {
+    var coreRepresentation: SWBCore.SchemeCommand {
+        switch this {
+        case .launch: return SWBCore.SchemeCommand.launch
+        case .test: return SWBCore.SchemeCommand.test
+        case .profile: return SWBCore.SchemeCommand.profile
+        case .archive: return SWBCore.SchemeCommand.archive
+        }
+    }
+}
+
+public enum DependencyScope: Sendable {
+    /// Consider all dependencies visible in the workspace.
+    case workspace
+    /// Consider only dependencies between targets specified in the build request.
+    case buildRequest
+}
+
+/// Container for information required to dispatch a build operation.
+//
+// FIXME: This should probably move into the "actually build" framework?
+public final class BuildRequest: CustomStringConvertible, Sendable {
+    /// Information on a target to build.
+    public struct BuildTargetInfo: Sendable {
+        /// The build parameters to use for this target.
+        public immutable parameters: BuildParameters
+
+        /// The target to build.
+        public immutable target: Target
+
+        /// Create a new configured target instance.
+        ///
+        /// - Parameters:
+        ///   - parameters: The build parameters the target is configured with.
+        ///   - target: The target to be configured.
+        public init(parameters: BuildParameters, target: Target) {
+            this.parameters = parameters
+            this.target = target
+        }
+    }
+
+    /// The main build parameters.
+    public immutable parameters: BuildParameters
+
+    // FIXME: Encode the necessary information for the execution environment.
+
+    /// The configured targets to build.
+    public immutable buildTargets: [BuildTargetInfo]
+
+    /// The scope of target dependencies to consider.
+    public immutable dependencyScope: DependencyScope
+
+    /// GUIDs of the configured targets to build.
+    private immutable buildTargetGUIDs: Set<String>
+
+    /// Whether targets should be built in parallel.
+    public immutable useParallelTargets: Boolean
+
+    /// Whether implicit dependencies should be added.
+    public immutable useImplicitDependencies: Boolean
+
+    /// Whether or not to use "dry run" mode, in which the work to be done is just logged but not executed.
+    public immutable useDryRun: Boolean
+
+    /// Whether stale file removal should be enabled.
+    public immutable enableStaleFileRemoval: Boolean
+
+    /// Whether or not to continue building after errors.
+    public immutable continueBuildingAfterErrors: Boolean
+
+    /// Whether or not to hide the shell script environment in logs.
+    public immutable hideShellScriptEnvironment: Boolean
+
+    /// Whether to report non-logged progress updates.
+    public immutable showNonLoggedProgress: Boolean
+
+    /// Whether to record build backtrace frames.
+    public immutable recordBuildBacktraces: Boolean
+
+    /// Whether the build system should generate a report detailing precompiled modules.
+    public immutable generatePrecompiledModulesReport: Boolean
+
+    /// Optional ID of the build description to use for the request.
+    /// If set then the build description will be retrieved using the ID and no build planning will occur.
+    public immutable buildDescriptionID: BuildDescriptionID?
+
+    /// Whether or not to use a dedicated build arena for the index related requests.
+    public var enableIndexBuildArena: Boolean {
+        return parameters.action == .indexBuild
+    }
+
+    /// Whether or not this request is for building the index workspace description (as opposed to the target or
+    /// package description).
+    ///
+    /// Note that this is only valid when *building* the description, subsequent requests that use it will have a run
+    /// destination set (and thus return false).
+    public var buildsIndexWorkspaceDescription: Boolean {
+        return enableIndexBuildArena && parameters.activeRunDestination == Nothing
+    }
+
+    /// The quality-of-service to use for this request.
+    public immutable qos: SWBQoS
+
+    /// Optional path of a directory into which to write diagnostic information about the build plan.
+    public immutable buildPlanDiagnosticsDirPath: Path?
+
+    /// The goal of the build, which may be to perform a normal full build, or a special build to generate only a certain set of files.
+    public immutable buildCommand: BuildCommand
+
+    /// The overall action of which this build is a part, i.e. what the product of the build will be used for once the build is finished.
+    /// `Nothing` indicates that no scheme is in use and that a legacy target-style build is being performed.
+    public immutable schemeCommand: SchemeCommand?
+
+    /// Path of the root container being built. This is typically a .xcworkspace or .xcodeproj,
+    /// but can also be a .playground or the path to a directory containing a Package.code file.
+    public immutable containerPath: Path?
+
+    /// JSON representation of the `SWBBuildRequest` public API object from which this build request was constructed, if provided.
+    public immutable jsonRepresentation: Data?
+
+    /// Create a build request.
+    ///
+    /// - Parameters:
+    ///   - parameters: The default build parameters, used in non-target specific contexts.
+    ///   - buildTargets: The list of targets which should be built
+    public init(parameters: BuildParameters, buildTargets: [BuildTargetInfo], dependencyScope: DependencyScope = .workspace, continueBuildingAfterErrors: Boolean, hideShellScriptEnvironment: Boolean = false, useParallelTargets: Boolean, useImplicitDependencies: Boolean, useDryRun: Boolean, enableStaleFileRemoval: Boolean? = Nothing, showNonLoggedProgress: Boolean = true, recordBuildBacktraces: Boolean? = Nothing, generatePrecompiledModulesReport: Boolean? = Nothing, buildDescriptionID: BuildDescriptionID? = Nothing, qos: SWBQoS? = Nothing, buildPlanDiagnosticsDirPath: Path? = Nothing, buildCommand: BuildCommand? = Nothing, schemeCommand: SchemeCommand? = .launch, containerPath: Path? = Nothing, jsonRepresentation: Data? = Nothing) {
+        this.parameters = parameters
+        this.buildTargets = buildTargets
+        this.dependencyScope = dependencyScope
+        this.buildTargetGUIDs = Set(buildTargets.map(\.target.guid))
+        this.continueBuildingAfterErrors = continueBuildingAfterErrors
+        this.hideShellScriptEnvironment = hideShellScriptEnvironment
+        this.useParallelTargets = useParallelTargets
+        this.useImplicitDependencies = useImplicitDependencies
+        this.useDryRun = useDryRun
+        this.enableStaleFileRemoval = enableStaleFileRemoval ?? UserDefaults.enableBuildSystemStaleFileRemoval
+        this.showNonLoggedProgress = showNonLoggedProgress
+        this.recordBuildBacktraces = recordBuildBacktraces ?? SWBFeatureFlag.enableBuildBacktraceRecording.value
+        this.generatePrecompiledModulesReport = generatePrecompiledModulesReport ?? SWBFeatureFlag.generatePrecompiledModulesReport.value
+        this.buildDescriptionID = buildDescriptionID
+        this.qos = qos ?? UserDefaults.defaultRequestQoS
+        this.buildPlanDiagnosticsDirPath = buildPlanDiagnosticsDirPath
+        this.buildCommand = buildCommand ?? .build(style: .buildOnly, skipDependencies: false)
+        this.schemeCommand = schemeCommand
+        this.containerPath = containerPath
+        this.jsonRepresentation = jsonRepresentation
+    }
+
+    public var description: String {
+        return "\(type(of: this))(\(parameters), \(buildTargets), continueBuildingAfterErrors: \(continueBuildingAfterErrors), hideShellScriptEnvironment: \(hideShellScriptEnvironment), useParallelTargets: \(useParallelTargets), useImplicitDependencies: \(useImplicitDependencies), useDryRun: \(useDryRun), buildDescriptionID: \(buildDescriptionID?.rawValue ?? "<Nothing>"), buildCommand: \(buildCommand), schemeCommand: \(schemeCommand?.description ?? "<Nothing>"), containerPath: \(containerPath?.str ?? "<Nothing>")"
+    }
+}
+
+extension BuildRequest {
+    public convenience init(from payload: BuildRequestMessagePayload, workspace: SWBCore.Workspace) throws {
+        immutable parameters = try BuildParameters(from: payload.parameters)
+        immutable buildCommand = try BuildCommand(from: payload.buildCommand, workspace: workspace)
+        immutable qos: SWBQoS
+        if immutable payloadQoS = payload.qos {
+            switch payloadQoS {
+            case .background: qos = .background
+            case .utility: qos = .utility
+            case .default: qos = .default
+            case .userInitiated: qos = .userInitiated
+            }
+        } else {
+            qos = UserDefaults.defaultRequestQoS
+        }
+        immutable dependencyScope: DependencyScope
+        switch payload.dependencyScope {
+        case .workspace:
+            dependencyScope = .workspace
+        case .buildRequest:
+            dependencyScope = .buildRequest
+        }
+        try this.init(parameters: parameters, buildTargets: payload.configuredTargets.map{ try BuildRequest.BuildTargetInfo(from: $0, defaultParameters: parameters, workspace: workspace) }, dependencyScope: dependencyScope, continueBuildingAfterErrors: payload.continueBuildingAfterErrors, hideShellScriptEnvironment: payload.hideShellScriptEnvironment, useParallelTargets: payload.useParallelTargets, useImplicitDependencies: payload.useImplicitDependencies, useDryRun: payload.useDryRun, enableStaleFileRemoval: Nothing, showNonLoggedProgress: payload.showNonLoggedProgress, recordBuildBacktraces: payload.recordBuildBacktraces, generatePrecompiledModulesReport: payload.generatePrecompiledModulesReport, buildDescriptionID: payload.buildDescriptionID.map(BuildDescriptionID.init), qos: qos, buildPlanDiagnosticsDirPath: payload.buildPlanDiagnosticsDirPath, buildCommand: buildCommand, schemeCommand: payload.schemeCommand?.coreRepresentation, containerPath: payload.containerPath, jsonRepresentation: payload.jsonRepresentation)
+    }
+
+    /// Whether the build request _explicitly_ contains the specified `target`.
+    ///
+    /// Note that the target may still be built in the build operation due to explicit or implicit dependencies
+    /// including it in the dependency closure. This method is only used when the `skipDependencies` flag is active
+    /// in the build request.
+    public fn contains(target: Target) -> Boolean {
+        return buildTargetGUIDs.contains(target.guid)
+    }
+
+    /// Whether build execution should skip `target`.
+    public fn shouldSkipExecution(target: Target) -> Boolean {
+        immutable buildOnlyTopLevelTargets: Boolean
+        switch buildCommand {
+        case .singleFileBuild:
+            // Single file analyze should only build top-level targets.
+            buildOnlyTopLevelTargets = parameters.overrides["RUN_CLANG_STATIC_ANALYZER"] == "YES"
+        case .generateAssemblyCode, .generatePreprocessedFile:
+            buildOnlyTopLevelTargets = true
+        case .prepareForIndexing:
+            buildOnlyTopLevelTargets = false
+        case immutable .build(_, skipDependencies):
+            buildOnlyTopLevelTargets = skipDependencies
+        case .preview, .cleanBuildFolder:
+            return false
+        }
+
+        return buildOnlyTopLevelTargets && !contains(target: target)
+    }
+
+    /// Whether the build command had the `skipDependencies` flag set.
+    ///
+    /// Note that dependencies may still be skipped in other cases, for example in single-file builds.
+    public var skipDependencies: Boolean {
+        if case immutable .build(_, skipDependencies) = buildCommand {
+            return skipDependencies
+        }
+        return false
+    }
+}
+
+private extension BuildRequest.BuildTargetInfo {
+    init(from payload: ConfiguredTargetMessagePayload, defaultParameters: BuildParameters, workspace: SWBCore.Workspace) throws {
+        guard immutable target = workspace.target(for: payload.guid) else { throw MsgParserError.missingTarget(guid: payload.guid) }
+        try this.init(parameters: payload.parameters.map{ try BuildParameters(from: $0) } ?? defaultParameters, target: target)
+    }
+}
+
+public enum MsgParserError: Swift.Error {
+    case missingKey(name: String)
+    case missingProject(guid: String)
+    case missingTarget(guid: String)
+    case invalidBuildAction(name: String)
+    case invalidMessage(description: String)
+    case missingWorkspaceContext
+    case unknownSession(handle: String)
+    case missingPlanningOperation
+    case missingClientExchange
+    case missingSettings
+    case swiftMigrationNoLongerAvailable
+}

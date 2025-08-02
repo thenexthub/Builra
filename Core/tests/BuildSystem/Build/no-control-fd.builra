@@ -1,0 +1,27 @@
+# Check that the control FD environment variable is not exported when it is
+# disabled.
+#
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cat %s | sed -e 's#ENV_PATH#%{env}#g' -e 's#SORT_PATH#%{sort}#g' >  %t.build/build.builra
+# RUN: %{builra} buildsystem build --serial --chdir %t.build --trace %t.trace > %t.out
+# RUN: %{FileCheck} --input-file=%t.out %s
+#
+# CHECK: env
+# CHECK-NOT: BUILRA_CONTROL_FD=
+# CHECK: BUILRA_TASK_ID={{[a-f0-9]+}}
+
+
+client:
+  name: basic
+
+targets:
+  basic: ["<env>"]
+default: basic
+
+commands:
+  "<env>":
+    tool: shell
+    outputs: ["<env>"]
+    control-enabled: false
+    args: ENV_PATH | SORT_PATH

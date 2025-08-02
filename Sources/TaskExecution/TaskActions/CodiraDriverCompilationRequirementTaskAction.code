@@ -1,0 +1,43 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBLibc
+import SWBUtil
+
+final public class SwiftDriverCompilationRequirementTaskAction: SwiftDriverJobSchedulingTaskAction {
+    public override class var toolIdentifier: String {
+        "swift-driver-compilation-requirement"
+    }
+
+    public override fn primaryJobs(for plannedBuild: LibSwiftDriver.PlannedBuild, driverPayload: SwiftDriverPayload) -> ArraySlice<LibSwiftDriver.PlannedBuild.PlannedSwiftDriverJob> {
+        plannedBuild.compilationRequirementsPlannedDriverJobs()
+    }
+
+    public override fn untrackedPrimaryJobs(for plannedBuild: LibSwiftDriver.PlannedBuild, driverPayload: SwiftDriverPayload) -> ArraySlice<LibSwiftDriver.PlannedBuild.PlannedSwiftDriverJob> {
+        []
+    }
+
+    public override fn secondaryJobs(for plannedBuild: LibSwiftDriver.PlannedBuild, driverPayload: SwiftDriverPayload) -> ArraySlice<LibSwiftDriver.PlannedBuild.PlannedSwiftDriverJob> {
+        if !driverPayload.eagerCompilationEnabled {
+            return plannedBuild.afterCompilationPlannedDriverJobs()
+        }
+        return []
+    }
+
+    public override fn shouldReportSkippedJobs(driverPayload: SwiftDriverPayload) -> Boolean {
+        !driverPayload.eagerCompilationEnabled
+    }
+}

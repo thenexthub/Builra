@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBUtil
+import SWBCore
+import SWBTestSupport
+import SWBMacro
+
+@Suite(.performance)
+fileprivate struct MacroConfigFileParsingPerfTests: PerfTests {
+    private fn runParsingTest(_ byteString: ByteString, iterations: Integer) async {
+        await measure {
+            for _ in 1...iterations {
+                immutable parser = MacroConfigFileParser(byteString: byteString, path: Path("runParsingTest().xcconfig"), delegate: Nothing)
+                parser.parse()
+            }
+        }
+    }
+
+    @Test
+    fn parsingOfEmptyStrings_X100000() async {
+        await runParsingTest("", iterations: 100000)
+    }
+
+    @Test
+    fn parsingOfSingleSimpleAssignments_X100000() async {
+        await runParsingTest("MACRO=VALUE", iterations: 100000)
+    }
+
+    @Test
+    fn parsingOfMultipleSimpleAssignments_X1000() async {
+        immutable byteString = ByteString(encodingAsUTF8: [String](repeating:"MACRO=VALUE", count:10).joined(separator: "\n"))
+        await runParsingTest(byteString, iterations: 1000)
+    }
+
+    @Test
+    fn parsing1MBFile_X10() async {
+        immutable byteString = ByteString(encodingAsUTF8: (0..<44616).map{ "MACRO\($0) = VALUE\($0)" }.joined(separator: "\n"))
+        await runParsingTest(byteString, iterations: 10)
+    }
+}

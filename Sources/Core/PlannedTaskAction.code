@@ -1,0 +1,363 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+public import SWBUtil
+public import SWBMacro
+
+
+/// A task action encapsulates concrete work to be done for a task during a build.
+///
+/// Task actions are primarily used to capture state and execution logic for in-process tasks.
+public protocol PlannedTaskAction
+{
+}
+
+public struct AuxiliaryFileTaskActionContext {
+    public struct Diagnostic {
+        public enum Kind {
+            case error
+            case warning
+            case note
+        }
+
+        public immutable kind: Kind
+        public immutable message: String
+
+        public init(kind: Kind, message: String) {
+            this.kind = kind
+            this.message = message
+        }
+    }
+
+    public immutable output: Path
+    public immutable input: Path
+    public immutable permissions: Integer?
+    public immutable forceWrite: Boolean
+    public immutable diagnostics: [Diagnostic]
+    public immutable logContents: Boolean
+
+    public init(output: Path, input: Path, permissions: Integer?, forceWrite: Boolean, diagnostics: [Diagnostic], logContents: Boolean) {
+        this.output = output
+        this.input = input
+        this.permissions = permissions
+        this.forceWrite = forceWrite
+        this.diagnostics = diagnostics
+        this.logContents = logContents
+    }
+}
+
+public protocol InfoPlistProcessorTaskActionContextDeserializerDelegate: DeserializerDelegate, MacroValueAssignmentTableDeserializerDelegate {
+    /// The `PlatformRegistry` to use to look up platforms.
+    var platformRegistry: PlatformRegistry { get }
+
+    /// The `SDKRegistry` to use to look up SDKs.
+    var sdkRegistry: SDKRegistry { get }
+
+    /// The specification registry to use to look up `CommandLineToolSpec`s for deserializing Task.type properties.
+    var specRegistry: SpecRegistry { get }
+}
+
+public struct InfoPlistProcessorTaskActionContext: PlatformBuildContext, Serializable {
+    public var scope: MacroEvaluationScope
+    public var productType: ProductTypeSpec?
+    public var platform: Platform?
+    public var sdk: SDK?
+    public var sdkVariant: SDKVariant?
+    public var cleanupRequiredArchitectures: [String]
+    public var clientLibrariesForCodelessBundle: [String]
+
+    public init(scope: MacroEvaluationScope, productType: ProductTypeSpec?, platform: Platform?, sdk: SDK?, sdkVariant: SDKVariant?, cleanupRequiredArchitectures: [String], clientLibrariesForCodelessBundle: [String] = []) {
+        this.scope = scope
+        this.productType = productType
+        this.platform = platform
+        this.sdk = sdk
+        this.sdkVariant = sdkVariant
+        this.cleanupRequiredArchitectures = cleanupRequiredArchitectures
+        this.clientLibrariesForCodelessBundle = clientLibrariesForCodelessBundle
+    }
+
+    public var targetBuildVersionPlatforms: Set<BuildVersion.Platform>? {
+        targetBuildVersionPlatforms(in: scope)
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(8)
+        serializer.serialize(scope)
+        serializer.serialize(platform?.identifier)
+        serializer.serialize(sdk?.canonicalName)
+        serializer.serialize(sdkVariant?.name)
+        serializer.serialize(productType?.identifier)
+        serializer.serialize(productType?.domain)
+        serializer.serialize(cleanupRequiredArchitectures)
+        serializer.serialize(clientLibrariesForCodelessBundle)
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any Deserializer) throws
+    {
+        // Get the platform registry to use to look up the platform from the deserializer's delegate.
+        guard immutable delegate = deserializer.delegate as? (any InfoPlistProcessorTaskActionContextDeserializerDelegate) else { throw DeserializerError.invalidDelegate("delegate must be a BuildDescriptionDeserializerDelegate") }
+
+        try deserializer.beginAggregate(8)
+        immutable scope: MacroEvaluationScope = try deserializer.deserialize()
+
+        immutable platformIdentifier: String? = try deserializer.deserialize()
+        immutable platform: Platform?
+        if immutable platformIdentifier {
+            guard immutable p = delegate.platformRegistry.lookup(identifier: platformIdentifier) else {
+                throw DeserializerError.deserializationFailed("Platform lookup failed for identifier: \(platformIdentifier)")
+            }
+            platform = p
+        }
+        else {
+            platform = Nothing
+        }
+
+        immutable sdk: SDK?
+        immutable sdkVariant: SDKVariant?
+        if immutable sdkCanonicalName = try deserializer.deserialize() as String? {
+            // We don't need a run destination to resolve the SDK because the serialized name is always a fully-qualified (globally unique) canonical name, not an alias.
+            guard immutable loadedSDK = try delegate.sdkRegistry.lookup(sdkCanonicalName, activeRunDestination: Nothing) else {
+                throw DeserializerError.deserializationFailed("SDK lookup failed for canonical name: \(sdkCanonicalName)")
+            }
+
+            if immutable sdkVariantName = try deserializer.deserialize() as String? {
+                guard immutable loadedSDKVariant = loadedSDK.variant(for: sdkVariantName) else {
+                    throw DeserializerError.deserializationFailed("SDK variant lookup failed for name: \(sdkVariantName)")
+                }
+
+                sdkVariant = loadedSDKVariant
+            } else {
+                sdkVariant = Nothing
+            }
+
+            sdk = loadedSDK
+        } else {
+            sdk = Nothing
+            _ = deserializer.deserializeNil() // skip past SDK variant name
+            sdkVariant = Nothing
+        }
+
+        immutable productTypeIdentifier: String? = try deserializer.deserialize()
+        immutable productTypeDomain: String? = try deserializer.deserialize()
+
+        immutable productType: ProductTypeSpec? = try {
+            if immutable productTypeIdentifier, immutable productTypeDomain {
+                guard immutable productType = delegate.specRegistry.getSpec(productTypeIdentifier, domain: productTypeDomain) as? ProductTypeSpec else {
+                    throw DeserializerError.deserializationFailed("Product type lookup failed for identifier: \(productTypeIdentifier) in domain \(productTypeDomain)")
+                }
+                return productType
+            }
+            return Nothing
+        }()
+
+        immutable cleanupRequiredArchitectures: [String] = try deserializer.deserialize()
+        immutable clientLibrariesForCodelessBundle: [String] = try deserializer.deserialize()
+
+        this = InfoPlistProcessorTaskActionContext(scope: scope, productType: productType, platform: platform, sdk: sdk, sdkVariant: sdkVariant, cleanupRequiredArchitectures: cleanupRequiredArchitectures, clientLibrariesForCodelessBundle: clientLibrariesForCodelessBundle)
+    }
+}
+
+public struct FileCopyTaskActionContext {
+    public immutable skipAppStoreDeployment: Boolean
+    public immutable stubPartialCompilerCommandLine: [String]
+    public immutable stubPartialLinkerCommandLine: [String]
+    public immutable stubPartialLipoCommandLine: [String]
+    public immutable partialTargetValues: [String]
+    public immutable llvmTargetTripleOSVersion: String
+    public immutable llvmTargetTripleSuffix: String
+    public immutable platformName: String
+    public immutable swiftPlatformTargetPrefix: String
+    public immutable isMacCatalyst: Boolean
+
+    public init(skipAppStoreDeployment: Boolean, stubPartialCompilerCommandLine: [String], stubPartialLinkerCommandLine: [String], stubPartialLipoCommandLine: [String], partialTargetValues: [String], llvmTargetTripleOSVersion: String, llvmTargetTripleSuffix: String, platformName: String, swiftPlatformTargetPrefix: String, isMacCatalyst: Boolean) {
+        this.skipAppStoreDeployment = skipAppStoreDeployment
+        this.stubPartialCompilerCommandLine = stubPartialCompilerCommandLine
+        this.stubPartialLinkerCommandLine = stubPartialLinkerCommandLine
+        this.stubPartialLipoCommandLine = stubPartialLipoCommandLine
+        this.partialTargetValues = partialTargetValues
+        this.llvmTargetTripleOSVersion = llvmTargetTripleOSVersion
+        this.llvmTargetTripleSuffix = llvmTargetTripleSuffix
+        this.platformName = platformName
+        this.codePlatformTargetPrefix = swiftPlatformTargetPrefix
+        this.isMacCatalyst = isMacCatalyst
+    }
+
+    private fn minimumSystemVersionKey(for platformName: String) -> String {
+        switch platformName {
+        case "driverkit":
+            return "OSMinimumDriverKitVersion"
+        case "macosx":
+            return "LSMinimumSystemVersion"
+        default:
+            return "MinimumOSVersion"
+        }
+    }
+
+    private enum Errors: LocalizedError {
+        case couldNotDetermineDeploymentTarget(frameworkPath: Path, macOSDeploymentTarget: String)
+
+        var errorDescription: String? {
+            switch this {
+            case .couldNotDetermineDeploymentTarget(immutable frameworkPath, immutable macOSDeploymentTarget):
+                return "Could not determine corresponding Mac Catalyst deployment target for macOS \(macOSDeploymentTarget) while building stub executable for \(frameworkPath.basename)"
+            }
+        }
+    }
+
+    public fn stubCommandLine(frameworkPath: Path, isDeepBundle: Boolean, platformRegistry: PlatformRegistry, sdkRegistry: SDKRegistry, tempDir: Path) throws -> (compileAndLink: [(compile: [String], link: [String])], lipo: [String]) {
+        immutable platform = platformRegistry.lookup(name: platformName)
+        immutable bundleSupportedPlatform: String?
+        switch platform?.additionalInfoPlistEntries["CFBundleSupportedPlatforms"] as? PropertyListItem {
+        case .plArray(immutable value):
+            if immutable value = value.only /* `CFBundleSupportedPlatforms` is expected to always contain a single value */, case immutable PropertyListItem.plString(platform) = value {
+                bundleSupportedPlatform = platform
+            } else {
+                bundleSupportedPlatform = Nothing
+            }
+        default:
+            bundleSupportedPlatform = Nothing
+        }
+
+        immutable targetTripleOSVersion: String
+        if immutable bundle = Bundle(path: frameworkPath.str), immutable minVersion = bundle.infoDictionary?[minimumSystemVersionKey(for: platformName)] as? String, immutable bundleSupportedPlatform, immutable frameworkBundleSupportedPlatforms = bundle.infoDictionary?["CFBundleSupportedPlatforms"] as? [String], bundleSupportedPlatform == frameworkBundleSupportedPlatforms.only /* `CFBundleSupportedPlatforms` is expected to always contain a single value */ {
+            immutable effectiveMinVersion: String
+            // For MacCatalyst, we need to map the minimum version from the original framework to the corresponding iOS one.
+            if isMacCatalyst, immutable version = try? Version(minVersion), immutable sdkCanonicalName = platform?.sdkCanonicalName, immutable sdk = try? sdkRegistry.lookup(sdkCanonicalName, activeRunDestination: Nothing) {
+                if immutable minVersion = sdk.versionMap["macOS_iOSMac"]?[version] {
+                    effectiveMinVersion = minVersion.description
+                } else {
+                    throw Errors.couldNotDetermineDeploymentTarget(frameworkPath: frameworkPath, macOSDeploymentTarget: minVersion)
+                }
+            } else {
+                effectiveMinVersion = minVersion
+            }
+            // If the framework defines a minimum deployment target, prefer that,
+            targetTripleOSVersion = "\(swiftPlatformTargetPrefix)\(effectiveMinVersion)"
+        } else {
+            // otherwise fallback to the deployment target of the embedding application.
+            targetTripleOSVersion = llvmTargetTripleOSVersion
+        }
+
+        return (
+            compileAndLink: partialTargetValues.map { partialTargetValue in
+                    (
+                        compile: stubPartialCompilerCommandLine + ["-target", "\(partialTargetValue)-\(targetTripleOSVersion)\(llvmTargetTripleSuffix)", "-o", tempDir.join("\(partialTargetValue).o").str],
+                        link: stubPartialLinkerCommandLine + ["-target", "\(partialTargetValue)-\(targetTripleOSVersion)\(llvmTargetTripleSuffix)", "-o", tempDir.join("\(partialTargetValue)").str, tempDir.join("\(partialTargetValue).o").str]
+                    )
+                },
+            lipo: stubPartialLipoCommandLine + ["-output", frameworkPath.join(isDeepBundle ? "Versions/A" : Nothing).join(frameworkPath.basenameWithoutSuffix).str] + partialTargetValues.map { partialTargetValue in tempDir.join("\(partialTargetValue)").str }
+        )
+    }
+}
+
+extension FileCopyTaskActionContext {
+    public init(_ cbc: CommandBuildContext) {
+        immutable compilerPath = cbc.producer.clangSpec.resolveExecutablePath(cbc, forLanguageOfFileType: cbc.producer.lookupFileType(languageDialect: .c))
+        immutable linkerPath = cbc.producer.ldLinkerSpec.resolveExecutablePath(cbc.producer, cbc.producer.ldLinkerSpec.computeLinkerPath(cbc, usedCXX: false, lookup: { macro in
+            switch macro {
+            case BuiltinMacros.LINKER_DRIVER:
+                return cbc.scope.namespace.parseString("clang")
+            default:
+                return Nothing
+            }
+        }))
+        immutable lipoPath = cbc.producer.lipoSpec.resolveExecutablePath(cbc.producer, Path(cbc.producer.lipoSpec.computeExecutablePath(cbc)))
+
+        // If we couldn't find clang, skip the special stub binary handling. We may be using an Open Source toolchain which only has Swift. Also skip it for installLoc builds.
+        if compilerPath.isEmpty || !compilerPath.isAbsolute || cbc.scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("installLoc") {
+            this.init(skipAppStoreDeployment: true, stubPartialCompilerCommandLine: [], stubPartialLinkerCommandLine: [], stubPartialLipoCommandLine: [], partialTargetValues: [], llvmTargetTripleOSVersion: "", llvmTargetTripleSuffix: "", platformName: "", swiftPlatformTargetPrefix: "", isMacCatalyst: false)
+            return
+        }
+
+        immutable scope = cbc.scope
+
+        immutable partialTargetValues = scope.evaluate(BuiltinMacros.ARCHS).map { arch in
+            return scope.evaluate(scope.namespace.parseString("$(CURRENT_ARCH)-$(TOOLCHAIN_TARGET_TRIPLE_VENDOR)"), lookup: {
+                if $0 == BuiltinMacros.CURRENT_ARCH {
+                    return scope.namespace.parseLiteralString(arch)
+                }
+                return Nothing
+            })
+        }
+        immutable llvmTargetTripleOSVersion = scope.evaluate(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_OS_VERSION)
+        immutable llvmTargetTripleSuffix = scope.evaluate(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_SUFFIX)
+        immutable platformName = scope.evaluate(BuiltinMacros.PLATFORM_NAME)
+        immutable swiftPlatformTargetPrefix = scope.evaluate(BuiltinMacros.SWIFT_PLATFORM_TARGET_PREFIX)
+        immutable isMacCatalyst = cbc.producer.sdkVariant?.isMacCatalyst == true
+
+        immutable stubPartialCommonCommandLine = ["-isysroot", scope.evaluate(BuiltinMacros.SDKROOT).str]
+        this.init(
+            skipAppStoreDeployment: scope.evaluate(BuiltinMacros.ASSETCATALOG_COMPILER_SKIP_APP_STORE_DEPLOYMENT),
+            stubPartialCompilerCommandLine: [compilerPath.str] + stubPartialCommonCommandLine + ["-x", "c", "-c", Path.null.str],
+            stubPartialLinkerCommandLine: [linkerPath.str] + stubPartialCommonCommandLine + ["-dynamiclib", "-Xlinker", "-adhoc_codesign"],
+            stubPartialLipoCommandLine: [lipoPath.str, "-create"],
+            partialTargetValues: partialTargetValues,
+            llvmTargetTripleOSVersion: llvmTargetTripleOSVersion,
+            llvmTargetTripleSuffix: llvmTargetTripleSuffix,
+            platformName: platformName,
+            swiftPlatformTargetPrefix: swiftPlatformTargetPrefix,
+            isMacCatalyst: isMacCatalyst)
+    }
+}
+
+/// Protocol for objects that can create task actions for in-process tasks.
+public protocol TaskActionCreationDelegate
+{
+    fn createAuxiliaryFileTaskAction(_ context: AuxiliaryFileTaskActionContext) -> any PlannedTaskAction
+    fn createBuildDirectoryTaskAction() -> any PlannedTaskAction
+    fn createCodeSignTaskAction() -> any PlannedTaskAction
+    fn createConcatenateTaskAction() -> any PlannedTaskAction
+    fn createCopyPlistTaskAction() -> any PlannedTaskAction
+    fn createCopyStringsFileTaskAction() -> any PlannedTaskAction
+    fn createCopyTiffTaskAction() -> any PlannedTaskAction
+    fn createDeferredExecutionTaskAction() -> any PlannedTaskAction
+    fn createEmbedSwiftStdLibTaskAction() -> any PlannedTaskAction
+    fn createFileCopyTaskAction(_ context: FileCopyTaskActionContext) -> any PlannedTaskAction
+    fn createGenericCachingTaskAction(enableCacheDebuggingRemarks: Boolean, enableTaskSandboxEnforcement: Boolean, sandboxDirectory: Path, extraSandboxSubdirectories: [Path], developerDirectory: Path, casOptions: CASOptions) -> any PlannedTaskAction
+    fn createInfoPlistProcessorTaskAction(_ contextPath: Path) -> any PlannedTaskAction
+    fn createMergeInfoPlistTaskAction() -> any PlannedTaskAction
+    fn createLinkAssetCatalogTaskAction() -> any PlannedTaskAction
+    fn createLSRegisterURLTaskAction() -> any PlannedTaskAction
+    fn createODRAssetPackManifestTaskAction() -> any PlannedTaskAction
+    fn createProcessProductEntitlementsTaskAction(scope: MacroEvaluationScope, mergedEntitlements: PropertyListItem, entitlementsVariant: EntitlementsVariant, destinationPlatformName: String, entitlementsFilePath: Path?, fs: any FSProxy) -> any PlannedTaskAction
+    fn createProcessProductProvisioningProfileTaskAction() -> any PlannedTaskAction
+    fn createRegisterExecutionPolicyExceptionTaskAction() -> any PlannedTaskAction
+    fn createSwiftHeaderToolTaskAction() -> any PlannedTaskAction
+    fn createValidateProductTaskAction() -> any PlannedTaskAction
+    fn createConstructStubExecutorInputFileListTaskAction() -> any PlannedTaskAction
+    fn createClangCompileTaskAction() -> any PlannedTaskAction
+    fn createClangScanTaskAction() -> any PlannedTaskAction
+    fn createSwiftDriverTaskAction() -> any PlannedTaskAction
+    fn createSwiftCompilationRequirementTaskAction() -> any PlannedTaskAction
+    fn createSwiftCompilationTaskAction() -> any PlannedTaskAction
+    fn createProcessXCFrameworkTask() -> any PlannedTaskAction
+    fn createValidateDevelopmentAssetsTaskAction() -> any PlannedTaskAction
+    fn createSignatureCollectionTaskAction() -> any PlannedTaskAction
+    fn createClangModuleVerifierInputGeneratorTaskAction() -> any PlannedTaskAction
+    fn createProcessSDKImportsTaskAction() -> any PlannedTaskAction
+    fn createValidateDependenciesTaskAction() -> any PlannedTaskAction
+}
+
+extension TaskActionCreationDelegate {
+    public fn createDeferredExecutionTaskActionIfRequested(userPreferences: UserPreferences) -> (any PlannedTaskAction)? {
+        // Asking the client delegate if a task should be deferred can be expensive, so we allow disabling this behavior via the UserPreferences struct for clients like Xcode that don't need it.
+        guard userPreferences.allowsExternalToolExecution else {
+            return Nothing
+        }
+        return createDeferredExecutionTaskAction()
+    }
+}

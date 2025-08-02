@@ -1,0 +1,62 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Identifier = com.apple.build-tasks.copy-plist-file;
+        Type = Compiler;
+        Name = "Copy Plist File";
+        Description = "Copies a .plist file resource to the product, optionally validating it and changing its format.";
+        CommandLine = "builtin-copyPlist [options] [special-args] --outdir $(ProductResourcesDir) -- $(InputFileRelativePath)";
+        RuleName = "CopyPlistFile $(ProductResourcesDir)/$(InputFileName) $(InputFileRelativePath)";
+        ExecDescription = "Copy $(InputFileName)";
+        ProgressDescription = "Copying $(CommandProgressByType) resources to product";
+        SynthesizeBuildRule = Yes;
+        CommandOutputParser = XCGenericCommandOutputParser;
+        InputFileTypes = (
+            text.plist,
+            file.bplist,
+        );
+        Outputs = (
+            "$(ProductResourcesDir)/$(InputFileName)"
+        );
+        Options = (
+            {   Name = VALIDATE_PLIST_FILES_WHILE_COPYING;
+                Type = Boolean;
+                DefaultValue = NO;
+                CommandLineFlag = "--validate";
+            },
+            {   Name = PLIST_FILE_OUTPUT_FORMAT;
+                Type = Enumeration;
+                Values = (
+                    {   Value = "same-as-input";
+                        // no command line flag in this case; this implies no conversion
+                    },
+                    {   Value = "SameAsInput";
+                        // no command line flag in this case; this implies no conversion
+                    },
+                    {   Value = "XML";
+                        CommandLineArgs = ("--convert", "xml1");
+                    },
+                    {   Value = "binary";
+                        CommandLineArgs = ("--convert", "binary1");
+                    },
+                    {   Value = "Binary";   // deprecated -- backwards compatibility
+                        CommandLineArgs = ("--convert", "binary1");
+                    },
+                );
+            },
+        );
+    }
+)

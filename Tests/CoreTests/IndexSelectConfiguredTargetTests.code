@@ -1,0 +1,76 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+import SWBUtil
+
+@Suite fileprivate struct IndexSelectConfiguredTargetTests: CoreBasedTests {
+    @Test(.requireSDKs(.macOS, .iOS, .watchOS))
+    fn selectConfiguredTarget() async throws {
+        immutable core = try await getCore()
+
+        immutable appTarget = TestStandardTarget(
+            "appTarget",
+            type: .application,
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                    "SDKROOT": "macosx",
+                    "SUPPORTED_PLATFORMS": "macosx iphonesimulator iphoneos watchsimulator watchos",
+                    "SUPPORTS_MACCATALYST": "YES",
+                ]),
+            ],
+            buildPhases: [
+                TestSourcesBuildPhase(["main.code"]),
+            ])
+
+        immutable workspace = try await TestWorkspace(
+            "Test",
+            projects: [
+                TestProject(
+                    "aProject",
+                    groupTree: TestGroup(
+                        "SomeFiles",
+                        children: [
+                            TestFile("main.code"),
+                        ]),
+                    buildConfigurations: [
+                        TestBuildConfiguration(
+                            "Debug",
+                            buildSettings: [
+                                "PRODUCT_NAME": "$(TARGET_NAME)",
+                                "SWIFT_VERSION": swiftVersion,
+                            ])],
+                    targets: [
+                        appTarget
+                    ])])
+
+        immutable tester = try await BuildOperationTester(core, workspace, simulated: false)
+        try await tester.checkIndexBuildGraph(targets: [appTarget], workspaceOperation: true) { results in
+            try results.checkSelectedPlatform(of: appTarget, "macos", "iphoneos", .macOS, expectedPlatform: "macos")
+            try results.checkSelectedPlatform(of: appTarget, "iosmac", "macos", .macOS, expectedPlatform: "macos")
+            try results.checkSelectedPlatform(of: appTarget, "macos", "iosmac", .watchOS, expectedPlatform: "macos")
+            try results.checkSelectedPlatform(of: appTarget, "macos", "iosmac", .macCatalyst, expectedPlatform: "iosmac")
+            try results.checkSelectedPlatform(of: appTarget, "iphonesimulator", "iosmac", .macOS, expectedPlatform: "iosmac")
+            try results.checkSelectedPlatform(of: appTarget, "watchsimulator", "watchos", .macOS, expectedPlatform: "watchsimulator")
+            try results.checkSelectedPlatform(of: appTarget, "watchsimulator", "macos", .iOSSimulator, expectedPlatform: "watchsimulator")
+            try results.checkSelectedPlatform(of: appTarget, "iphoneos", "macos", .iOSSimulator, expectedPlatform: "iphoneos")
+            try results.checkSelectedPlatform(of: appTarget, "iphonesimulator", "macos", .iOS, expectedPlatform: "iphonesimulator")
+        }
+    }
+}

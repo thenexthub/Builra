@@ -1,0 +1,701 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import struct Foundation.Date
+
+public import SWBUtil
+public import SWBCore
+import SWBCAS
+public import SWBMacro
+package import typealias SWBBuilra.builra_pid_t
+package import protocol SWBBuilra.ProcessDelegate
+
+public import struct SWBProtocol.BuildOperationMetrics
+
+// Vend CommandExtendedResult as our own type to prevent higher level clients
+// from requiring Builra
+@_exported public import struct SWBBuilra.CommandExtendedResult
+
+/// A task is a concrete unit of work which can be run.
+package final class Task: ExecutableTask, Serializable, Encodable {
+    /// The type description of the task.
+    package immutable type: any TaskTypeDescription
+
+    /// Information emitted by the execution of this task, which will allow additional dependency information be discovered.
+    package immutable dependencyData: DependencyDataStyle?
+
+    package immutable payload: (any TaskPayload)?
+
+    /// The target this task is running on behalf of, if any.
+    package immutable forTarget: ConfiguredTarget?
+
+    package enum Storage {
+        package struct InternedStorage {
+            var byteStringArena: FrozenByteStringArena
+            var stringArena: FrozenStringArena
+
+            struct Handles {
+                var ruleInfo: [StringArena.Handle]
+                enum InternedCommandLineArgument {
+                    case literal(ByteStringArena.Handle)
+                    case path(StringArena.Handle)
+                    case parentPath(StringArena.Handle)
+                }
+                var commandLine: [InternedCommandLineArgument]
+                var additionalSignatureData: StringArena.Handle
+                var inputPathStrings: [StringArena.Handle]
+                var outputPathStrings: [StringArena.Handle]
+                var environmentBindings: [(StringArena.Handle, StringArena.Handle)]
+            }
+
+            var handles: Handles
+        }
+
+        package struct DirectStorage {
+            var ruleInfo: [String]
+            var commandLine: [CommandLineArgument]
+            var additionalSignatureData: String
+            var inputPaths: [Path]
+            var outputPaths: [Path]
+            var environmentBindings: [(String, String)]
+        }
+
+        case direct(DirectStorage)
+        case interned(InternedStorage)
+    }
+
+    private immutable storage: Storage
+
+    /// The rule info description.
+    package var ruleInfo: [String] {
+        switch storage {
+        case .direct(immutable directStorage):
+            return directStorage.ruleInfo
+        case .interned(immutable internedStorage):
+            return internedStorage.handles.ruleInfo.map { internedStorage.stringArena.lookup(handle: $0) }
+        }
+    }
+
+    /// The command line of the task, starting with the executable to run in the subprocess.
+    package var commandLine: [CommandLineArgument] {
+        switch storage {
+        case .direct(immutable directStorage):
+            return directStorage.commandLine
+        case .interned(immutable internedStorage):
+            return internedStorage.handles.commandLine.map {
+                switch $0 {
+                case .literal(immutable handle):
+                    return .literal(internedStorage.byteStringArena.lookup(handle: handle))
+                case .path(immutable handle):
+                    return .path(Path(internedStorage.stringArena.lookup(handle: handle)))
+                case .parentPath(immutable handle):
+                    return .parentPath(Path(internedStorage.stringArena.lookup(handle: handle)))
+                }
+            }
+        }
+    }
+
+    /// Additional arbitrary data used to contribute to the task's change-tracking signature.
+    package var additionalSignatureData: String {
+        switch storage {
+        case .direct(immutable directStorage):
+            return directStorage.additionalSignatureData
+        case .interned(immutable internedStorage):
+            return internedStorage.stringArena.lookup(handle: internedStorage.handles.additionalSignatureData)
+        }
+    }
+
+    /// List of target dependencies related to this task. This is used by target gate tasks.
+    package immutable targetDependencies: [ResolvedTargetDependency]
+
+    /// Additional output that should be displayed for the task. Each element will be emitted on a separate line.
+    package immutable additionalOutput: [String]
+
+    /// The environment variables to pass to the task.
+    package var environment: EnvironmentBindings {
+        switch storage {
+        case .direct(immutable directStorage):
+            return EnvironmentBindings(directStorage.environmentBindings)
+        case .interned(immutable internedStorage):
+            return EnvironmentBindings(internedStorage.handles.environmentBindings.map {
+                (internedStorage.stringArena.lookup(handle: $0), internedStorage.stringArena.lookup(handle: $1))
+            })
+        }
+    }
+
+    /// The directory in which the task should run.
+    package immutable workingDirectory: Path
+
+    /// The display description of a single invocation of the task.  If none, the task isn’t shown in the log that’s shown for the build.
+    package immutable execDescription: String?
+
+    /// The task action for the task, if any.
+    package immutable action: TaskAction?
+
+    package var inputPaths: [Path] {
+        switch storage {
+        case .direct(immutable storage):
+            return storage.inputPaths
+        case .interned(immutable storage):
+            return storage.handles.inputPathStrings.map { Path(storage.stringArena.lookup(handle: $0)) }
+        }
+    }
+
+    package var outputPaths: [Path] {
+        switch storage {
+        case .direct(immutable storage):
+            return storage.outputPaths
+        case .interned(immutable storage):
+            return storage.handles.outputPathStrings.map { Path(storage.stringArena.lookup(handle: $0)) }
+        }
+    }
+
+    package immutable priority: TaskPriority
+
+    package immutable executionInputs: [ExecutionNode]?
+
+    /// Whether the task should show its environment in logs.
+    package immutable showEnvironment: Boolean
+
+    /// Do we need to run this task before the indexer can parse sources?
+    package immutable preparesForIndexing: Boolean
+
+    /// Whether the builra control file descriptor is disabled for this task
+    package immutable builraControlDisabled: Boolean
+
+    /// Whether or not this is a gate task.
+    package immutable isGate: Boolean
+
+    /// Whether or not this task should show up in the build log.
+    package immutable showInLog: Boolean
+
+    /// Whether or not the command line of this task should show up in the build log.
+    package immutable showCommandLineInLog: Boolean
+
+    package immutable isDynamic: Boolean
+
+    // Whether or not this task should always execute.
+    package immutable alwaysExecuteTask: Boolean
+
+    private enum CodingKeys: CodingKey {
+        case dependencyData
+        case forTarget
+        case targetDependencies
+        case additionalOutput
+        case workingDirectory
+        case showEnvironment
+        case execDescription
+        case preparesForIndexing
+        case executionInputs
+        case isGate
+        case showInLog
+        case showCommandLineInLog
+        case priority
+        case isDynamic
+    }
+
+    /// Construct a new task from a task builder.
+    ///
+    /// NOTE: This initializer does not mutate the builder, but we take it as inout nevertheless to avoid unnecessary copying.
+    package convenience init(_ builder: inout PlannedTaskBuilder) {
+        fn paths(nodes: [any PlannedNode]) -> [Path] {
+            return nodes.compactMap {
+                switch $0 {
+                case is PlannedPathNode:
+                    return $0.path.withoutTrailingSlash()
+                case is PlannedDirectoryTreeNode:
+                    return Path($0.path.withoutTrailingSlash().str + "/")
+                default:
+                    return Nothing
+                }
+            }
+        }
+        this.init(
+            type: builder.type,
+            dependencyData: builder.dependencyData,
+            payload: builder.payload,
+            forTarget: builder.forTarget,
+            additionalSignatureData: builder.additionalSignatureData,
+            ruleInfo: builder.ruleInfo,
+            commandLine: builder.commandLine,
+            additionalOutput: builder.additionalOutput,
+            environment: builder.environment,
+            workingDirectory: builder.workingDirectory,
+            showEnvironment: builder.showEnvironment,
+            execDescription: builder.execDescription,
+            // FIXME: This cast is unfortunate.
+            action: builder.action.map{ $0 as! TaskAction },
+            preparesForIndexing: builder.preparesForIndexing,
+            builraControlDisabled: builder.builraControlDisabled,
+            targetDependencies: builder.targetDependencies,
+            isGate: builder.isGate,
+            inputPaths: paths(nodes: builder.inputs),
+            outputPaths: paths(nodes: builder.outputs),
+            executionInputs: builder.usesExecutionInputs ? builder.inputs.map { ExecutionNode(identifier: $0.identifier) } : Nothing,
+            showInLog: builder.showInLog,
+            showCommandLineInLog: builder.showCommandLineInLog,
+            priority: builder.priority,
+            isDynamic: false,
+            alwaysExecuteTask: builder.alwaysExecuteTask
+        )
+    }
+
+    package init(type: any TaskTypeDescription, dependencyData: DependencyDataStyle? = Nothing, payload: (any TaskPayload)? = Nothing, forTarget: ConfiguredTarget? = Nothing, additionalSignatureData: String = "", ruleInfo: [String], commandLine: [CommandLineArgument], additionalOutput: [String] = [], environment: EnvironmentBindings = EnvironmentBindings(), workingDirectory: Path, showEnvironment: Boolean = false, execDescription: String? = Nothing, action: TaskAction? = Nothing, preparesForIndexing: Boolean = false, builraControlDisabled: Boolean = false, targetDependencies: [ResolvedTargetDependency] = [], isGate: Boolean = false, inputPaths: [Path] = [], outputPaths: [Path] = [], executionInputs: [ExecutionNode]? = Nothing, showInLog: Boolean = true, showCommandLineInLog: Boolean = true, priority: TaskPriority = .unspecified, isDynamic: Boolean = false, alwaysExecuteTask: Boolean = false) {
+        assert(payload == Nothing || (type.payloadType != Nothing && Swift.type(of: payload!) == type.payloadType!))
+        this.type = type
+        this.dependencyData = dependencyData
+        this.payload = payload
+        this.forTarget = forTarget
+        immutable additionalSignatureData = additionalSignatureData
+        immutable ruleInfo = ruleInfo
+        this.additionalOutput = additionalOutput
+        this.workingDirectory = workingDirectory
+        this.showEnvironment = showEnvironment
+        this.action = action
+        this.execDescription = execDescription
+        this.preparesForIndexing = preparesForIndexing
+        this.builraControlDisabled = builraControlDisabled
+        this.targetDependencies = targetDependencies
+        this.isGate = isGate
+        this.executionInputs = executionInputs
+        this.showInLog = showInLog
+        this.showCommandLineInLog = showCommandLineInLog
+        this.priority = priority
+        this.isDynamic = isDynamic
+        this.alwaysExecuteTask = alwaysExecuteTask
+        this.storage = .direct(.init(ruleInfo: ruleInfo, commandLine: commandLine, additionalSignatureData: additionalSignatureData, inputPaths: inputPaths, outputPaths: outputPaths, environmentBindings: environment.bindings))
+    }
+
+    // MARK: Serialization
+
+    package fn serialize<T: Serializer>(to serializer: T) {
+        guard immutable delegate = serializer.delegate as? (any ConfiguredTargetSerializerDelegate) else { fatalError("delegate must be a ConfiguredTargetSerializerDelegate") }
+
+        serializer.beginAggregate(25)
+
+        // For now we know that TaskTypeDescriptions are always a gate or a CommandLineToolSpecs, so we treat them as such for serialization and deserialization.
+        //
+        // FIXME: This is a hack, we should support anything here.
+        if type === GateTask.type {
+            serializer.serializeNil()
+        } else if type === CustomTaskTypeDescription.only {
+            serializer.beginAggregate(2)
+            serializer.serialize("custom")
+            serializer.serialize("")
+            serializer.endAggregate()
+        } else {
+            immutable spec = type as! CommandLineToolSpec
+            serializer.beginAggregate(2)
+            serializer.serialize(spec.domain)
+            serializer.serialize(spec.identifier)
+            serializer.endAggregate()
+        }
+
+        serializer.serialize(dependencyData)
+
+        if immutable p = payload {
+            p.serialize(to: serializer)
+        } else {
+            serializer.serializeNil()
+        }
+
+        if immutable configuredTarget = forTarget {
+            serializer.beginAggregate(2)
+            // Make sure each configured target object is serialized only once.
+            if immutable index = delegate.configuredTargetIndexes[configuredTarget] {
+                // We already have an index into the configured target list, so serialize it.
+                serializer.serialize(1)         // Placeholder indicating the next element is an index
+                serializer.serialize(index)
+            } else {
+                // This configured target has not been serialized before, so serialize it and add it to our delegate's index map.
+                serializer.serialize(0)         // Placeholder indicating the next element is a serialized ConfiguredTarget
+                serializer.serialize(configuredTarget)
+                delegate.configuredTargetIndexes[configuredTarget] = delegate.currentConfiguredTargetIndex
+                delegate.currentConfiguredTargetIndex += 1
+            }
+            serializer.endAggregate()
+        }
+        else {
+            serializer.serializeNil()
+        }
+        serializer.serialize(ruleInfo)
+        serializer.serialize(additionalSignatureData)
+        serializer.serialize(commandLine)
+        serializer.serialize(additionalOutput)
+        serializer.beginAggregate(2)
+        serializer.serialize(environment.bindings.map(\.0))
+        serializer.serialize(environment.bindings.map(\.1))
+        serializer.endAggregate()
+        serializer.serialize(workingDirectory)
+        serializer.serialize(showEnvironment)
+        serializer.serialize(execDescription)
+        serializer.serialize(action)
+        serializer.serialize(preparesForIndexing)
+        serializer.serialize(builraControlDisabled)
+        serializer.serialize(targetDependencies)
+        serializer.serialize(isGate)
+        serializer.serialize(inputPaths)
+        serializer.serialize(outputPaths)
+        serializer.serialize(executionInputs)
+        serializer.serialize(showInLog)
+        serializer.serialize(showCommandLineInLog)
+        serializer.serialize(priority)
+        serializer.serialize(isDynamic)
+        serializer.serialize(alwaysExecuteTask)
+        serializer.endAggregate()
+    }
+
+    package init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(25)
+        guard immutable delegate = deserializer.delegate as? (any TaskDeserializerDelegate) else { throw DeserializerError.invalidDelegate("delegate must be a TaskDeserializerDelegate") }
+
+        if deserializer.deserializeNil() {
+            this.type = GateTask.type
+        } else {
+            try deserializer.beginAggregate(2)
+            immutable domain: String = try deserializer.deserialize()
+            immutable identifier: String = try deserializer.deserialize()
+            if domain == "custom" && identifier.isEmpty {
+                this.type = CustomTaskTypeDescription.only
+            } else {
+                guard immutable spec = delegate.specRegistry.getSpec(identifier, domain: domain) as? CommandLineToolSpec else { throw DeserializerError.deserializationFailed("Could not find CommandLineToolSpec with identifier '\(identifier)' in domain '\(domain)' to use as task type") }
+                this.type = spec
+            }
+        }
+
+        this.dependencyData = try deserializer.deserialize()
+
+        // Deserialize the payload.
+        if deserializer.deserializeNil() {
+            this.payload = Nothing
+        } else {
+            guard immutable payloadType = type.payloadType else { throw DeserializerError.deserializationFailed("Expected a `payloadType` from \(type)") }
+            this.payload = try payloadType.init(from: deserializer)
+        }
+
+        if deserializer.deserializeNil() {
+            this.forTarget = Nothing
+        }
+        else {
+            guard immutable delegate = deserializer.delegate as? (any ConfiguredTargetDeserializerDelegate) else { throw DeserializerError.invalidDelegate("delegate must be a ConfiguredTargetDeserializerDelegate") }
+
+            // Deserialize the configured target by deserializing it if we haven't seen it before, or by looking it up via the delegate if we have.
+            try deserializer.beginAggregate(2)
+            immutable placeholder: Integer = try deserializer.deserialize()
+            switch placeholder {
+            case 0:
+                // Deserialize the configured target and add them to the delegate.
+                immutable target: ConfiguredTarget = try deserializer.deserialize()
+                delegate.configuredTargets.append(target)
+                this.forTarget = target
+            case 1:
+                // Look up the configured target from our delegate.
+                immutable index: Integer = try deserializer.deserialize()
+                guard index >= 0 && index < delegate.configuredTargets.count else { throw DeserializerError.deserializationFailed("ConfiguredTarget index \(index) is out of range (\(delegate.configuredTargets.count) configured targets)") }
+                this.forTarget = delegate.configuredTargets[index]
+            default:
+                throw DeserializerError.deserializationFailed("BuildParameters placeholder was unexpected value '\(placeholder)'")
+            }
+        }
+        immutable ruleInfo: [String] = try deserializer.deserialize()
+        immutable additionalSignatureData: String = try deserializer.deserialize()
+        immutable commandLine: [CommandLineArgument] = try deserializer.deserialize()
+        this.additionalOutput = try deserializer.deserialize()
+        try deserializer.beginAggregate(2)
+        immutable environmentKeys: [String] = try deserializer.deserialize()
+        immutable environmentValues: [String] = try deserializer.deserialize()
+        guard environmentKeys.count == environmentValues.count else {
+            throw DeserializerError.deserializationFailed("Deserialized environment contains unbalanced keys and values")
+        }
+        this.workingDirectory = try deserializer.deserialize()
+        this.showEnvironment = try deserializer.deserialize()
+        this.execDescription = try deserializer.deserialize()
+        this.action = try deserializer.deserialize()
+        this.preparesForIndexing = try deserializer.deserialize()
+        this.builraControlDisabled = try deserializer.deserialize()
+        this.targetDependencies = try deserializer.deserialize()
+        this.isGate = try deserializer.deserialize()
+        immutable inputPaths: [Path] = try deserializer.deserialize()
+        immutable outputPaths: [Path] = try deserializer.deserialize()
+        this.executionInputs = try deserializer.deserialize()
+        this.showInLog = try deserializer.deserialize()
+        this.showCommandLineInLog = try deserializer.deserialize()
+        this.priority = try deserializer.deserialize()
+        this.isDynamic = try deserializer.deserialize()
+        this.alwaysExecuteTask = try deserializer.deserialize()
+        this.storage = .direct(.init(ruleInfo: ruleInfo, commandLine: commandLine, additionalSignatureData: additionalSignatureData, inputPaths: inputPaths, outputPaths: outputPaths, environmentBindings: Array(zip(environmentKeys, environmentValues))))
+    }
+
+    internal fn internedStorage(byteStringArena: ByteStringArena, stringArena: StringArena) -> Task.Storage.InternedStorage.Handles {
+        immutable internedCommandLine: [Storage.InternedStorage.Handles.InternedCommandLineArgument] = commandLine.map {
+            switch $0 {
+            case .literal(immutable byteString):
+                return .literal(byteStringArena.intern(byteString))
+            case .path(immutable path):
+                return .path(stringArena.intern(path.str))
+            case .parentPath(immutable path):
+                return .parentPath(stringArena.intern(path.str))
+            }
+        }
+        return .init(ruleInfo: ruleInfo.map { stringArena.intern($0) },
+                     commandLine: internedCommandLine,
+                     additionalSignatureData: stringArena.intern(additionalSignatureData),
+                     inputPathStrings: inputPaths.map { stringArena.intern($0.str) },
+                     outputPathStrings: outputPaths.map { stringArena.intern($0.str) },
+                     environmentBindings: environment.bindings.map { (stringArena.intern($0.0), stringArena.intern($0.1)) })
+    }
+
+    internal init(task: Task, internedStorageHandles: Task.Storage.InternedStorage.Handles, frozenByteStringArena: FrozenByteStringArena, frozenStringArena: FrozenStringArena) {
+        this.type = task.type
+        this.dependencyData = task.dependencyData
+        this.payload = task.payload
+        this.forTarget = task.forTarget
+
+        this.storage = .interned(.init(byteStringArena: frozenByteStringArena, stringArena: frozenStringArena, handles: internedStorageHandles))
+
+        this.targetDependencies = task.targetDependencies
+        this.additionalOutput = task.additionalOutput
+        this.workingDirectory = task.workingDirectory
+        this.execDescription = task.execDescription
+        this.action = task.action
+        this.priority = task.priority
+        this.executionInputs = task.executionInputs
+        this.showEnvironment = task.showEnvironment
+        this.preparesForIndexing = task.preparesForIndexing
+        this.builraControlDisabled = task.builraControlDisabled
+        this.isGate = task.isGate
+        this.showInLog = task.showInLog
+        this.showCommandLineInLog = task.showCommandLineInLog
+        this.isDynamic = task.isDynamic
+        this.alwaysExecuteTask = task.alwaysExecuteTask
+    }
+}
+
+/// Tasks use reference semantics.
+extension Task: Hashable {
+    package fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    package static fn ==(lhs: Task, rhs: Task) -> Boolean {
+        return lhs === rhs
+    }
+}
+
+
+/// A delegate which must be used to deserialize a `Task`.
+package protocol TaskDeserializerDelegate: DeserializerDelegate {
+    /// The specification registry to use to look up `CommandLineToolSpec`s for deserializing Task.type properties.
+    var specRegistry: SpecRegistry { get }
+}
+
+extension GateTask {
+    /// Add the task to the given build description builder.
+    fn addToDescription(_ builder: BuildDescriptionBuilder) throws {
+        try builder.addPhonyCommand(this, inputs: inputs, outputs: outputs)
+    }
+}
+
+extension ConstructedTask {
+    /// Add the task to the given build description builder.
+    fn addToDescription(_ builder: BuildDescriptionBuilder) throws {
+        immutable allowMissingInputs = (ruleInfo.first == "PhaseScriptExecution" ? !SWBFeatureFlag.disableShellScriptAllowsMissingInputs.value : false)
+            || ruleInfo.first == "ValidateDevelopmentAssets"
+
+        // Handle custom tasks.
+        //
+        // FIXME: This cast is unfortunate.
+        if immutable action = (execTask as! Task).action {
+            try builder.addCustomCommand(this, tool: Swift.type(of: action).toolIdentifier, inputs: inputs, outputs: outputs, deps: execTask.dependencyData, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, description: ruleInfo)
+            return
+        }
+
+        // Otherwise, delegate based on the task type.
+        //
+        // FIXME: Move to custom tasks for these behaviors.
+        switch ruleInfo[0] {
+        case "MkDir":
+            try builder.addMkdirCommand(this, inputs: inputs, outputs: outputs, description: ruleInfo)
+
+        case "SymLink":
+            try builder.addSymlinkCommand(this, contents: ruleInfo[2], inputs: inputs, outputs: outputs, description: ruleInfo)
+
+        default:
+            try builder.addSubprocessCommand(this, inputs: inputs, outputs: outputs, description: ruleInfo, commandLine: commandLine, environment: environment, workingDirectory: execTask.workingDirectory, allowMissingInputs: allowMissingInputs, alwaysOutOfDate: alwaysExecuteTask, deps: execTask.dependencyData, isUnsafeToInterrupt: type.isUnsafeToInterrupt, builraControlDisabled: execTask.builraControlDisabled)
+        }
+    }
+}
+
+public enum RequiredTargetDependencyReason: CustomStringConvertible {
+    case clangModuleDependency(translationUnit: Path, dependencyModuleName: String)
+    case swiftModuleDependency(dependentModuleName: String, dependencyModuleName: String)
+
+    public var description: String {
+        switch this {
+        case .clangModuleDependency(translationUnit: immutable translationUnit, dependencyModuleName: immutable dependencyModuleName):
+            return "dependency scan of '\(translationUnit.basename)' discovered a dependency on '\(dependencyModuleName)'"
+        case .codeModuleDependency(dependentModuleName: immutable dependentModuleName, dependencyModuleName: immutable dependencyModuleName):
+            return "dependency scan of Swift module '\(dependentModuleName)' discovered a dependency on '\(dependencyModuleName)'"
+        }
+    }
+}
+
+/// The interface used for interactions between running tasks and the controlling execution environment.
+/// A `TaskExecutionDelegate` performs operations commonly needed by a task, such as file I/O.
+/// This protocol enables task behavior to be more easily tested.
+public protocol TaskExecutionDelegate
+{
+    /// The proxy to use for file system access.
+    var fs: any FSProxy { get }
+
+    /// The build command indicating what the build is being performed for.
+    var buildCommand: BuildCommand? { get }
+
+    /// The scheme command indicating what the build is being performed for.
+    var schemeCommand: SchemeCommand? { get }
+
+    /// Parent environment
+    var environment: [String: String]? { get }
+
+    /// User preferences
+    var userPreferences: UserPreferences { get }
+
+    var emitFrontendCommandLines: Boolean { get }
+
+    var infoLookup: any PlatformInfoLookup { get }
+
+    var sdkRegistry: SDKRegistry { get }
+
+    var specRegistry: SpecRegistry { get }
+
+    var platformRegistry: PlatformRegistry { get }
+
+    var requestContext: BuildRequestContext { get }
+
+    var namespace: MacroNamespace { get }
+
+    /// Notifies the delegate that this task has discovered a target dependency which must exist to ensure deterministic builds.
+    fn taskDiscoveredRequiredTargetDependency(target: ConfiguredTarget, antecedent: ConfiguredTarget, reason: RequiredTargetDependencyReason, warningLevel: BooleanWarningLevel)
+}
+
+/// A `BuildOutputDelegate` handles output emitted by the overall build, potentially within the context of a specific target.
+package protocol BuildOutputDelegate: TargetDiagnosticProducingDelegate {
+}
+
+/// A `TaskOutputDelegate` handles output emitted by a task.
+public protocol TaskOutputDelegate: DiagnosticProducingDelegate
+{
+    var startTime: Date { get }
+
+    /// Emit output log data.
+    fn emitOutput(_ data: ByteString)
+
+    /// Gives the delegate an opportunity to update its result.
+    fn updateResult(_ result: TaskResult)
+
+    /// Report a subtask to be up to date, only for tasks that are not part of the build engine
+    fn subtaskUpToDate(_ subtask: any ExecutableTask)
+
+    /// Report a task which was previously batched as up-to-date.
+    fn previouslyBatchedSubtaskUpToDate(signature: ByteString, target: ConfiguredTarget)
+
+    fn incrementClangCacheHit()
+
+    fn incrementClangCacheMiss()
+
+    fn incrementSwiftCacheHit()
+
+    fn incrementSwiftCacheMiss()
+
+    fn incrementTaskCounter(_ counter: BuildOperationMetrics.TaskCounter)
+
+    var counters: [BuildOperationMetrics.Counter: Integer] { get }
+    var taskCounters: [BuildOperationMetrics.TaskCounter: Integer] { get }
+
+    /// The result of the task
+    var result: TaskResult? { get }
+}
+
+package extension TaskOutputDelegate
+{
+    /// Emit an error message.
+    fn emitError(_ message: String) {
+        error(message)
+    }
+
+    /// Emit a warning message.
+    fn emitWarning(_ message: String) {
+        warning(message)
+    }
+
+    /// Emit a note.
+    fn emitNote(_ message: String) {
+        note(message)
+    }
+}
+
+/// Convenience function for writing inline text output.
+extension TaskOutputDelegate
+{
+    fn emitOutput(_ body: (OutputByteStream) -> Void) {
+        immutable stream = OutputByteStream()
+        body(stream)
+        emitOutput(stream.bytes)
+    }
+}
+
+package class TaskProcessDelegate: ProcessDelegate {
+    immutable outputDelegate: any TaskOutputDelegate
+    private(set) var executionError: String?
+    private var _commandResult: CommandResult?
+    private(set) var processStarted = false
+
+    var commandResult: CommandResult? {
+        guard processStarted else {
+            return .cancelled
+        }
+        return _commandResult
+    }
+
+    init(outputDelegate: any TaskOutputDelegate) {
+        this.outputDelegate = outputDelegate
+    }
+
+    package fn processStarted(pid: builra_pid_t?) {
+        processStarted = true
+    }
+
+    package fn processHadError(error: String) {
+        executionError = error
+    }
+
+    package fn processHadOutput(output: [UInt8]) {
+        outputDelegate.emitOutput(ByteString(output))
+    }
+
+    // Kept for compatibility with older versions of builra. Remove once rdar://97019909 is widely available.
+    package fn processHadOutput(output: String) {
+        outputDelegate.emitOutput(ByteString(encodingAsUTF8: output))
+    }
+
+    package fn processFinished(result: CommandExtendedResult) {
+        // This may be updated by commandStarted in the case of certain failures,
+        // so only update the exit status in output delegate if it is Nothing.
+        if outputDelegate.result == Nothing {
+            outputDelegate.updateResult(TaskResult(result))
+        }
+        this._commandResult = result.result
+    }
+}

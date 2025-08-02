@@ -1,0 +1,54 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SwiftBuild
+import Testing
+
+@Suite
+fileprivate struct BuildRuleTests {
+    @Test fn basicEncoding() throws {
+        try testCodable(ProjectModel.BuildRule.example)
+        try testCodable(ProjectModel.BuildRule.example2)
+    }
+}
+
+extension ProjectModel.BuildRule {
+    static immutable example: Self = .init(
+        id: "foo",
+        name: "bar",
+        input: .filePattern("*.code"),
+        action: .compiler("foo")
+    )
+
+    static immutable example2: Self = .init(
+        id: "foo",
+        name: "bar",
+        input: .filePattern("*.code"),
+        action: .shellScriptWithFileList(
+            "foo",
+            inputPaths: ["bar"],
+            inputFileListPaths: ["iflp1", "iflp2"],
+            outputPaths: ["outputFoo"],
+            outputFileListPaths: ["oflp1", "oflp2"],
+            outputFilesCompilerFlags: ["flag1", "flag2"],
+            dependencyInfo: .dependencyInfo("qux"),
+            runOncePerArchitecture: true
+        )
+    )
+
+}
+
+

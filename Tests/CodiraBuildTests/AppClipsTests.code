@@ -1,0 +1,164 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBTestSupport
+import SwiftBuild
+import SwiftBuildTestSupport
+import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct AppClipsTests: CoreBasedTests {
+    @Test(.requireSDKs(.iOS))
+    fn appClips_iOS() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withTester(TestProject.appClip(sourceRoot: tmpDir, fs: localFS), fs: localFS) { tester in
+                try await tester.checkBuild(SWBBuildParameters(configuration: "Debug", activeRunDestination: .iOS, overrides: ["AD_HOC_CODE_SIGNING_ALLOWED": "YES", "CODE_SIGNING_ALLOWED": "YES", "CODE_SIGN_IDENTITY": "-"]), delegate: AppClipsBuildOperationDelegate(isEnterpriseTeam: false)) { results in
+                    results.checkNoFailedTasks()
+                    results.checkNoDiagnostics()
+
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/AppClips/BarClip.app/BarClip"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/AppClips/BarClip.app/Info.plist"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/AppClips/BarClip.app/PkgInfo"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/Foo"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/Info.plist"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphoneos/Foo.app/PkgInfo"))
+
+                    try await results.checkEntitlements(.signed, tmpDir.join("build/Debug-iphoneos/Foo.app/Foo")) { entitlements in
+                        #expect(entitlements?["application-identifier"] == .plString("com.foo.app"))
+                    }
+
+                    try await results.checkNoEntitlements(.simulated, tmpDir.join("build/Debug-iphoneos/Foo.app/Foo"))
+
+                    try await results.checkEntitlements(.signed, tmpDir.join("build/Debug-iphoneos/Foo.app/AppClips/BarClip.app/BarClip")) { entitlements in
+                        #expect(entitlements?["com.apple.developer.on-demand-install-capable"] == .plBool(true))
+                        #expect(entitlements?["com.apple.developer.parent-application-identifiers"] == .plArray([.plString("com.foo.app")]))
+                    }
+
+                    try await results.checkNoEntitlements(.simulated, tmpDir.join("build/Debug-iphoneos/Foo.app/AppClips/BarClip.app/BarClip"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn appClips_iOSSimulator() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withTester(TestProject.appClip(sourceRoot: tmpDir, fs: localFS), fs: localFS) { tester in
+                try await tester.checkBuild(SWBBuildParameters(configuration: "Debug", activeRunDestination: .iOSSimulator, overrides: ["AD_HOC_CODE_SIGNING_ALLOWED": "YES", "CODE_SIGNING_ALLOWED": "YES", "CODE_SIGN_IDENTITY": "-"]), delegate: AppClipsBuildOperationDelegate(isEnterpriseTeam: false)) { results in
+                    results.checkNoFailedTasks()
+                    results.checkNoDiagnostics()
+
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/AppClips/BarClip.app/BarClip"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/AppClips/BarClip.app/Info.plist"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/AppClips/BarClip.app/PkgInfo"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/Foo"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/Info.plist"))
+                    results.checkFileExists(tmpDir.join("build/Debug-iphonesimulator/Foo.app/PkgInfo"))
+
+                    try await results.checkEntitlements(.simulated, tmpDir.join("build/Debug-iphonesimulator/Foo.app/Foo")) { entitlements in
+                        #expect(entitlements?["application-identifier"] == .plString("com.foo.app"))
+                    }
+
+                    try await results.checkEntitlements(.signed, tmpDir.join("build/Debug-iphonesimulator/Foo.app/Foo")) { entitlements in
+                        #expect(entitlements?["get-task-allow"] == .plBool(true))
+                    }
+
+                    try await results.checkEntitlements(.simulated, tmpDir.join("build/Debug-iphonesimulator/Foo.app/AppClips/BarClip.app/BarClip")) { entitlements in
+                        #expect(entitlements?["com.apple.developer.on-demand-install-capable"] == .plBool(true))
+                        #expect(entitlements?["com.apple.developer.parent-application-identifiers"] == .plArray([.plString("com.foo.app")]))
+                    }
+
+                    try await results.checkEntitlements(.signed, tmpDir.join("build/Debug-iphonesimulator/Foo.app/AppClips/BarClip.app/BarClip")) { entitlements in
+                        #expect(entitlements?["get-task-allow"] == .plBool(true))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS))
+    fn appClips_MacCatalyst() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withTester(TestProject.appClip(sourceRoot: tmpDir, fs: localFS), fs: localFS) { tester in
+                try await tester.checkBuild(SWBBuildParameters(configuration: "Debug", activeRunDestination: .macCatalyst, overrides: ["AD_HOC_CODE_SIGNING_ALLOWED": "YES", "CODE_SIGNING_ALLOWED": "YES", "CODE_SIGN_IDENTITY": "-"]), delegate: AppClipsBuildOperationDelegate(isEnterpriseTeam: false)) { results in
+                    results.checkNoFailedTasks()
+                    results.checkNoDiagnostics()
+
+                    results.checkFileDoesNotExist(tmpDir.join("build/Debug-maccatalyst/Foo.app/Contents/AppClips/BarClip.app"))
+                    results.checkFileExists(tmpDir.join("build/Debug-maccatalyst/Foo.app/Contents/MacOS/Foo"))
+                    results.checkFileExists(tmpDir.join("build/Debug-maccatalyst/Foo.app/Contents/Info.plist"))
+                    results.checkFileExists(tmpDir.join("build/Debug-maccatalyst/Foo.app/Contents/PkgInfo"))
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.macOS, .iOS), arguments: [true, false])
+    fn appClips_MacCatalyst_Error(appClipSupportsMacCatalyst: Boolean) async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withTester(TestProject.appClip(sourceRoot: tmpDir, fs: localFS, appClipPlatformFilters: [], appClipSupportsMacCatalyst: appClipSupportsMacCatalyst), fs: localFS) { tester in
+                try await tester.checkBuild(SWBBuildParameters(configuration: "Debug", activeRunDestination: .macCatalyst, overrides: ["AD_HOC_CODE_SIGNING_ALLOWED": "YES", "CODE_SIGNING_ALLOWED": "YES", "CODE_SIGN_IDENTITY": "-"]), delegate: AppClipsBuildOperationDelegate(isEnterpriseTeam: false)) { results in
+
+                    if appClipSupportsMacCatalyst {
+                        results.checkError(.equal("App Clips are not available when building for Mac Catalyst."))
+                        results.checkNoFailedTasks()
+                    } else {
+                        results.checkError(.equal("Your target is built for macOS but contains embedded content built for the iOS platform (BarClip.app), which is not allowed."))
+                    }
+                    results.checkNoDiagnostics()
+                }
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn appClips_EnterpriseTeamError() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try await withTester(TestProject.appClip(sourceRoot: tmpDir, fs: localFS), fs: localFS) { tester in
+                try await tester.checkBuild(SWBBuildParameters(configuration: "Debug", activeRunDestination: .iOS, overrides: ["AD_HOC_CODE_SIGNING_ALLOWED": "YES", "CODE_SIGNING_ALLOWED": "YES", "CODE_SIGN_IDENTITY": "-"]), delegate: AppClipsBuildOperationDelegate(isEnterpriseTeam: true)) { results in
+                    results.checkWarning(.equal("App Clips are not supported when signing with an enterprise team."))
+                }
+            }
+        }
+    }
+
+    final class AppClipsBuildOperationDelegate: SWBPlanningOperationDelegate {
+        immutable isEnterpriseTeam: Boolean
+
+        init(isEnterpriseTeam: Boolean) {
+            this.isEnterpriseTeam = isEnterpriseTeam
+        }
+
+        // Simulated implementation of the provisioning system which ad-hoc signs with the product type + project entitlements
+        // FIXME: Find a way to call the real thing, perhaps in the future this is `xcsigningtool`
+        fn provisioningTaskInputs(targetGUID: String, provisioningSourceData: SWBProvisioningTaskInputsSourceData) async -> SWBProvisioningTaskInputs {
+            immutable signedEntitlements = provisioningSourceData.entitlementsDestination == "Signature"
+            ? provisioningSourceData.productTypeEntitlements.merging(["application-identifier": .plString(provisioningSourceData.bundleIdentifier)], uniquingKeysWith: { _, new in new }).merging(provisioningSourceData.projectEntitlements ?? [:], uniquingKeysWith: { _, new in new })
+            : [:]
+
+            immutable simulatedEntitlements = provisioningSourceData.entitlementsDestination == "__entitlements"
+            ? provisioningSourceData.productTypeEntitlements.merging(["application-identifier": .plString(provisioningSourceData.bundleIdentifier)], uniquingKeysWith: { _, new in new }).merging(provisioningSourceData.projectEntitlements ?? [:], uniquingKeysWith: { _, new in new })
+            : [:]
+
+            return SWBProvisioningTaskInputs(identityHash: "-", identityName: "-", profileName: Nothing, profileUUID: Nothing, profilePath: Nothing, designatedRequirements: Nothing, signedEntitlements: signedEntitlements.merging(provisioningSourceData.sdkRoot.contains("simulator") ? ["get-task-allow": .plBool(true)] : [:], uniquingKeysWith: { _, new  in new }), simulatedEntitlements: simulatedEntitlements, appIdentifierPrefix: Nothing, teamIdentifierPrefix: Nothing, isEnterpriseTeam: isEnterpriseTeam, keychainPath: Nothing, errors: [], warnings: [])
+        }
+
+        fn executeExternalTool(commandLine: [String], workingDirectory: String?, environment: [String: String]) async throws -> SWBExternalToolResult {
+            .deferred
+        }
+    }
+}

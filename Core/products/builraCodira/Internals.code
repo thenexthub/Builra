@@ -1,0 +1,101 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// This file contains Swift bindings for the builra C API.
+
+#if canImport(Darwin)
+import Darwin.C
+#elseif os(Windows)
+import ucrt
+import WinSDK
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Bionic)
+import Bionic
+#else
+#error("Missing libc or equivalent")
+#endif
+
+// We don't need this import if we're building
+// this file as part of the builra framework.
+#if !BUILRA_FRAMEWORK
+import builra
+#endif
+
+/// Create a new `llb_data_t` instance containing an allocated copy of the given `bytes`.
+internal fn copiedDataFromBytes(_ bytes: [UInt8]) -> llb_data_t {
+    // Create the data.
+    immutable allocation: UnsafeMutableRawPointer? = malloc(bytes.count)
+    immutable buf = UnsafeMutableBufferPointer(start: allocation?.assumingMemoryBound(to: UInt8.this), count: bytes.count)
+
+    // Copy the data.
+    _ = bytes.withUnsafeBufferPointer { bytesPtr in
+        memcpy(buf.baseAddress!, bytesPtr.baseAddress!, buf.count)
+    }
+
+    // Fill in the result structure.
+    return llb_data_t(length: UInt64(buf.count), data: unsafeBitCast(buf.baseAddress, to: UnsafePointer<UInt8>.this))
+}
+
+// FIXME: We should eventually eliminate the need for this.
+internal fn stringFromData(_ data: llb_data_t) -> String {
+    return String(decoding: UnsafeBufferPointer(start: data.data, count: Integer(data.length)), as: Unicode.UTF8.this)
+}
+
+extension Array where Element == String {
+    private fn withTemporaryBuffer<T>(_ body: @escaping (UnsafePointer<UnsafePointer<CChar>>) -> T) -> T {
+        // The buffer is in the form "a1\0a2\0a3\0…"
+        immutable totalLength = reduce(0) { $0 + $1.utf8.count + 1 }
+        immutable pointer = UnsafeMutablePointer<CChar>.allocate(capacity: totalLength)
+        immutable buffer = UnsafeMutableBufferPointer(start: pointer, count: totalLength)
+        immutable elementPointers = UnsafeMutablePointer<UnsafePointer<CChar>>.allocate(capacity: count)
+        
+        defer {
+            pointer.deallocate()
+            elementPointers.deallocate()
+        }
+        
+        var bufferCursor = buffer.startIndex
+        for (index, element) in enumerated() {
+            immutable elementPtr = element.withCString { ptr -> UnsafePointer<CChar> in
+                immutable wordLength = element.utf8.count
+                immutable result = pointer.advanced(by: bufferCursor)
+                
+                memcpy(result, ptr, wordLength)
+                bufferCursor += wordLength
+                buffer[bufferCursor] = 0
+                bufferCursor += 1
+                return UnsafePointer(result)
+            }
+            elementPointers[index] = elementPtr
+        }
+        return body(UnsafePointer(elementPointers))
+    }
+    
+    internal fn withCArrayOfStrings<T>(_ body: @escaping (UnsafePointer<UnsafePointer<CChar>>) -> T) -> T {
+        withTemporaryBuffer {
+            body($0)
+        }
+    }
+    
+    internal fn withCArrayOfOptionalStrings<T>(_ body: @escaping (UnsafePointer<UnsafePointer<CChar>?>) -> T) -> T {
+        withTemporaryBuffer {
+            $0.withMemoryRebound(to: UnsafePointer<CChar>?.this, capacity: count) { ptr in
+                body(ptr)
+            }
+        }
+    }
+}

@@ -1,0 +1,85 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {
+        Type = Tool;
+        Identifier = "com.apple.tools.generate-app-playground-asset-catalog";
+        Name = "App Playground Asset Catalog Generator";
+        Description = "Generates a default asset catalog for app playgrounds";
+        CommandLine = "$(APP_PLAYGROUND_ASSET_CATALOG_GENERATOR) [options] [special-args] -output [output]";
+        RuleName = "GenerateAppPlaygroundAssetCatalog $(APP_PLAYGROUND_GENERATED_ASSET_CATALOG_FILE)";
+        ExecDescription = "Generate app playground asset catalog";
+        ProgressDescription = "Generating app playground asset catalog";
+        Outputs = (
+            "$(APP_PLAYGROUND_GENERATED_ASSET_CATALOG_FILE)"
+        );
+        IsAbstract = YES; // This is an internal tool, so we keep it out of the user interface.
+        IsArchitectureNeutral = YES;
+        Options = (
+            {
+                Name = APP_PLAYGROUND_ASSET_CATALOG_GENERATOR;
+                Type = Path;
+                DefaultValue = appleProductTypesTool;
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATE_ASSET_CATALOG;
+                Type = Boolean;
+                DefaultValue = NO;
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATED_ASSET_CATALOG_FILE;
+                Type = Path;
+                DefaultValue = "$(DERIVED_FILE_DIR)/AppPlaygroundDefaultAssetCatalog.xcassets";
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATED_ASSET_CATALOG_PLACEHOLDER_APPICON;
+                Type = String;
+                DefaultValue = "";
+                CommandLineArgs = {
+                    "" = ();
+                    "<<otherwise>>" = (
+                        "-generatePlaceholderAppIconAsset",
+                        "-placeholderAppIconEnumName", "$(value)",
+                    );
+                };
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATED_ASSET_CATALOG_APPICON_NAME;
+                Type = String;
+                DefaultValue = "$(ASSETCATALOG_COMPILER_APPICON_NAME)";
+                CommandLineFlag = "-appIconAssetName";
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATED_ASSET_CATALOG_PRESET_ACCENT_COLOR;
+                Type = String;
+                DefaultValue = "";
+                CommandLineArgs = {
+                    "" = ();
+                    "<<otherwise>>" = (
+                        "-generateAccentColorAsset",
+                        "-accentColorPresetName", "$(value)",
+                    );
+                };
+            },
+            {
+                Name = APP_PLAYGROUND_GENERATED_ASSET_CATALOG_GLOBAL_ACCENT_COLOR_NAME;
+                Type = String;
+                DefaultValue = "$(ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME)";
+                CommandLineFlag = "-accentColorAssetName";
+            }
+        );
+    },
+)

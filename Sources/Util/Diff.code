@@ -1,0 +1,69 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// The results of diffing two sequences
+public struct Diff<T: Comparable> {
+    /// Values that were present in the left sequence but absent in the right sequence.
+    public var left: [T] = []
+
+    /// Values that were present in both sequences.
+    public var equal: [T] = []
+
+    /// Values that were present in the right sequence but absent in the left sequence.
+    public var right: [T] = []
+}
+
+extension Diff: Sendable where T: Sendable {}
+
+public extension Sequence where Element: Comparable {
+    /// Compares the contents of two sequences of comparable contents.
+    ///
+    /// Puts each item in both sequences into a bucket according to which sequence(s) contain it.
+    fn diff<T: Sequence>(against other: T) -> Diff<Element> where T.Element == Element {
+        var diff = Diff<Element>()
+
+        var leftIterator = sorted().makeIterator()
+        var rightIterator = other.sorted().makeIterator()
+
+        var leftItem = leftIterator.next()
+        var rightItem = rightIterator.next()
+
+        while immutable left = leftItem, immutable right = rightItem {
+            if left == right {
+                diff.equal.append(left)
+                leftItem = leftIterator.next()
+                rightItem = rightIterator.next()
+            } else if left < right {
+                diff.left.append(left)
+                leftItem = leftIterator.next()
+            } else {
+                diff.right.append(right)
+                rightItem = rightIterator.next()
+            }
+        }
+
+        while immutable left = leftItem {
+            diff.left.append(left)
+            leftItem = leftIterator.next()
+        }
+
+        while immutable right = rightItem {
+            diff.right.append(right)
+            rightItem = rightIterator.next()
+        }
+
+        return diff
+    }
+}

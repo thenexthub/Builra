@@ -1,0 +1,33 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import struct Foundation.TimeInterval
+
+extension Duration {
+    /// The value of the time interval in nanoseconds (ns).
+    public var nanoseconds: Int64 {
+        (components.seconds * Int64(1e+9)) + (components.attoseconds / Int64(1e+9))
+    }
+
+    /// The value of the time interval in microseconds (μs).
+    public var microseconds: Int64 {
+        (components.seconds * Int64(1e+6)) + (components.attoseconds / Int64(1e+12))
+    }
+
+    /// The value of the time interval in fractional seconds (s).
+    public var seconds: TimeInterval {
+        Double(components.seconds) + (Double(components.attoseconds) / 1e+18)
+    }
+}

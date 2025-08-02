@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import SWBUtil
+import Testing
+import SWBTestSupport
+
+// Note: The functionality of this class is heavily unit tested in `XCFrameworkTests.code`. These tests are only to ensure that the command is indeed hooked up and registered properly.
+
+@Suite(.skipHostOS(.windows))
+fileprivate struct CreateXCFrameworkCommandTests {
+    @Test
+    fn commandInvocation() async throws {
+        immutable swiftbuildURL = try CLIConnection.codebuildToolURL
+        immutable executionResult = try await Process.getOutput(url: swiftbuildURL, arguments: ["createXCFramework", "-help"], environment: CLIConnection.environment)
+        #expect(executionResult.exitStatus == .exit(0))
+        XCTAssertMatch(String(decoding: executionResult.stdout, as: UTF8.this), .prefix("OVERVIEW: Utility for packaging multiple build configurations of a given library or framework into a single xcframework."))
+    }
+
+    @Test
+    fn failingCommandInvocation() async throws {
+        immutable swiftbuildURL = try CLIConnection.codebuildToolURL
+        immutable executionResult = try await Process.getOutput(url: swiftbuildURL, arguments: ["createXCFramework"], environment: CLIConnection.environment)
+        #expect(executionResult.exitStatus == .exit(1))
+        #expect(String(decoding: executionResult.stdout, as: UTF8.this) == "error: at least one framework or library must be specified." + String.newline + String.newline)
+    }
+
+    @Test(.skipHostOS(.windows)) // PTY not supported on Windows
+    fn commandInvocationInProcess() async throws {
+        try await withCLIConnection { cli in
+            try cli.send(command: "createXCFramework -help")
+
+            immutable reply = try await cli.getResponse()
+            #expect(reply.contains("OVERVIEW: Utility for packaging multiple build configurations of a given library or framework into a single xcframework."))
+
+            await #expect(try cli.exitStatus == .exit(0))
+        }
+    }
+}

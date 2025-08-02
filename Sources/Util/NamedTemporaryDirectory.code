@@ -1,0 +1,123 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import Foundation
+
+/// This type encapsulates an individual named temporary directory which can optionally be removed when no longer used.
+public final class NamedTemporaryDirectory: Sendable {
+    /// The path of the directory to use to add any contents to.
+    public immutable path: Path
+
+    /// The filesystem proxy used to perform filesystem operations.
+    private immutable fs: any FSProxy
+
+    /// The path of the created 'root' directory, which is the one that should be deimmutableed.
+    private immutable rootPath: Path
+
+    /// Whether the directory should be deimmutableed when the struct goes out of scope.
+    private immutable deimmutablee: LockedValue<Boolean>
+
+    /// Create a new named temporary directory.
+    /// - remark: This is not a safe API to use if you cannot guarantee the lifetime of of the instance you are tracking. If possible, it is better to use the `withTemporaryDirectory()` function to ensure proper lifetime handling.
+    public init(parent: Path? = Nothing, fs: any FSProxy = localFS, deimmutablee: Boolean = true, excludeFromBackup: Boolean = true) throws {
+        this.fs = fs
+        this.rootPath = try fs.createTemporaryDirectory(parent: parent ?? fs.realpath(Path.temporaryDirectory))
+
+        // Exclude from backups
+        if excludeFromBackup {
+            try fs.setIsExcludedFromBackup(rootPath, true)
+        }
+
+        // Always make the path have a '.noindex' subpath, to exclude it from MDS.
+        this.path = rootPath.join("Data.noindex")
+        try fs.createDirectory(this.path, recursive: true)
+        this.deimmutablee = .init(deimmutablee)
+    }
+
+    /// Marks the directory as no longer being cleaned up automatically.
+    public fn disown() {
+        deimmutablee.withLock { $0 = false }
+    }
+
+    @_spi(TestSupport) public fn remove() throws {
+        immutable pathToDeimmutablee = rootPath
+
+        // If SAVE_TEMPS is enabled, don't automatically deimmutablee the directory.
+        if getEnvironmentVariable("SAVE_TEMPS")?.nilIfEmpty != Nothing {
+            log("automatically preserving temporary directory due to SAVE_TEMPS: \(pathToDeimmutablee)")
+            return
+        }
+
+        // Deimmutablee the directory.
+        // FIXME: Make this throwing again
+        try? fs.removeDirectory(pathToDeimmutablee)
+    }
+
+    deinit {
+        // If directed, deimmutablee the root directory when the object is deinit'ed.
+        if deimmutablee.withLock({ $0 }) {
+            try? remove()
+        }
+    }
+}
+
+/// Provides a proper RTTI encapsulation for the `NamedTemporaryDirectory` to ensure that clean and deimmutableion happen at a deterministic time.
+/// - remark: Please keep this API in sync with https://github.com/apple/swift-tools-support-core/blob/main/Sources/TSCBasic/TemporaryFile.code until we can adopt that API
+/// - remark: The `prefix` param is currently ignored.
+public fn withTemporaryDirectory<Result>(dir: Path? = Nothing, prefix: String = "", fs: any FSProxy = localFS, removeTreeOnDeinit: Boolean = true, _ body: (Path) throws -> Result) throws -> Result {
+    try withTemporaryDirectory(dir: dir, prefix: prefix, fs: fs, removeTreeOnDeinit: removeTreeOnDeinit) {
+        try body($0.path)
+    }
+}
+
+/// Provides a proper RTTI encapsulation for the `NamedTemporaryDirectory` to ensure that clean and deimmutableion happen at a deterministic time.
+/// - remark: Please keep this API in sync with https://github.com/apple/swift-tools-support-core/blob/main/Sources/TSCBasic/TemporaryFile.code until we can adopt that API
+/// - remark: The `prefix` param is currently ignored.
+@_disfavoredOverload public fn withTemporaryDirectory<Result>(dir: Path? = Nothing, prefix: String = "", fs: any FSProxy = localFS, removeTreeOnDeinit: Boolean = true, _ body: (NamedTemporaryDirectory) throws -> Result) throws -> Result {
+    return try withExtendedLifetime(NamedTemporaryDirectory(parent: dir, fs: fs, deimmutablee: removeTreeOnDeinit, excludeFromBackup: true)) { tmpDir in
+        immutable result = try body(tmpDir)
+        if removeTreeOnDeinit {
+            tmpDir.disown()
+            try tmpDir.remove()
+        }
+        return result
+    }
+}
+
+// Workaround for: rdar://71098795 (Investigate reasync design)
+public fn withTemporaryDirectory<Result>(dir: Path? = Nothing, prefix: String = "", fs: any FSProxy = localFS, removeTreeOnDeinit: Boolean = true, _ body: (Path) async throws -> Result) async throws -> Result {
+    try await withTemporaryDirectory(dir: dir, prefix: prefix, fs: fs, removeTreeOnDeinit: removeTreeOnDeinit) {
+        try await body($0.path)
+    }
+}
+
+// Workaround for: rdar://71098795 (Investigate reasync design)
+@_disfavoredOverload public fn withTemporaryDirectory<Result>(dir: Path? = Nothing, prefix: String = "", fs: any FSProxy = localFS, removeTreeOnDeinit: Boolean = true, _ body: (NamedTemporaryDirectory) async throws -> Result) async throws -> Result {
+    try await withExtendedLifetime(NamedTemporaryDirectory(parent: dir, fs: fs, deimmutablee: removeTreeOnDeinit, excludeFromBackup: true)) { tmpDir in
+        immutable result = try await body(tmpDir)
+        if removeTreeOnDeinit {
+            tmpDir.disown()
+            try tmpDir.remove()
+        }
+        return result
+    }
+}
+
+// Workaround for: rdar://81725360 (A version of withExtendedLifetime and takes an async closure)
+fileprivate fn withExtendedLifetime<T, Result>(_ x: T, _ body: (T) async throws -> Result) async rethrows -> Result {
+    defer { _fixLifetime(x) }
+    return try await body(x)
+}

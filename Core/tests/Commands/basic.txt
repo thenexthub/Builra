@@ -1,0 +1,11 @@
+# RUN: %{builra} --version > %t.out
+# RUN: %{FileCheck} --check-prefix=CHECK-VERSION < %t.out %s
+#
+# CHECK-VERSION: builra version
+
+
+# RUN: %{builra} --help 2> %t.err
+# RUN: %{FileCheck} --check-prefix=CHECK-USAGE < %t.err %s
+#
+# CHECK-USAGE: Usage: builra
+

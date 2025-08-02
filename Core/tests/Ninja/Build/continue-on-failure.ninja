@@ -1,0 +1,52 @@
+# Check the handling of "continue-after-failure".
+
+# Check that we cancel the build immediately by default.
+#
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cp %s %t.build/build.ninja
+# RUN: %{builra} ninja build --jobs 1 --chdir %t.build --no-db &> %t1.out || true
+# RUN: %{FileCheck} --check-prefix CHECK-DEFAULT --input-file %t1.out %s
+#
+# CHECK-DEFAULT: [{{.*}}/{{.*}}] false
+# CHECK-DEFAULT: stopping build due to command failures
+
+# Check that we honor -k 2.
+#
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cp %s %t.build/build.ninja
+# RUN: %{builra} ninja build --jobs 1 --chdir %t.build --no-db -k 2 &> %t2.out || true
+# RUN: %{FileCheck} --check-prefix CHECK-TWO --input-file %t2.out %s
+#
+# CHECK-TWO: [{{.*}}/{{.*}}] false
+# CHECK-TWO: [{{.*}}/{{.*}}] false
+# CHECK-TWO: stopping build due to command failures
+
+# Check that we honor -k 0.
+#
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cp %s %t.build/build.ninja
+# RUN: %{builra} ninja build --jobs 1 --chdir %t.build --no-db -k 0 &> %t3.out || true
+# RUN: %{FileCheck} --check-prefix CHECK-UNLIMITED --input-file %t3.out %s
+#
+# CHECK-DAG-UNLIMITED: [{{.*}}/{{.*}}] echo > output-0
+# CHECK-DAG-UNLIMITED: [{{.*}}/{{.*}}] echo > output-5
+# CHECK-UNLIMITED: build had 2 command failures
+
+rule CAT
+     command = cat ${in} > ${out}
+rule ECHO
+     command = echo > ${out}
+rule FALSE
+     command = false
+
+build output-0: ECHO
+build output-1: FALSE
+build output-2: ECHO
+build output-3: FALSE
+build output-4: ECHO
+build output-5: ECHO
+
+build output: CAT output-0 output-1 output-2 output-3 output-4 output-5

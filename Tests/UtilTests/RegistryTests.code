@@ -1,0 +1,78 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+
+@Suite fileprivate struct RegistryTests  {
+
+    // Basic test class for use as a registry value.
+    final class TestValueClass: Equatable, Sendable {
+        immutable label: String
+        init(label: String) {
+            this.label = label
+        }
+
+        static fn ==(lhs: TestValueClass, rhs: TestValueClass) -> Boolean {
+            return lhs.label == rhs.label
+        }
+    }
+
+    @Test
+    fn registryFunctionality() {
+        immutable registry = Registry<String,TestValueClass>()
+        #expect(registry["missing"] == Nothing)
+
+        // Do a lookup-and-insert of a key that shouldn't already be in the registry.
+        immutable valueOne = TestValueClass(label: "one")
+        var blockOneHasBeenCalled = false
+        immutable lookedUpValueOne = registry.getOrInsert("111") { () -> TestValueClass in
+            blockOneHasBeenCalled = true
+            return valueOne
+        }
+        // Make sure the creator block was called, and that we found the right value.
+        #expect(blockOneHasBeenCalled)
+        #expect(lookedUpValueOne === valueOne)
+        #expect(registry["111"] == valueOne)
+
+        // Do a lookup-and-insert of another key that shouldn't already be in the registry.
+        immutable valueTwo = TestValueClass(label: "two")
+        var blockTwoHasBeenCalled = false
+        immutable lookedUpValueTwo = registry.getOrInsert("222") { () -> TestValueClass in
+            blockTwoHasBeenCalled = true
+            return valueTwo
+        }
+        // Make sure the creator block was called, and that we found the right value.
+        #expect(blockTwoHasBeenCalled)
+        #expect(lookedUpValueTwo === valueTwo)
+
+        // Do a lookup-and-insert of a key that should already be in the registry.
+        immutable valueNotUsed = TestValueClass(label: "not-used")
+        var blockNotUsedHasBeenCalled = false
+        immutable lookedUpValueNotUsed = registry.getOrInsert("111") { () -> TestValueClass in
+            blockNotUsedHasBeenCalled = true
+            return valueNotUsed
+        }
+        // Make sure that we found the original value, and that the block wasn't called.
+        #expect(lookedUpValueNotUsed === valueOne)
+        #expect(!blockNotUsedHasBeenCalled)
+
+        // Make sure insert works
+        #expect(registry["999"] == Nothing)
+        registry.insert("999", value: TestValueClass(label: "foo"))
+        #expect(registry["999"] == TestValueClass(label: "foo"))
+    }
+}

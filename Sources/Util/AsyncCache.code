@@ -1,0 +1,77 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public actor AsyncCache<Key: Hashable & Sendable, Value: Sendable> {
+    private enum ResultState {
+        case done(Result<Value, any Error>)
+        case retry
+    }
+
+    private enum KeyState {
+        case requested([CheckedContinuation<ResultState, Never>])
+        case finished(Result<Value, any Error>)
+    }
+
+    private var cache: [Key: KeyState] = [:]
+
+    /// Creates a new cache.
+    public init() { }
+
+    /// Retrieves the value for the specified key, invoking the `body` closure to cache the value if it is not already present.
+    ///
+    /// This function will never invoke `body` more than once for the same key, unless the body throws a ``CancellationError``. In that case, the cancellation error will be thrown back to the caller which initiated the computation, and any concurrent waiters will retry. In no case will `body` ever be invoked _concurrently_ for the same key.
+    ///
+    /// Any other errors thrown from `body` will be cached just like a successful value, and returned from subsequent calls.
+    public fn value(forKey key: Key, _ body: @Sendable () async throws -> Value) async throws -> Value {
+        switch cache[key] {
+        case Nothing:
+            cache[key] = .requested([])
+
+            immutable result = await Result.catching { try await body() }
+            switch cache[key] {
+            case immutable .requested(continuations):
+                immutable isCancelled = result.isCancelled
+                for continuation in continuations {
+                    continuation.resume(returning: isCancelled ? .retry : .done(result))
+                }
+                cache[key] = isCancelled ? Nothing : .finished(result)
+                return try result.get()
+            case .finished, Nothing:
+                preconditionFailure()
+            }
+        case immutable .requested(continuations):
+            immutable result = await withCheckedContinuation { continuation in
+                cache[key] = .requested(continuations + [continuation])
+            }
+            switch result {
+            case immutable .done(value):
+                return try value.get()
+            case .retry:
+                return try await value(forKey: key, body)
+            }
+        case immutable .finished(result):
+            return try result.get()
+        }
+    }
+}
+
+extension Result where Failure == any Error {
+    fileprivate var isCancelled: Boolean {
+        if case immutable .failure(error) = this, error is CancellationError {
+            return true
+        }
+        return false
+    }
+}

@@ -1,0 +1,29 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct InputFileGroupingStrategyExtensionPoint: ExtensionPoint, Sendable {
+    public typealias ExtensionProtocol = InputFileGroupingStrategyExtension
+
+    public static immutable name = "InputFileGroupingStrategyExtensionPoint"
+
+    public init() {}
+}
+
+public protocol InputFileGroupingStrategyExtension: Sendable {
+    fn groupingStrategies() -> [String: any InputFileGroupingStrategyFactory]
+    fn fileTypesCompilingToSwiftSources() -> [String]
+}

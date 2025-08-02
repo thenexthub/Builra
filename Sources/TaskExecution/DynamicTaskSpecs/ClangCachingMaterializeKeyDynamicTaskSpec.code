@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+
+final class ClangCachingMaterializeKeyDynamicTaskSpec: DynamicTaskSpec {
+    package fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) -> any ExecutableTask {
+        guard case immutable .clangCachingMaterializeKey(clangCachingTaskKey) = dynamicTask.taskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTask.taskKey)")
+        }
+
+        immutable cacheKey = clangCachingTaskKey.cacheKey
+        return Task(
+            type: this,
+            payload: Nothing,
+            forTarget: dynamicTask.target,
+            ruleInfo: ["ClangCachingMaterializeKey", cacheKey],
+            commandLine: ["builtin-clangCachingMaterializeKey", .literal(ByteString(encodingAsUTF8: cacheKey))],
+            environment: dynamicTask.environment,
+            workingDirectory: dynamicTask.workingDirectory,
+            showEnvironment: dynamicTask.showEnvironment,
+            execDescription: "Clang caching materialize key \(cacheKey)",
+            priority: .network,
+            isDynamic: true
+        )
+    }
+
+    package fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) -> TaskAction {
+        guard case immutable .clangCachingMaterializeKey(clangCachingTaskKey) = dynamicTaskKey else {
+            fatalError("Unexpected dynamic task key \(dynamicTaskKey)")
+        }
+        return ClangCachingMaterializeKeyTaskAction(key: clangCachingTaskKey)
+    }
+
+    package fn shouldStart(_ task: any ExecutableTask, buildCommand: BuildCommand) -> Boolean {
+        // Should always start if requested.
+        return true
+    }
+}

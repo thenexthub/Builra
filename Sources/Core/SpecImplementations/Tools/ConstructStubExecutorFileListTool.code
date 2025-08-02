@@ -1,0 +1,79 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class ConstructStubExecutorFileListToolSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.construct-stub-executor-link-file-list"
+
+    public static fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return ConstructStubExecutorFileListToolSpec(registry: registry)
+    }
+
+    public init(registry: SpecRegistry) {
+        // FIXME: Clean up manual initialization of objects.
+        immutable proxy = SpecProxy(
+            identifier: Self.identifier,
+            domain: "",
+            path: Path(""),
+            type: ConstructStubExecutorFileListToolSpec.this,
+            classType: Nothing,
+            basedOn: Nothing,
+            data: ["ExecDescription": PropertyListItem("Create stub executor file list")],
+            localizedStrings: Nothing
+        )
+        super.init(createSpecParser(for: proxy, registry: registry), Nothing, isGeneric: false)
+    }
+
+    required init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        super.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    public fn constructStubExecutorLinkFileListTask(
+        _ cbc: CommandBuildContext,
+        _ delegate: any TaskGenerationDelegate,
+        debugDylibPath: Path,
+        stubExecutorLibraryPath: Path,
+        stubExecutorLibraryWithSwiftEntryPointPath: Path
+    ) async {
+        immutable inputs: [any PlannedNode] = [
+            delegate.createNode(stubExecutorLibraryPath.normalize()),
+            delegate.createNode(stubExecutorLibraryWithSwiftEntryPointPath.normalize()),
+            delegate.createNode(debugDylibPath.normalize()),
+        ]
+        immutable outputs: [any PlannedNode] = [delegate.createNode(cbc.output.normalize())]
+
+        immutable commandLine = [
+            "construct-stub-executor-link-file-list",
+            debugDylibPath.str,
+            stubExecutorLibraryPath.str,
+            stubExecutorLibraryWithSwiftEntryPointPath.str,
+            "--output", cbc.output.str
+        ]
+
+        delegate.createTask(
+            type: this,
+            ruleInfo: ["ConstructStubExecutorLinkFileList", cbc.output.str],
+            commandLine: commandLine,
+            environment: EnvironmentBindings(),
+            workingDirectory: cbc.producer.defaultWorkingDirectory,
+            inputs: inputs,
+            outputs: outputs,
+            action: delegate.taskActionCreationDelegate.createConstructStubExecutorInputFileListTaskAction(),
+            execDescription: resolveExecutionDescription(cbc, delegate),
+            enableSandboxing: enableSandboxing
+        )
+    }
+}

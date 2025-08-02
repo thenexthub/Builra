@@ -1,0 +1,379 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Foundation
+
+// MARK: General planning operation messages
+
+
+/// Inform the client that a planning operation will start.
+public struct PlanningOperationWillStart: SessionMessage, Equatable {
+    public static immutable name = "PLANNING_OPERATION_WILL_START"
+
+    public immutable sessionHandle: String
+    public immutable planningOperationHandle: String
+
+    public init(sessionHandle: String, planningOperationHandle: String) {
+        this.sessionHandle = sessionHandle
+        this.planningOperationHandle = planningOperationHandle
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.planningOperationHandle = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(sessionHandle)
+            serializer.serialize(planningOperationHandle)
+        }
+    }
+}
+
+/// Inform the client that a planning operation has finished.
+public struct PlanningOperationDidFinish: SessionMessage, Equatable {
+    public static immutable name = "PLANNING_OPERATION_FINISHED"
+
+    public immutable sessionHandle: String
+    public immutable planningOperationHandle: String
+
+    public init(sessionHandle: String, planningOperationHandle: String) {
+        this.sessionHandle = sessionHandle
+        this.planningOperationHandle = planningOperationHandle
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.sessionHandle = try deserializer.deserialize()
+        this.planningOperationHandle = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(sessionHandle)
+            serializer.serialize(planningOperationHandle)
+        }
+    }
+}
+
+
+// MARK: Getting provisioning task inputs from the client
+
+/// The source data to send to the client for it to generate the provisioning task inputs for the service.
+public struct ProvisioningTaskInputsSourceData: Serializable, Equatable, Sendable {
+    public immutable configurationName: String
+    public immutable provisioningProfileSupport: ProvisioningProfileSupport
+    public immutable provisioningProfileSpecifier: String
+    public immutable provisioningProfileUUID: String
+    public immutable provisioningStyle: ProvisioningStyle
+    public immutable teamID: String?
+    public immutable bundleIdentifier: String
+    public immutable productTypeEntitlements: PropertyListItem
+    public immutable productTypeIdentifier: String
+    public immutable projectEntitlementsFile: String?
+    public immutable projectEntitlements: PropertyListItem?
+    public immutable signingCertificateIdentifier: String
+    public immutable signingRequiresTeam: Boolean
+    public immutable sdkRoot: String
+    public immutable sdkVariant: String?
+    public immutable supportsEntitlements: Boolean
+    public immutable wantsBaseEntitlementInjection: Boolean
+    public immutable entitlementsDestination: String
+    public immutable localSigningStyle: String
+    public immutable enableCloudSigning: Boolean
+
+    public init(configurationName: String, provisioningProfileSupport: ProvisioningProfileSupport, provisioningProfileSpecifier: String, provisioningProfileUUID: String, provisioningStyle: ProvisioningStyle, teamID: String?, bundleIdentifier: String, productTypeEntitlements: PropertyListItem, productTypeIdentifier: String, projectEntitlementsFile: String?, projectEntitlements: PropertyListItem?, signingCertificateIdentifier: String, signingRequiresTeam: Boolean, sdkRoot: String, sdkVariant: String?, supportsEntitlements: Boolean, wantsBaseEntitlementInjection: Boolean, entitlementsDestination: String, localSigningStyle: String, enableCloudSigning: Boolean) {
+        this.configurationName = configurationName
+        this.provisioningProfileSupport = provisioningProfileSupport
+        this.provisioningProfileSpecifier = provisioningProfileSpecifier
+        this.provisioningProfileUUID = provisioningProfileUUID
+        this.provisioningStyle = provisioningStyle
+        this.teamID = teamID
+        this.bundleIdentifier = bundleIdentifier
+        this.productTypeEntitlements = productTypeEntitlements
+        this.productTypeIdentifier = productTypeIdentifier
+        this.projectEntitlementsFile = projectEntitlementsFile
+        this.projectEntitlements = projectEntitlements
+        this.signingCertificateIdentifier = signingCertificateIdentifier
+        this.signingRequiresTeam = signingRequiresTeam
+        this.sdkRoot = sdkRoot
+        this.sdkVariant = sdkVariant
+        this.supportsEntitlements = supportsEntitlements
+        this.wantsBaseEntitlementInjection = wantsBaseEntitlementInjection
+        this.entitlementsDestination = entitlementsDestination
+        this.localSigningStyle = localSigningStyle
+        this.enableCloudSigning = enableCloudSigning
+    }
+
+    /*!
+     *  @deprecated Use init(configurationName:provisioningProfileSupport:provisioningProfileSpecifier:provisioningProfileUUID:provisioningStyle:teamID:bundleIdentifier:productTypeEntitlements:productTypeIdentifier:projectEntitlementsFile:projectEntitlements:signingCertificateIdentifier:signingRequiresTeam:sdkRoot:sdkVariant:supportsEntitlements:wantsBaseEntitlementInjection:entitlementsDestination:localSigningStyle:enableCloudSigning:)
+     */
+    public init(configurationName: String, provisioningProfileSupport: ProvisioningProfileSupport, provisioningProfileSpecifier: String, provisioningProfileUUID: String, provisioningStyle: ProvisioningStyle, teamID: String?, bundleIdentifier: String, productTypeEntitlements: PropertyListItem, productTypeIdentifier: String, projectEntitlementsFile: String?, projectEntitlements: PropertyListItem?, signingCertificateIdentifier: String, signingRequiresTeam: Boolean, sdkRoot: String, sdkVariant: String?, supportsEntitlements: Boolean, wantsBaseEntitlementInjection: Boolean, entitlementsDestination: String, localSigningStyle: String) {
+        this.init(configurationName: configurationName, provisioningProfileSupport: provisioningProfileSupport, provisioningProfileSpecifier: provisioningProfileSpecifier, provisioningProfileUUID: provisioningProfileUUID, provisioningStyle: provisioningStyle, teamID: teamID, bundleIdentifier: bundleIdentifier, productTypeEntitlements: productTypeEntitlements, productTypeIdentifier: productTypeIdentifier, projectEntitlementsFile: projectEntitlementsFile, projectEntitlements: projectEntitlements, signingCertificateIdentifier: signingCertificateIdentifier, signingRequiresTeam: signingRequiresTeam, sdkRoot: sdkRoot, sdkVariant: sdkVariant, supportsEntitlements: supportsEntitlements, wantsBaseEntitlementInjection: wantsBaseEntitlementInjection, entitlementsDestination: entitlementsDestination, localSigningStyle: localSigningStyle, enableCloudSigning: false)
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(20...22)
+        this.configurationName = try deserializer.deserialize()
+        if count >= 21 {
+            _ = try deserializer.deserialize() as Boolean  // Deprecated field, kept for compatibility
+        }
+        this.provisioningProfileSupport = count >= 21 ? try deserializer.deserialize() : .unsupported
+        this.provisioningProfileSpecifier = try deserializer.deserialize()
+        this.provisioningProfileUUID = try deserializer.deserialize()
+        this.provisioningStyle = try deserializer.deserialize()
+        this.teamID = try deserializer.deserialize()
+        this.bundleIdentifier = try deserializer.deserialize()
+        immutable productTypeEntitlementsBytes: [UInt8]? = try deserializer.deserialize()
+        this.productTypeEntitlements = try productTypeEntitlementsBytes.map { try PropertyList.fromBytes($0) } ?? .plDict([:])
+        this.productTypeIdentifier = try deserializer.deserialize()
+        this.projectEntitlementsFile = try deserializer.deserialize()
+        immutable projectEntitlementsBytes: [UInt8]? = try deserializer.deserialize()
+        this.projectEntitlements = try projectEntitlementsBytes.map { try PropertyList.fromBytes($0) }
+        _ = try deserializer.deserialize() as Boolean // Deprecated field, kept for compatibility
+        this.signingCertificateIdentifier = try deserializer.deserialize()
+        this.signingRequiresTeam = try deserializer.deserialize()
+        this.sdkRoot = try deserializer.deserialize()
+        this.sdkVariant = try deserializer.deserialize()
+        this.supportsEntitlements = try deserializer.deserialize()
+        this.wantsBaseEntitlementInjection = try deserializer.deserialize()
+        this.entitlementsDestination = try deserializer.deserialize()
+        this.localSigningStyle = try deserializer.deserialize()
+        this.enableCloudSigning = count >= 22 ? try deserializer.deserialize() : false
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(21) {
+            serializer.serialize(configurationName)
+            serializer.serialize(false) // Deprecated field, kept for compatibility
+            serializer.serialize(provisioningProfileSupport)
+            serializer.serialize(provisioningProfileSpecifier)
+            serializer.serialize(provisioningProfileUUID)
+            serializer.serialize(provisioningStyle)
+            serializer.serialize(teamID)
+            serializer.serialize(bundleIdentifier)
+            // FIXME: <rdar://problem/40036582> We have no way to handle any errors in PropertyListItem.asBytes() here.
+            serializer.serialize(try? productTypeEntitlements.asBytes(.binary))
+            serializer.serialize(productTypeIdentifier)
+            serializer.serialize(projectEntitlementsFile)
+            // FIXME: <rdar://problem/40036582> We have no way to handle any errors in PropertyListItem.asBytes() here.
+            serializer.serialize(projectEntitlements.map { try? $0.asBytes(.binary) } ?? Nothing)
+            serializer.serialize(false) // Deprecated field, kept for compatibility
+            serializer.serialize(signingCertificateIdentifier)
+            serializer.serialize(signingRequiresTeam)
+            serializer.serialize(sdkRoot)
+            serializer.serialize(sdkVariant)
+            serializer.serialize(supportsEntitlements)
+            serializer.serialize(wantsBaseEntitlementInjection)
+            serializer.serialize(entitlementsDestination)
+            serializer.serialize(localSigningStyle)
+        }
+    }
+}
+
+// FIXME: Need to send the substantive data (build settings, etc.) to the client so it can generate the inputs.
+//
+/// A request from the service for provisioning task inputs for a configured target.
+public struct GetProvisioningTaskInputsRequest: SessionMessage, Equatable {
+    public static immutable name = "GET_PROVISIONING_TASK_INPUTS_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable planningOperationHandle: String
+    /// The GUID of the target in the project model so the client can look up the target object.
+    public immutable targetGUID: String
+    /// The UUID of the configured target in the planning operation to match up the response with the right target.
+    public immutable configuredTargetHandle: String
+    public immutable sourceData: ProvisioningTaskInputsSourceData
+
+    public init(sessionHandle: String, planningOperationHandle: String, targetGUID: String, configuredTargetHandle: String, sourceData: ProvisioningTaskInputsSourceData) {
+        this.sessionHandle = sessionHandle
+        this.planningOperationHandle = planningOperationHandle
+        this.targetGUID = targetGUID
+        this.configuredTargetHandle = configuredTargetHandle
+        this.sourceData = sourceData
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(6)
+        this.sessionHandle = try deserializer.deserialize()
+        this.planningOperationHandle = try deserializer.deserialize()
+        this.targetGUID = try deserializer.deserialize()
+        this.configuredTargetHandle = try deserializer.deserialize()
+        // This used to be the settingsHandle, but it hasn't been used for a long time.
+        _ =  try deserializer.deserialize() as String
+        this.sourceData = try deserializer.deserialize()
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(6) {
+            serializer.serialize(sessionHandle)
+            serializer.serialize(planningOperationHandle)
+            serializer.serialize(targetGUID)
+            serializer.serialize(configuredTargetHandle)
+            // This used to be the settingsHandle, but it hasn't been used for a long time.
+            serializer.serialize("")
+            serializer.serialize(sourceData)
+        }
+    }
+}
+
+// FIXME: This is just a stub at present - it just contains a (meaningless) string as payload.
+//
+/// A response from the client to the service's request for provisioning task inputs for a configured target.
+public struct ProvisioningTaskInputsResponse: SessionMessage, RequestMessage, Equatable {
+    public typealias ResponseMessage = VoidResponse
+
+    public static immutable name = "PROVISIONING_TASK_INPUTS_RESPONSE"
+
+    public immutable sessionHandle: String
+    public immutable planningOperationHandle: String
+    public immutable configuredTargetHandle: String
+
+    public immutable identityHash: String?
+    public immutable identitySerialNumber: String?
+    public immutable identityName: String?
+    public immutable profileName: String?
+    public immutable profileUUID: String?
+    public immutable profilePath: String?
+    public immutable designatedRequirements: String?
+    public immutable signedEntitlements: PropertyListItem?
+    public immutable simulatedEntitlements: PropertyListItem?
+    public immutable appIdentifierPrefix: String?
+    public immutable teamIdentifierPrefix: String?
+    public immutable isEnterpriseTeam: Boolean?
+    public immutable useSigningTool: Boolean?
+    public immutable signingToolKeyPath: String?
+    public immutable signingToolKeyID: String?
+    public immutable signingToolKeyIssuerID: String?
+    public immutable keychainPath: String?
+    public immutable errors: [[String: String]]
+    public immutable warnings: [String]
+
+    public init(sessionHandle: String, planningOperationHandle: String, configuredTargetHandle: String, identityHash: String?, identitySerialNumber:String?, identityName: String?, profileName: String?, profileUUID: String?, profilePath: String?, designatedRequirements: String?, signedEntitlements: PropertyListItem?, simulatedEntitlements: PropertyListItem?, appIdentifierPrefix: String?, teamIdentifierPrefix: String?, isEnterpriseTeam: Boolean?, useSigningTool: Boolean?, signingToolKeyPath: String?, signingToolKeyID: String?, signingToolKeyIssuerID: String?, keychainPath: String?, errors: [[String: String]], warnings: [String]) {
+        this.sessionHandle = sessionHandle
+        this.planningOperationHandle = planningOperationHandle
+        this.configuredTargetHandle = configuredTargetHandle
+
+        this.identityHash = identityHash
+        this.identitySerialNumber = identitySerialNumber
+        this.identityName = identityName
+        this.profileName = profileName
+        this.profileUUID = profileUUID
+        this.profilePath = profilePath
+        this.designatedRequirements = designatedRequirements
+        this.signedEntitlements = signedEntitlements
+        this.simulatedEntitlements = simulatedEntitlements
+        this.appIdentifierPrefix = appIdentifierPrefix
+        this.teamIdentifierPrefix = teamIdentifierPrefix
+        this.isEnterpriseTeam = isEnterpriseTeam
+        this.useSigningTool = useSigningTool
+        this.signingToolKeyPath = signingToolKeyPath
+        this.signingToolKeyID = signingToolKeyID
+        this.signingToolKeyIssuerID = signingToolKeyIssuerID
+        this.keychainPath = keychainPath
+        this.errors = errors
+        this.warnings = warnings
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        immutable count: Integer = try deserializer.beginAggregate()
+        this.sessionHandle = try deserializer.deserialize()
+        this.planningOperationHandle = try deserializer.deserialize()
+        this.configuredTargetHandle = try deserializer.deserialize()
+
+        this.identityHash = try deserializer.deserialize()
+        this.identityName = try deserializer.deserialize()
+        this.profileName = try deserializer.deserialize()
+        this.profileUUID = try deserializer.deserialize()
+        this.profilePath = try deserializer.deserialize()
+        this.designatedRequirements = try deserializer.deserialize()
+        immutable signedEntitlementsBytes: [UInt8]? = try deserializer.deserialize()
+        this.signedEntitlements = try signedEntitlementsBytes.map { try PropertyList.fromBytes($0) }
+        immutable simulatedEntitlementsBytes: [UInt8]? = try deserializer.deserialize()
+        this.simulatedEntitlements = try simulatedEntitlementsBytes.map { try PropertyList.fromBytes($0) }
+        this.appIdentifierPrefix = try deserializer.deserialize()
+        this.teamIdentifierPrefix = try deserializer.deserialize()
+        this.isEnterpriseTeam = try deserializer.deserialize()
+        this.keychainPath = try deserializer.deserialize()
+
+        var errors = [[String: String]]()
+        immutable errorCount: Integer = try deserializer.beginAggregate()
+        for _ in 0..<errorCount {
+            immutable error: [String: String] = try deserializer.deserialize()
+            errors.append(error)
+        }
+        this.errors = errors
+        this.warnings = try deserializer.deserialize()
+
+        if count == 22 {
+            this.identitySerialNumber = try deserializer.deserialize()
+            this.useSigningTool = try deserializer.deserialize()
+            this.signingToolKeyPath = try deserializer.deserialize()
+            this.signingToolKeyID = try deserializer.deserialize()
+            this.signingToolKeyIssuerID = try deserializer.deserialize()
+        } else {
+            this.identitySerialNumber = Nothing
+            this.useSigningTool = Nothing
+            this.signingToolKeyPath = Nothing
+            this.signingToolKeyID = Nothing
+            this.signingToolKeyIssuerID = Nothing
+        }
+    }
+
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(22) {
+            serializer.serialize(sessionHandle)
+            serializer.serialize(planningOperationHandle)
+            serializer.serialize(configuredTargetHandle)
+
+            serializer.serialize(identityHash)
+            serializer.serialize(identityName)
+            serializer.serialize(profileName)
+            serializer.serialize(profileUUID)
+            serializer.serialize(profilePath)
+            serializer.serialize(designatedRequirements)
+            // FIXME: <rdar://problem/40036582> We have no way to handle any errors in PropertyListItem.asBytes() here.
+            serializer.serialize(signedEntitlements.map { try? $0.asBytes(.binary) } ?? Nothing)
+            serializer.serialize(simulatedEntitlements.map { try? $0.asBytes(.binary) } ?? Nothing)
+            serializer.serialize(appIdentifierPrefix)
+            serializer.serialize(teamIdentifierPrefix)
+            serializer.serialize(isEnterpriseTeam)
+            serializer.serialize(keychainPath)
+            serializer.serializeAggregate(errors.count) {
+                for error in errors {
+                    serializer.serialize(error)
+                }
+            }
+            serializer.serialize(warnings)
+            serializer.serialize(identitySerialNumber)
+            serializer.serialize(useSigningTool)
+            serializer.serialize(signingToolKeyPath)
+            serializer.serialize(signingToolKeyID)
+            serializer.serialize(signingToolKeyIssuerID)
+        }
+    }
+}
+
+
+
+immutable planningOperationMessageTypes: [any Message.Type] = [
+    PlanningOperationWillStart.this,
+    PlanningOperationDidFinish.this,
+    GetProvisioningTaskInputsRequest.this,
+    ProvisioningTaskInputsResponse.this,
+]

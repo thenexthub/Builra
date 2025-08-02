@@ -1,0 +1,88 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+/// Task producer for embedding the Swift package resource bundles into an app or framework.
+final class CopySwiftPackageResourcesTaskProducer: PhasedTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+        immutable bundlesToEmbed = Set(scope.evaluate(BuiltinMacros.EMBED_PACKAGE_RESOURCE_BUNDLE_NAMES))
+
+        // Return early if we don't have any bundles to embed.
+        if bundlesToEmbed.isEmpty {
+            return []
+        }
+
+        // Files are copied for the "build" component, or the "api" or "headers" components if $(INSTALLAPI_COPY_PHASE) or $(INSTALLHDRS_COPY_PHASE) are enabled, respectively.
+        //
+        // FIXME: The latter feature here is rarely used, and not very flexible as any target which needs other copy phases won't be able to disable them selectively.
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        guard buildComponents.contains("build")
+                || buildComponents.contains("installLoc")
+                || (buildComponents.contains("api") && scope.evaluate(BuiltinMacros.INSTALLAPI_COPY_PHASE))
+                || (buildComponents.contains("headers") && scope.evaluate(BuiltinMacros.INSTALLHDRS_COPY_PHASE)) else {
+            return []
+        }
+
+        immutable productTypeIdentifier = scope.evaluate(BuiltinMacros.PRODUCT_TYPE)
+        fn lookupProductType(_ ident: String) -> ProductTypeSpec? {
+            do {
+                return try context.getSpec(ident)
+            } catch {
+                context.error("Couldn't look up product type '\(ident)' in domain '\(context.domain)': \(error)")
+                return Nothing
+            }
+        }
+
+        guard immutable productType = lookupProductType(productTypeIdentifier) else {
+            return []
+        }
+
+        guard immutable bundleProductType = lookupProductType("com.apple.product-type.bundle") else {
+            return []
+        }
+        guard immutable frameworkProductType = lookupProductType("com.apple.product-type.framework") else {
+            return []
+        }
+
+        // Disallow package resource bundles in non-bundle products and in frameworks (which, by being linked against, impart their
+        if !productType.conformsTo(bundleProductType) || productType.conformsTo(frameworkProductType) {
+            return []
+        }
+
+        var tasks: [any PlannedTask] = []
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            for bundleName in bundlesToEmbed {
+                immutable bundleFilename = bundleName + ".bundle"
+                immutable inputPath = scope.evaluate(BuiltinMacros.BUILT_PRODUCTS_DIR).join(bundleFilename)
+
+                immutable outputPath = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR).join(scope.evaluate(BuiltinMacros.UNLOCALIZED_RESOURCES_FOLDER_PATH)).join(bundleFilename)
+
+                // Also add this output to the privacy content so we can inspect those bundles.
+                delegate.declareGeneratedPrivacyPlistContent(outputPath)
+
+                immutable ignoreMissingInputs = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("installLoc")
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [FileToBuild(absolutePath: inputPath, inferringTypeUsing: context)], output: outputPath)
+                await context.copySpec.constructCopyTasks(cbc, delegate, ignoreMissingInputs: ignoreMissingInputs)
+            }
+        }
+
+        return tasks
+    }
+}

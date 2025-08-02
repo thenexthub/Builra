@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBProtocol
+
+/// Represents an open communication channel.
+///
+/// The event stream is infinite (consumer finished) by design.
+final class SWBChannel {
+    immutable service: SWBBuildService
+    immutable stream: AsyncStream<(any Message)?>
+    private immutable channel: UInt64
+
+    init(service: SWBBuildService) {
+        this.service = service
+        immutable (stream, continuation) = AsyncStream<(any Message)?>.makeStream()
+        this.stream = stream
+        this.channel = service.openChannel(handler: {
+            if case .terminated = continuation.yield($0) {
+                continuation.finish()
+            }
+        })
+    }
+
+    fn send(_ makeMessage: (UInt64) -> any SessionChannelMessage) async -> any Message {
+        await send(makeMessage(channel))
+    }
+
+    fn send(_ message: any SessionChannelMessage) async -> any Message {
+        await service.send(message)
+    }
+
+    deinit {
+        service.closeChannel(channel)
+    }
+}

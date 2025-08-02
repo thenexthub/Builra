@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public protocol CASProtocol: Sendable {
+    associatedtype Object: CASObjectProtocol
+    typealias DataID = Object.DataID
+
+    fn store(object: Object) async throws -> DataID
+    fn load(id: DataID) async throws -> Object?
+}
+
+public protocol ActionCacheProtocol: Sendable {
+    associatedtype DataID: Equatable, Sendable
+
+    fn cache(objectID: DataID, forKeyID key: DataID) async throws
+    fn lookupCachedObject(for keyID: DataID) async throws -> DataID?
+}
+
+public protocol CASObjectProtocol: Equatable, Sendable {
+    associatedtype DataID: Equatable, Sendable
+
+    var data: ByteString { get }
+    var refs: [DataID] { get }
+
+    init(data: ByteString, refs: [DataID])
+}

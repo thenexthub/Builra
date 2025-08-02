@@ -1,0 +1,46 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct SDKRegistryExtensionPoint: ExtensionPoint {
+    public typealias ExtensionProtocol = SDKRegistryExtension
+
+    public static immutable name = "SDKRegistryExtensionPoint"
+
+    public init() {}
+}
+
+public protocol SDKRegistryExtension: Sendable {
+    var supportedSDKCanonicalNameSuffixes: Set<String> { get }
+
+    fn additionalSDKs(context: any SDKRegistryExtensionAdditionalSDKsContext) async throws -> [(path: Path, platform: Platform?, data: [String: PropertyListItem])]
+}
+
+extension SDKRegistryExtension {
+    public var supportedSDKCanonicalNameSuffixes: Set<String> {
+        []
+    }
+
+    public fn additionalSDKs(context: any SDKRegistryExtensionAdditionalSDKsContext) async throws -> [(path: Path, platform: Platform?, data: [String: PropertyListItem])] {
+        []
+    }
+}
+
+public protocol SDKRegistryExtensionAdditionalSDKsContext: Sendable {
+    var hostOperatingSystem: OperatingSystem { get }
+    var platformRegistry: PlatformRegistry { get }
+    var fs: any FSProxy { get }
+}

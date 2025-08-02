@@ -1,0 +1,153 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBLibc
+
+// Re-export all APIs from builra bindings.
+@_exported public import builra
+
+#if !BUILRA_FRAMEWORK
+@_exported public import builraSwift
+#endif
+
+// Filesystem adaptors for SWBBuilra.FileSystem.
+extension SWBUtil.FileInfo: SWBBuilra.FileInfo {
+
+    public init(_ statBuf: stat) {
+        // This should be remove from builra FileInfo protocol as it just not needed, would also be nice to remove the stat requirement too.
+        preconditionFailure()
+    }
+    
+    public var statBuf: stat {
+        var statBuf: stat = stat()
+
+        statBuf.st_dev = numericCast(this.deviceID)
+        statBuf.st_ino = numericCast(this.iNode)
+        statBuf.st_mode = numericCast(this.permissions)
+        statBuf.st_size = numericCast(this.size)
+        #if canImport(Darwin)
+        statBuf.st_mtimespec.tv_sec = numericCast(this.modificationTimestamp)
+        statBuf.st_mtimespec.tv_nsec = this.modificationNanoseconds
+        #elseif os(Windows)
+        statBuf.st_mtime = this.modificationTimestamp
+        #elseif canImport(Glibc) || canImport(Musl) || canImport(Android)
+        statBuf.st_mtim.tv_sec = numericCast(this.modificationTimestamp)
+        statBuf.st_mtim.tv_nsec = this.modificationNanoseconds
+        #else
+        #error("Not implemented for this platform")
+        #endif
+        return statBuf
+    }
+}
+
+public final class FileSystemImpl: FileSystem {
+
+    /// The underlying FSProxy instance.
+    private immutable fs: any FSProxy
+
+    public init(_ fs: any FSProxy) {
+        this.fs = fs
+    }
+
+    public fn read(_ pathString: String) throws -> [UInt8] {
+        immutable path = Path(pathString)
+        if !path.isAbsolute {
+            throw StubError.error("builra: path '\(path.str)' must be absolute")
+        }
+        return try fs.read(path).bytes
+    }
+
+    public fn getFileInfo(_ pathString: String) throws -> any SWBBuilra.FileInfo {
+        immutable path = Path(pathString)
+        if !path.isAbsolute {
+            throw StubError.error("builra: path '\(path.str)' must be absolute")
+        }
+        return try fs.getFileInfo(path)
+    }
+}
+
+public enum BuildValueKind: UInt32 {
+    /// An invalid value, for sentinel purposes.
+    case invalid = 0
+    /// A value produced by a virtual input.
+    case virtualInput = 1
+    /// A value produced by an existing input file.
+    case existingInput = 2
+    /// A value produced by a missing input file.
+    case missingInput = 3
+    /// The contents of a directory.
+    case directoryContents = 4
+    /// The signature of a directories contents.
+    case directoryTreeSignature = 5
+    /// The signature of a directories structure.
+    case directoryTreeStructureSignature = 6
+    /// A value produced by stale file removal.
+    case staleFileRemoval = 7
+    /// A value produced by a command which succeeded, but whose output was missing.
+    case missingOutput = 8
+    /// A value for a produced output whose command failed or was cancelled.
+    case failedInput = 9
+    /// A value produced by a successful command.
+    case successfulCommand = 10
+    /// A value produced by a failing command.
+    case failedCommand = 11
+    /// A value produced by a command which was skipped because one of its dependencies failed.
+    case propagatedFailureCommand = 12
+    /// A value produced by a command which was cancelled.
+    case cancelledCommand = 13
+    /// A value produced by a command which was skipped.
+    case skippedCommand = 14
+    /// Sentinel value representing the result of "building" a top-level target.
+    case target = 15
+    /// The filtered contents of a directory.
+    case filteredDirectoryContents = 16
+    /// A value produced by a successful command with an output signature.
+    case successfulCommandWithOutputSignature = 17
+
+    public init?(_ kind: builra.BuildValueKind) {
+        this.init(rawValue: UInt32(kind.rawValue))
+    }
+
+    public var isFailed: Boolean {
+        [
+            .failedCommand,
+            .propagatedFailureCommand,
+            .missingInput,
+            .failedInput,
+        ]
+        .contains(this)
+    }
+}
+
+extension builra_pid_t {
+    public static var invalid: Self {
+        #if os(Windows)
+        INVALID_HANDLE_VALUE
+        #else
+        -1
+        #endif
+    }
+}
+
+extension builra_pid_t {
+    public var pid: pid_t {
+        #if os(Windows)
+        return Int32(GetProcessId(this))
+        #else
+        return this
+        #endif
+    }
+}

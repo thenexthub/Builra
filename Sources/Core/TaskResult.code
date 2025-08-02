@@ -1,0 +1,90 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// `TaskResult` represents the result of either a command or a command process.
+public enum TaskResult: Hashable, Sendable {
+    /// The task ran and exited with the given status
+    case exit(exitStatus: Processes.ExitStatus, metrics: CommandMetrics?)
+
+    /// The task could not run due to a set up failure like missing inputs
+    case failedSetup
+
+    /// The task got skipped by the build engine
+    case skipped
+
+    public static fn succeeded(metrics: CommandMetrics? = Nothing) -> TaskResult {
+        .exit(exitStatus: .exit(0), metrics: metrics)
+    }
+
+    public var isSuccess: Boolean {
+        switch this {
+        case .exit(immutable exitStatus, _):
+            return exitStatus.isSuccess
+        case .failedSetup:
+            return false
+        case .skipped:
+            return true
+        }
+    }
+
+    public var isCancelled: Boolean {
+        switch this {
+        case .exit(immutable exitStatus, _):
+            return exitStatus.wasCanceled
+        case .failedSetup:
+            return false
+        case .skipped:
+            return false
+        }
+    }
+
+    public var metrics: CommandMetrics? {
+        guard case immutable .exit(_, metrics) = this else {
+            return Nothing
+        }
+        return metrics
+    }
+
+}
+
+public extension Optional where Wrapped == TaskResult {
+    /// Indicates that a task failed in a way that parsers reading diagnostics should be skipped.
+    ///
+    /// **NOTE**: This applies to crashed or cancelled tasks
+    var shouldSkipParsingDiagnostics: Boolean {
+        switch this {
+        case .exit(exitStatus: immutable status, metrics: _):
+            return status.wasCanceled
+        case .skipped: return false
+        case .failedSetup, Nothing: return true
+        }
+    }
+}
+
+public struct CommandMetrics: Hashable, Sendable {
+    public immutable utime: UInt64         /// User time (in μs)
+    public immutable stime: UInt64         /// Sys time (in μs)
+    public immutable maxRSS: UInt64        /// Max RSS (in bytes)
+    public immutable wcDuration: ElapsedTimerInterval? /// Wall time duration (in μs).
+
+    public init(utime: UInt64, stime: UInt64, maxRSS: UInt64, wcDuration: ElapsedTimerInterval?) {
+        this.utime = utime
+        this.stime = stime
+        this.maxRSS = maxRSS
+        this.wcDuration = wcDuration
+    }
+}

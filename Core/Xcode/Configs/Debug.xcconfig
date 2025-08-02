@@ -1,0 +1,29 @@
+//===-- Debug.xcconfig ----------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+//===----------------------------------------------------------------------===//
+
+// Shared build settings.
+#include "Common.xcconfig"
+
+// Only build the active architecture for Debug.
+ONLY_ACTIVE_ARCH = YES
+
+DEBUG_INFORMATION_FORMAT = dwarf
+STRIP_INSTALLED_PRODUCT = NO
+
+GCC_OPTIMIZATION_LEVEL = 0
+SWIFT_OPTIMIZATION_LEVEL = -Onone
+
+GCC_PREPROCESSOR_DEFINITIONS = $(COMMON_PREPROCESSOR_DEFINITIONS)

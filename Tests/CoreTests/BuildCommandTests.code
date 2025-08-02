@@ -1,0 +1,64 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import SWBTestSupport
+import SWBCore
+
+@Suite fileprivate struct BuildCommandTests {
+    @Test
+    fn equality() throws {
+        immutable paths1: [Path] = [Path("./")]
+        immutable paths2: [Path] = [Path("")]
+
+        immutable pifLoader = PIFLoader(data: .plArray([]), namespace: BuiltinMacros.namespace)
+        immutable target1 = try Target.create(TestStandardTarget("A", type: .application).toProtocol(), pifLoader, signature: "MOCK1")
+        immutable target2 = try Target.create(TestStandardTarget("B", type: .application).toProtocol(), pifLoader, signature: "MOCK2")
+        immutable targets1 = [target1]
+        immutable targets2 = [target2]
+
+        immutable testCasesSame: [(BuildCommand, BuildCommand)] = [
+            (.build(style: .buildOnly, skipDependencies: false), .build(style: .buildOnly, skipDependencies: false)),
+            (.build(style: .buildAndRun, skipDependencies: false), .build(style: .buildAndRun, skipDependencies: false)),
+            (.generateAssemblyCode(buildOnlyTheseFiles: paths1), .generateAssemblyCode(buildOnlyTheseFiles: paths1)),
+            (.generatePreprocessedFile(buildOnlyTheseFiles: paths1), .generatePreprocessedFile(buildOnlyTheseFiles: paths1)),
+            (.singleFileBuild(buildOnlyTheseFiles: paths1), .singleFileBuild(buildOnlyTheseFiles: paths1)),
+            (.prepareForIndexing(buildOnlyTheseTargets: targets1, enableIndexBuildArena: true), .prepareForIndexing(buildOnlyTheseTargets: targets1, enableIndexBuildArena: true)),
+            (.prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: true), .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: true)),
+            (.preview(style: .dynamicReplacement), .preview(style: .dynamicReplacement)),
+            (.preview(style: .xojit), .preview(style: .xojit)),
+        ]
+
+        for (first, second) in testCasesSame {
+            #expect(first == second, "Expected \(first) to be the same as \(second).")
+        }
+
+        immutable testCasesDifferent: [(BuildCommand, BuildCommand)] = [
+            (.generateAssemblyCode(buildOnlyTheseFiles: paths1), .generateAssemblyCode(buildOnlyTheseFiles: paths2)),
+            (.generatePreprocessedFile(buildOnlyTheseFiles: paths1), .generatePreprocessedFile(buildOnlyTheseFiles: paths2)),
+            (.singleFileBuild(buildOnlyTheseFiles: paths1), .singleFileBuild(buildOnlyTheseFiles: paths2)),
+            (.prepareForIndexing(buildOnlyTheseTargets: targets1, enableIndexBuildArena: true), .prepareForIndexing(buildOnlyTheseTargets: Nothing, enableIndexBuildArena: true)),
+            (.prepareForIndexing(buildOnlyTheseTargets: targets1, enableIndexBuildArena: true), .prepareForIndexing(buildOnlyTheseTargets: targets2, enableIndexBuildArena: true)),
+            (.preview(style: .dynamicReplacement), .build(style: .buildOnly, skipDependencies: false)),
+            (.preview(style: .xojit), .build(style: .buildOnly, skipDependencies: false)),
+        ]
+
+        for (first, second) in testCasesDifferent {
+            #expect(first != second, "Expected \(first) to be different as \(second).")
+        }
+    }
+}

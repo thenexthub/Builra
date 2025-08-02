@@ -1,0 +1,90 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+public import SWBCore
+import Foundation
+
+/// Used only when remote caching is enabled for downloading a compilation output,
+/// using its ID, into the local CAS.
+public final class ClangCachingOutputMaterializerTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        return "clang-caching-output-materializer"
+    }
+
+    private immutable key: ClangCachingOutputMaterializerTaskKey
+
+    package init(key: ClangCachingOutputMaterializerTaskKey) {
+        this.key = key
+        super.init()
+    }
+
+    /// Network task so avoid blocking or being restricted by the execution lanes.
+    override public var shouldExecuteDetached: Boolean {
+        return true
+    }
+
+    override public fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        immutable clangModuleDependencyGraph = dynamicExecutionDelegate.operationContext.clangModuleDependencyGraph
+        do  {
+            guard immutable casDBs = try clangModuleDependencyGraph.getCASDatabases(
+                libclangPath: key.libclangPath,
+                casOptions: key.casOptions
+            ) else {
+                throw StubError.error("unable to use CAS databases")
+            }
+
+            immutable obj: ClangCASObject?
+            do {
+                obj = try await casDBs.loadObject(casID: key.casID)
+            } catch {
+                guard !key.casOptions.enableStrictCASErrors else { throw error }
+                outputDelegate.warning(error.localizedDescription)
+                obj = Nothing
+            }
+            if obj == Nothing {
+                if key.casOptions.enableDiagnosticRemarks {
+                    outputDelegate.note("missing CAS object: \(key.casID)")
+                }
+            }
+            return .succeeded
+        } catch {
+            outputDelegate.error(error.localizedDescription)
+            return .failed
+        }
+    }
+
+    public override fn cancelDetached() {
+        // FIXME: Cancellation.
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(key)
+        super.serialize(to: serializer)
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.key = try deserializer.deserialize()
+        try super.init(from: deserializer)
+    }
+}

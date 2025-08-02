@@ -1,0 +1,34 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+
+// Localized strings for basic info
+"Name" = "C Preprocessor";
+"Description" = "Standalone C Preprocessor";
+"Version" = "Default";
+"Vendor" = "Apple";
+
+// Localized strings for output-parse-info
+"OutputParseInfo-ProgressStatusFormat" = "Preprocessing %@";   // arg 1 is name of rule's input file
+"OutputParseInfo-MessageStatusFormat" = "Preprocess %@";    // arg 1 is name of rule's input file, arg 2 is name of file containing message (@"" if unknown)
+
+"[BuildOptions]-category" = "Build Options";
+
+"[CPP_PREPROCESSOR_DEFINITIONS]-name" = "Cpp Preprocessor Definitions";
+"[CPP_PREPROCESSOR_DEFINITIONS]-description" = "Space-separated list of preprocessor macros of the form `foo` or `foo=bar`. These macros are used when preprocessing using the standalone C Preprocessor rule.";
+"[CPP_PREFIX_HEADER]-name" = "Cpp Prefix File";
+"[CPP_PREFIX_HEADER]-description" = "Implicitly include the given file when preprocessing using the standalone C Preprocessor rule. The path given should either be a project relative path or an absolute path.";
+"[CPP_OTHER_PREPROCESSOR_FLAGS]-name" = "Cpp Other Preprocessor Flags";
+"[CPP_OTHER_PREPROCESSOR_FLAGS]-description" = "Other flags to pass to the C preprocessor when using the standalone C Preprocessor rule.";

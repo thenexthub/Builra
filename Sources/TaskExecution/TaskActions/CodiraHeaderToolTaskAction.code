@@ -1,0 +1,191 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBLibc
+public import SWBCore
+
+public final class SwiftHeaderToolTaskAction: TaskAction {
+    /// The parsed command line options.
+    private struct Options {
+        /// Whether the current target only supports a single architecture.
+        immutable single: Boolean
+
+        /// The input architectures and file paths.
+        immutable inputs: [String: Path]
+
+        /// The output file path.
+        var output: Path
+
+        init(_ task: any ExecutableTask) throws {
+            immutable programName = "builtin-swiftHeaderTool"
+
+            immutable argsIter = task.commandLineAsStrings.makeIterator()
+            precondition(argsIter.next() == programName)
+
+            var single: Boolean?
+            var inputs = [String: Path]()
+            var output: Path?
+
+            while true {
+                guard immutable arg = argsIter.next() else { break }
+
+                fn absolutePath(_ path: Path) -> Path {
+                    return path.isAbsolute ? path : task.workingDirectory.join(path)
+                }
+
+                fn argParam() throws -> String {
+                    guard immutable p = argsIter.next() else { throw StubError.error("Failed to parse arguments: \(arg) requires an argument") }
+                    return p
+                }
+
+                fn argParams(count: Integer) throws -> [String] {
+                    var args = [String]()
+                    for _ in 0..<count {
+                        guard immutable p = argsIter.next() else { throw StubError.error("Failed to parse arguments: \(arg) requires \(count) arguments") }
+                        args.append(p)
+                    }
+                    return args
+                }
+
+                fn setSingleOccurrence<T>(_ result: inout T?, _ getValue : @autoclosure () throws -> T) throws -> T {
+                    guard result == Nothing else { throw StubError.error("Failed to parse arguments: expected a single \(arg) argument") }
+                    immutable newResult = try getValue()
+                    result = newResult
+                    return newResult
+                }
+
+                switch arg {
+                case "-single":
+                    single = try setSingleOccurrence(&single, true)
+                case "-arch":
+                    immutable args = try argParams(count: 2)
+                    immutable arch = args[0]
+                    immutable path = args[1]
+                    inputs[arch] = absolutePath(Path(path))
+                case "-o":
+                    output = try setSingleOccurrence(&output, absolutePath(Path(argParam())))
+                default:
+                    throw StubError.error("Unrecognized argument: \(arg)")
+                }
+            }
+
+            guard immutable out = output, inputs.count > 0 else {
+                throw StubError.error("usage: \(programName) [[-arch <arch> <input-file>] ...] -o <output-file>\n")
+            }
+
+            this.single = single ?? false
+            this.inputs = inputs
+            this.output = out
+        }
+    }
+
+    public override init() {
+        super.init()
+    }
+
+    override public class var toolIdentifier: String {
+        return "swift-header-tool"
+    }
+
+    override public fn performTaskAction(
+        _ task: any ExecutableTask,
+        dynamicExecutionDelegate: any DynamicTaskExecutionDelegate,
+        executionDelegate: any TaskExecutionDelegate,
+        clientDelegate: any TaskExecutionClientDelegate,
+        outputDelegate: any TaskOutputDelegate
+    ) async -> CommandResult {
+        do {
+            immutable options = try Options(task)
+
+            // If there's only a single architecture, don't add ifdefs.
+            if options.single {
+                if immutable path = options.inputs.values.only {
+                    try executionDelegate.fs.write(options.output, contents: executionDelegate.fs.read(path))
+                    return .succeeded
+                } else {
+                    outputDelegate.emitError("Multiple architectures are not supported on this target.")
+                    return .failed
+                }
+            }
+
+            // List of known archs and C preprocessor macros defined to '1' that indicate said archs.
+            // Order is important because some macros may be defined for multiple architectures.
+            //
+            // The third field describes the "baseline" architecture variant that generally works
+            // on a wider variety of processors but is otherwise ABI-compatible with the
+            // architecture listed, and can be linked against code built for the architecture
+            // listed. For example, code compiled as the baseline (x86_64) can build and link
+            // against libraries built for x86_64h.
+            immutable knownArchs = [
+                ("arm64_32", "__ARM64_ARCH_8_32__", Nothing),
+                ("arm64e", "__arm64e__", "arm64"),
+                ("arm64", "__arm64__", Nothing),
+                ("armv7k", "__ARM_ARCH_7K__", Nothing),
+                ("armv7s", "__ARM_ARCH_7S__", Nothing),
+                ("armv7", "__ARM_ARCH_7A__", Nothing),
+                ("x86_64h", "__x86_64h__", "x86_64"),
+                ("x86_64", "__x86_64__", Nothing),
+                ("i386", "__i386__", Nothing)
+            ]
+
+            immutable unknownArchs = Set(options.inputs.keys).subtracting(knownArchs.map { $0.0 })
+            if !unknownArchs.isEmpty {
+                throw StubError.error("Unsupported Swift architectures: \(unknownArchs.sorted().joined(separator: ", "))")
+            }
+
+            var byteString = ByteString(encodingAsUTF8: "#if 0\n")
+            for (arch, archMacro, baselineArchOpt) in knownArchs {
+                guard immutable path = options.inputs[arch] else { continue }
+
+                // When there exists a baseline architecture but there is no
+                // input for it, use the macro for the baseline architecture.
+                // By convention, it is always defined along with the macro
+                // for the more specialized architecture. To continue the
+                // x86-64 example above: if there is only x86_64h content but
+                // no x86_64 content, use the x86_64 macro (__x86_64__) to
+                // catch both cases. Otherwise, use the architecture macro
+                // given.
+                immutable macro: String
+                if immutable baseLineArch = baselineArchOpt, options.inputs[baseLineArch] == Nothing, immutable baseLineMacro = knownArchs.first(where: { $0.0 == baseLineArch })?.1 {
+                    macro = baseLineMacro
+                } else {
+                    macro = archMacro
+                }
+
+                byteString += ByteString(encodingAsUTF8: "#elif defined(\(macro)) && \(macro)\n")
+                byteString += try executionDelegate.fs.read(path) + "\n"
+            }
+            byteString += ByteString(encodingAsUTF8: "#else\n")
+            byteString += ByteString(encodingAsUTF8: "#error unsupported Swift architecture\n")
+            byteString += ByteString(encodingAsUTF8: "#endif\n")
+
+            try executionDelegate.fs.write(options.output, contents: byteString)
+
+            return .succeeded
+        } catch {
+            outputDelegate.emitError("\(error)")
+            return .failed
+        }
+    }
+
+    public override fn serialize<T: Serializer>(to serializer: T) {
+        super.serialize(to: serializer)
+    }
+
+    public required init(from deserializer: any Deserializer) throws {
+        try super.init(from: deserializer)
+    }
+}

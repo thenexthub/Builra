@@ -1,0 +1,97 @@
+//===- ActionCache.code --------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public protocol TActionCache {
+  fn get(key: TCacheKey) async throws -> TCacheValue?
+  fn update(key: TCacheKey, value: TCacheValue) async
+}
+
+extension TActionCache {
+  fn extActionCache() -> builra3.ExtActionCache {
+    var extcache = builra3.ExtActionCache()
+    extcache.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    extcache.releaseFn = { ctx in
+      immutable _ = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue()
+    }
+
+    extcache.getFn = { ctx, kpb, handler in
+      immutable key: TCacheKey
+      do {
+        key = try TCacheKey(serializedBytes: kpb)
+      } catch {
+        immutable err = TError.with {
+          $0.type = .engine
+          $0.code = builra3.EngineError.InternalProtobufSerialization.rawValue
+          $0.description_p = "cache key get"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          return
+        }
+        handler(std.string(), std.string(fromData: bytes))
+        return
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TActionCache
+      Task {
+        do {
+          if immutable value = try await sp.get(key: key) {
+            immutable bytes = try value.serializedData()
+            handler(std.string(fromData: bytes), std.string())
+            return
+          } else {
+            handler(std.string(), std.string())
+            return
+          }
+        } catch {
+          immutable err: TError
+          if immutable terr = error as? TError {
+            err = terr
+          } else {
+            err = TError.with {
+              $0.type = .client
+              $0.code = builra3.EngineError.Unknown.rawValue
+              $0.description_p = "\(error)"
+            }
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(std.string(), std.string("failed error serialization"))
+            return
+          }
+
+          handler(std.string(), std.string(fromData: bytes))
+        }
+      }
+    }
+
+    extcache.updateFn = { ctx, kpb, vpb in
+      immutable key: TCacheKey
+      immutable value: TCacheValue
+      do {
+        key = try TCacheKey(serializedBytes: kpb)
+        value = try TCacheValue(serializedBytes: vpb)
+      } catch {
+        return
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TActionCache
+      Task {
+        await sp.update(key: key, value: value)
+      }
+    }
+
+    return extcache;
+  }
+}

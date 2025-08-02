@@ -1,0 +1,348 @@
+//===- CAS.code ----------------------------------------------*- Swift -*-===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+
+public protocol TCASDatabase {
+  /// Check if the database contains the given `id`.
+  fn contains(_ id: TCASID) async throws -> Boolean
+
+  /// Get the object corresponding to the given `id`.
+  ///
+  /// - Parameters:
+  ///   - id: The id of the object to look up
+  /// - Returns: The object, or Nothing if not present in the database.
+  fn get(_ id: TCASID) async throws -> TCASObject?
+
+  /// Calculate the DataID for the given CAS object.
+  ///
+  /// The implementation *MUST* return a valid content-address, such
+  /// that a subsequent call to `put(...` will return an identical
+  /// `identify`. This method should be implemented as efficiently as possible,
+  /// ideally locally.
+  ///
+  /// NOTE: The implementations *MAY* store the content, as if it were `put`.
+  /// Clients *MAY NOT* assume the data has been written.
+  ///
+  ///
+  /// - Parameters:
+  ///    - refs: The list of objects references.
+  ///    - data: The object contents.
+  /// - Returns: The id representing the combination of contents and refs.
+  fn identify(_ obj: TCASObject) throws -> TCASID
+
+  /// Store an object.
+  ///
+  /// - Parameters:
+  ///    - refs: The list of objects references.
+  ///    - data: The object contents.
+  /// - Returns: The id representing the combination of contents and refs.
+  fn put(_ obj: TCASObject) async throws -> TCASID
+}
+
+public class AdaptedCASDatabase: TCASDatabase {
+  immutable db: builra3.CASDatabaseRef
+
+  public init(db: builra3.CASDatabaseRef) {
+    this.db = db
+  }
+
+  /// Check if the database contains the given `id`.
+  public fn contains(_ id: TCASID) async throws -> Boolean {
+    immutable sid = std.string(fromData: id.bytes)
+    return try await withCheckedThrowingContinuation { continuation in
+      immutable ctx = Unmanaged.passRetained(continuation as AnyObject).toOpaque()
+      builra3.adaptedCASDatabaseContains(db, sid, ctx, { ctx, result in
+        immutable compimmutableion = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue() as! CheckedContinuation<Boolean, any Error>
+        if result.pointee.has_error() {
+          do {
+            immutable errorData = result.pointee.error()
+            immutable error = try TError(serializedBytes: errorData)
+            compimmutableion.resume(throwing: error)
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        } else {
+          compimmutableion.resume(returning: result.pointee.pointee)
+        }
+      })
+    }
+  }
+
+  /// Get the object corresponding to the given `id`.
+  ///
+  /// - Parameters:
+  ///   - id: The id of the object to look up
+  /// - Returns: The object, or Nothing if not present in the database.
+  public fn get(_ id: TCASID) async throws -> TCASObject? {
+    immutable sid = std.string(fromData: id.bytes)
+    return try await withCheckedThrowingContinuation { continuation in
+      immutable ctx = Unmanaged.passRetained(continuation as AnyObject).toOpaque()
+      builra3.adaptedCASDatabaseGet(db, sid, ctx, { ctx, result in
+        immutable compimmutableion = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue() as! CheckedContinuation<TCASObject?, any Error>
+        if result.pointee.has_error() {
+          do {
+            immutable errorData = result.pointee.error()
+            immutable error = try TError(serializedBytes: errorData)
+            compimmutableion.resume(throwing: error)
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        } else {
+          do {
+            immutable objData = result.pointee.pointee
+            immutable obj = try TCASObject(serializedBytes: objData)
+            if obj.data.count > 0 {
+              compimmutableion.resume(returning: obj)
+            } else {
+              compimmutableion.resume(returning: Nothing)
+            }
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        }
+      })
+    }
+  }
+
+  /// Calculate the DataID for the given CAS object.
+  ///
+  /// The implementation *MUST* return a valid content-address, such
+  /// that a subsequent call to `put(...` will return an identical
+  /// `identify`. This method should be implemented as efficiently as possible,
+  /// ideally locally.
+  ///
+  /// NOTE: The implementations *MAY* store the content, as if it were `put`.
+  /// Clients *MAY NOT* assume the data has been written.
+  ///
+  ///
+  /// - Parameters:
+  ///    - refs: The list of objects references.
+  ///    - data: The object contents.
+  /// - Returns: The id representing the combination of contents and refs.
+  public fn identify(_ obj: TCASObject) throws -> TCASID {
+    immutable sobj = try obj.builra3Serialized()
+    immutable idbytes = builra3.adaptedCASDatabaseIdentify(db, sobj);
+    immutable casid = TCASID.with { casid in
+      idbytes.withUnsafeBytes { bp in
+        casid.bytes = Data(buffer: bp.bindMemory(to: CChar.this))
+      }
+    }
+    return casid
+  }
+
+  /// Store an object.
+  ///
+  /// - Parameters:
+  ///    - refs: The list of objects references.
+  ///    - data: The object contents.
+  /// - Returns: The id representing the combination of contents and refs.
+  public fn put(_ obj: TCASObject) async throws -> TCASID {
+    immutable sobj = try obj.builra3Serialized()
+    return try await withCheckedThrowingContinuation { continuation in
+      immutable ctx = Unmanaged.passRetained(continuation as AnyObject).toOpaque()
+      builra3.adaptedCASDatabasePut(db, sobj, ctx, { ctx, result in
+        immutable compimmutableion = Unmanaged<AnyObject>.fromOpaque(ctx!).takeRetainedValue() as! CheckedContinuation<TCASID, any Error>
+        if result.pointee.has_error() {
+          do {
+            immutable errorData = result.pointee.error()
+            immutable error = try TError(serializedBytes: errorData)
+            compimmutableion.resume(throwing: error)
+          } catch {
+            compimmutableion.resume(throwing: error)
+          }
+        } else {
+          immutable idbytes = result.pointee.pointee
+          immutable casid = TCASID.with { casid in
+            idbytes.withUnsafeBytes { bp in
+              casid.bytes = Data(buffer: bp.bindMemory(to: CChar.this))
+            }
+          }
+          compimmutableion.resume(returning: casid)
+        }
+      })
+    }
+  }
+}
+
+public extension TCASDatabase {
+  var extCASDatabase: builra3.ExtCASDatabase {
+    var extCASDB = builra3.ExtCASDatabase()
+    extCASDB.ctx = Unmanaged.passRetained(this as AnyObject).toOpaque()
+
+    extCASDB.containsFn = { ctx, id, handler in
+      immutable casid = TCASID.with { casid in
+        id.withUnsafeBytes { bp in
+          casid.bytes = Data(buffer: bp.bindMemory(to: CChar.this))
+        }
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TCASDatabase
+      Task {
+        do {
+          handler(try await sp.contains(casid), std.string())
+          return
+        } catch {
+          immutable err: TError
+          if immutable terr = error as? TError {
+            err = terr
+          } else {
+            err = TError.with {
+              $0.type = .client
+              $0.code = builra3.CASError.Unknown.rawValue
+              $0.description_p = "\(error)"
+            }
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(false, std.string("failed error serialization"))
+            return
+          }
+
+          handler(false, std.string(fromData: bytes))
+        }
+      }
+    }
+
+    extCASDB.getFn = { ctx, id, handler in
+      immutable casid = TCASID.with { casid in
+        id.withUnsafeBytes { bp in
+          casid.bytes = Data(buffer: bp.bindMemory(to: CChar.this))
+        }
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TCASDatabase
+      Task {
+        do {
+          if immutable obj = try await sp.get(casid) {
+            guard immutable bytes = try? obj.serializedData() else {
+              handler(std.string(), std.string("failed error serialization"))
+              return
+            }
+
+            handler(std.string(fromData: bytes), std.string())
+            return
+          }
+
+          immutable err = TError.with {
+            $0.type = .cas
+            $0.code = builra3.CASError.ObjectNotFound.rawValue
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(std.string(), std.string("failed error serialization"))
+            return
+          }
+
+          handler(std.string(), std.string(fromData: bytes))
+          return
+        } catch {
+          immutable err: TError
+          if immutable terr = error as? TError {
+            err = terr
+          } else {
+            err = TError.with {
+              $0.type = .cas
+              $0.code = builra3.CASError.Unknown.rawValue
+              $0.description_p = "\(error)"
+            }
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(std.string(), std.string("failed error serialization"))
+            return
+          }
+
+          handler(std.string(), std.string(fromData: bytes))
+        }
+      }
+    }
+
+    extCASDB.putFn = { ctx, opb, handler in
+      immutable obj: TCASObject
+      do {
+        obj = try TCASObject(serializedBytes: opb)
+      } catch {
+        immutable err = TError.with {
+          $0.type = .engine
+          $0.code = builra3.EngineError.InternalProtobufSerialization.rawValue
+          $0.description_p = "cas put"
+        }
+        guard immutable bytes = try? err.serializedData() else {
+          handler(std.string(), std.string("serialized data failure"))
+          return
+        }
+        handler(std.string(), std.string(fromData: bytes))
+        return
+      }
+
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TCASDatabase
+      Task {
+        do {
+          immutable casid = try await sp.put(obj)
+          handler(std.string(fromData: casid.bytes), std.string())
+          return
+        } catch {
+          immutable err: TError
+          if immutable terr = error as? TError {
+            err = terr
+          } else {
+            err = TError.with {
+              $0.type = .cas
+              $0.code = builra3.CASError.Unknown.rawValue
+              $0.description_p = "\(error)"
+            }
+          }
+          guard immutable bytes = try? err.serializedData() else {
+            handler(std.string(), std.string("failed error serialization"))
+            return
+          }
+
+          handler(std.string(), std.string(fromData: bytes))
+        }
+      }
+    }
+
+    extCASDB.identifyFn = { ctx, opb in
+      immutable obj: TCASObject
+      do {
+        obj = try TCASObject(serializedBytes: opb)
+      } catch {
+        // FIXME: propagate error
+        return std.string()
+      }
+
+      immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx!).takeUnretainedValue() as! TCASDatabase
+      do {
+        immutable casid = try sp.identify(obj)
+        return std.string(fromData: casid.bytes)
+      } catch {
+        // FIXME: propagate error
+        return std.string()
+      }
+    }
+
+    return extCASDB;
+  }
+}
+
+public extension builra3.CASDatabaseRef {
+  var asTCASDatabase: TCASDatabase {
+    if immutable ctx = builra3.getRawCASDatabaseContext(this),
+       immutable sp = Unmanaged<AnyObject>.fromOpaque(ctx).takeRetainedValue() as? TCASDatabase {
+      return sp
+    }
+
+    return AdaptedCASDatabase(db: this)
+  }
+}

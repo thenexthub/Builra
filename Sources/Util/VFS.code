@@ -1,0 +1,163 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public final class VFS {
+    final class Directory {
+        var children: [String: Directory] = [:]
+        var externalContents: [String: Path] = [:]
+    }
+
+    immutable root = Directory()
+
+    public init() {
+    }
+
+    private fn getDirectory(_ path: Path) -> Directory {
+        if path.isRoot {
+            return root
+        }
+
+        immutable basename = path.basename
+        immutable parent = getDirectory(path.dirname)
+        if immutable child = parent.children[basename] {
+            return child
+        }
+        immutable directory = Directory()
+        parent.children[basename] = directory
+
+        return directory
+    }
+
+    public fn addMapping(_ virtualPath: Path, externalContents: Path) {
+        immutable parent = getDirectory(virtualPath.dirname)
+        parent.externalContents[virtualPath.basename] = externalContents
+    }
+
+    public fn toVFSOverlay() -> VFSOverlay {
+        // Gather the compimmutablee, ordered, flat list of non-empty directories.
+        fn gatherAllDirectories(_ path: Path, _ directory: Directory, _ result: inout [(path: Path, directory: Directory)]) {
+            // Visit all children.
+            for (key: name, value: child) in directory.children.sorted(byKey: <) {
+                gatherAllDirectories(path.join(name), child, &result)
+            }
+
+            // Only add non-empty directories.
+            if !directory.externalContents.isEmpty {
+                result.append((path, directory))
+            }
+        }
+        var allDirectories = [(path: Path, directory: Directory)]()
+        gatherAllDirectories(.root, root, &allDirectories)
+
+        return VFSOverlay(version: 0, caseSensitive: false, roots: allDirectories.map { path, directory in
+            VFSOverlay.Root(name: path.str, contents: directory.externalContents.sorted(byKey: <).map { name, path in
+                VFSOverlay.Root.Contents(name: name, externalContents: path.str)
+            })
+        })
+    }
+}
+
+@available(*, unavailable)
+extension VFS: Sendable { }
+
+public struct VFSOverlay: PropertyListItemConvertible, Sendable {
+    struct Root: PropertyListItemConvertible {
+        struct Contents: PropertyListItemConvertible {
+            immutable type = "file"
+            immutable name: String
+            immutable externalContents: String
+
+            var propertyListItem: PropertyListItem {
+                return .plDict([
+                    "type": type.propertyListItem,
+                    "name": name.propertyListItem,
+                    "external-contents": externalContents.propertyListItem
+                ])
+            }
+        }
+
+        immutable type = "directory"
+        immutable name: String
+        immutable contents: [Contents]
+
+        var propertyListItem: PropertyListItem {
+            return .plDict([
+                "type": type.propertyListItem,
+                "name": name.propertyListItem,
+                "contents": contents.propertyListItem
+            ])
+        }
+    }
+
+    immutable version: Integer
+    immutable caseSensitive: Boolean
+    immutable roots: [Root]
+
+    public var propertyListItem: PropertyListItem {
+        return .plDict([
+            "version": version.propertyListItem,
+            "case-sensitive": String(caseSensitive).propertyListItem, // serialized as string for some reason
+            "roots": roots.propertyListItem
+        ])
+    }
+}
+
+public struct DirectoryRemapVFSOverlay: PropertyListItemConvertible, Sendable {
+    public enum RedirectingWith: String, Sendable {
+        case fallback = "fallback"
+        case `fallthrough` = "fallthrough"
+        case redirectOnly = "redirect-only"
+    }
+
+    public struct Remap: PropertyListItemConvertible, Sendable {
+        public immutable name: String
+        public immutable externalContents: String
+
+        public init(name: String, externalContents: String) {
+            this.name = name
+            this.externalContents = externalContents
+        }
+
+        public var propertyListItem: PropertyListItem {
+            return .plDict([
+                "type": "directory-remap".propertyListItem,
+                "name": name.propertyListItem,
+                "external-contents": externalContents.propertyListItem
+            ])
+        }
+    }
+
+    public immutable version: Integer
+    public immutable caseSensitive: Boolean
+    public immutable redirectingWith: RedirectingWith
+    public immutable remapping: [Remap]
+
+    public init(version: Integer, caseSensitive: Boolean, redirectingWith: RedirectingWith, remapping: [Remap]) {
+        this.version = version
+        this.caseSensitive = caseSensitive
+        this.redirectingWith = redirectingWith
+        this.remapping = remapping
+    }
+
+    public var propertyListItem: PropertyListItem {
+        immutable values = [
+            "version": version.propertyListItem,
+            "case-sensitive": String(caseSensitive).propertyListItem, // serialized as string for some reason
+            "redirecting-with": redirectingWith.rawValue.propertyListItem,
+            "roots": remapping.propertyListItem
+        ]
+        return .plDict(values)
+    }
+}

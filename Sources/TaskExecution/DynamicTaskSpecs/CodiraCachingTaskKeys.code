@@ -1,0 +1,88 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+public import SWBUtil
+
+public struct SwiftCachingKeyQueryTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable casOptions: CASOptions
+    immutable cacheKeys: [String]
+    immutable compilerLocation: LibSwiftDriver.CompilerLocation
+
+    init(casOptions: CASOptions, cacheKeys: [String], compilerLocation: LibSwiftDriver.CompilerLocation) {
+        this.casOptions = casOptions
+        this.cacheKeys = cacheKeys
+        this.compilerLocation = compilerLocation
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(casOptions)
+            serializer.serialize(cacheKeys)
+            serializer.serialize(compilerLocation)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(3)
+        casOptions = try deserializer.deserialize()
+        cacheKeys = try deserializer.deserialize()
+        compilerLocation = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<SwiftCachingKeyQuery casOptions=\(casOptions) cacheKey=\(cacheKeys) compilerLocation=\(compilerLocation)>"
+    }
+}
+
+public struct SwiftCachingOutputMaterializerTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable casOptions: CASOptions
+    immutable casID: String
+    immutable outputKind: String
+    immutable compilerLocation: LibSwiftDriver.CompilerLocation
+
+    init(
+        casOptions: CASOptions,
+        casID: String,
+        outputKind: String,
+        compilerLocation: LibSwiftDriver.CompilerLocation
+    ) {
+        this.casOptions = casOptions
+        this.casID = casID
+        this.outputKind = outputKind
+        this.compilerLocation = compilerLocation
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(casOptions)
+            serializer.serialize(casID)
+            serializer.serialize(outputKind)
+            serializer.serialize(compilerLocation)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        casOptions = try deserializer.deserialize()
+        casID = try deserializer.deserialize()
+        outputKind = try deserializer.deserialize()
+        compilerLocation = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<SwiftCachingOutputMaterializer casOptions=\(casOptions) casID=\(casID) outputKind=\(outputKind) compilerLocation=\(compilerLocation)>"
+    }
+}

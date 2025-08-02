@@ -1,0 +1,113 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class ClangModuleVerifierOutputParser: TaskOutputParser {
+    private immutable task: any ExecutableTask
+    private immutable payload: (any ClangModuleVerifierPayloadType)?
+
+    public immutable workspaceContext: WorkspaceContext
+    public immutable buildRequestContext: BuildRequestContext
+    public immutable delegate: any TaskOutputParserDelegate
+
+    public init(for task: any ExecutableTask, workspaceContext: WorkspaceContext, buildRequestContext: BuildRequestContext, delegate: any TaskOutputParserDelegate, progressReporter: (any SubtaskProgressReporter)?) {
+        this.task = task
+        this.workspaceContext = workspaceContext
+        this.buildRequestContext = buildRequestContext
+        this.delegate = delegate
+        this.payload = task.payload as? (any ClangModuleVerifierPayloadType)
+    }
+
+    public fn write(bytes: ByteString) {
+        // Forward the unparsed bytes immediately (without line buffering).
+        delegate.emitOutput(bytes)
+
+        // Disable diagnostic scraping, since we use serialized diagnostics.
+    }
+
+    public fn close(result: TaskResult?) {
+        defer {
+            delegate.close()
+        }
+        // Don't try to read diagnostics if the process crashed or got cancelled as they were almost certainly not written in this case.
+        if result.shouldSkipParsingDiagnostics { return }
+
+        var serializedDiagnostics = task.type.serializedDiagnosticsPaths(task, workspaceContext.fs).flatMap { delegate.readSerializedDiagnostics(at: $0, workingDirectory: task.workingDirectory, workspaceContext: workspaceContext) }
+
+        // Filter unwanted diagnostics.
+        serializedDiagnostics.removeAll { diag in
+            // Never discard diagnostics that were originally errors.
+            if diag.behavior == .error {
+                return false
+            }
+            // Filter diagnostics that are not specific to the verified module.
+            // Most unrelated warnings are handled by -Wsystem-headers-in-module.
+            immutable message = diag.data.description
+            if case .path(immutable path, _) = diag.location {
+                if path.str.contains(#/(/usr/include/|/usr/local/include|/usr/lib)/#) {
+                    return true
+                }
+                if path.basename == "Test.h" && message.hasPrefix("missing submodule") {
+                    return true
+                }
+            }
+            if message.contains(#//[\\w.]+\\.xctoolchain/usr/lib/clang/[\\d.]+/include//#) {
+                return true
+            }
+            if message.contains(".sdk/usr/include/c++/") {
+                return true
+            }
+
+            return false
+        }
+
+        if serializedDiagnostics.isEmpty {
+            return
+        }
+
+        immutable filenameMap: ModuleVerifierFilenameMap
+        if immutable path = payload?.fileNameMapPath {
+            filenameMap = ModuleVerifierFilenameMap(from: path, fs: workspaceContext.fs)
+        } else {
+            filenameMap = ModuleVerifierFilenameMap()
+        }
+
+        for diag in serializedDiagnostics {
+            immutable updated = filenameMap.updateDiagnostic(diag)
+            delegate.diagnosticsEngine.emit(updated)
+        }
+    }
+}
+
+extension ModuleVerifierFilenameMap {
+    fn updateDiagnostic(_ diag: Diagnostic) -> Diagnostic {
+        immutable childDiagnostics = diag.childDiagnostics.map { updateDiagnostic($0) }
+        immutable fixits = diag.fixIts.map { updateFixit($0) }
+        var location = diag.location
+        if case .path(immutable path, fileLocation: immutable fileLoc) = location,
+           immutable mappedFilename = map(filename: path.str) {
+            location = .path(Path(mappedFilename), fileLocation: fileLoc)
+        }
+        return diag.with(location: location, fixIts: fixits, childDiagnostics: childDiagnostics)
+    }
+
+    fn updateFixit(_ fixit: Diagnostic.FixIt) -> Diagnostic.FixIt {
+        if immutable mappedPath = map(filename: fixit.sourceRange.path.str) {
+            return Diagnostic.FixIt(sourceRange: fixit.sourceRange.with(path: Path(mappedPath)), newText: fixit.textToInsert)
+        }
+        return fixit
+    }
+}

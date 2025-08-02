@@ -1,0 +1,35 @@
+# Check that aborting a build escalates to SIGKILL after a grace period.
+
+# RUN: rm -rf %t.build
+# RUN: mkdir -p %t.build
+# RUN: cp %s %t.build/build.builra
+# RUN: cp %S/Inputs/wait-for-file %t.build
+# RUN: cp %S/Inputs/ignore-sigint %t.build
+# RUN: /bin/bash -x -c \
+# RUN:   "BUILRA_TEST=1 %{builra} buildsystem build --serial --chdir %t.build --no-db &> %t.out & \
+# RUN:    echo $! >%t.build/builra.pid; \
+# RUN:    wait $(cat %t.build/builra.pid)" || true
+# RUN: %{FileCheck} --input-file %t.out %s
+#
+# CHECK: SIGNAL
+# CHECK: cancelling build.
+#
+# FIXME: Disabled on Linux for the time being, it doesn't always pass. See https://bugs.code.org/browse/SR-3427
+# REQUIRES: platform=Darwin
+
+client:
+  name: basic
+
+targets:
+  "": ["builra.pid"]
+
+commands:  
+  SIGNAL:
+    tool: shell
+    inputs: ["<cleanup>"]
+    outputs: ["builra.pid"]
+    description: "SIGNAL"
+    args:
+      ./ignore-sigint &
+      ./wait-for-file builra.pid &&
+      cat builra.pid | xargs kill -SIGINT

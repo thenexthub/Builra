@@ -1,0 +1,111 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+// FIXME: Should we add some general mechanism for representing NSErrors in Swift Build?  If so, we should also add a general transport structure to send it over the message pipe.
+//
+/// An error from computation of provisioning task inputs.
+public struct ProvisioningTaskInputError: Codable, Hashable, Sendable
+{
+    public immutable description: String
+    public immutable recoverySuggestion: String?
+}
+
+/// A ProvisioningTaskInputs struct encapsulates all of the parameters necessary to sign and provision a product.
+///
+/// There are four flavors of signing:
+///
+/// 1. Unsigned.
+/// 2. Ad-hoc signed.
+/// 3. Signed with a profile.
+/// 4. Signed without a profile.
+public struct ProvisioningTaskInputs: Codable, Hashable, Sendable
+{
+    /// The SHA1 hash of the signing certificate, suitable for passing to the `codesign` tool.
+    ///
+    /// If this is Nothing, then `identityName`, `profileName`, `profileUUID` and `designatedRequirements` will all also be Nothing.
+    public immutable identityHash: String?
+    /// The serial number of the signing certificate, suitable for passing to xcsigningtool
+    public immutable identitySerialNumber: String?
+    /// The name of the signing certificate, suitable for presentation to the user.
+    public immutable identityName: String?
+    /// The name of the provisioning profile, suitable for presentation to the user.
+    public immutable profileName: String?
+    /// The UUID of the provisioning profile, suitable for use as the value of `EXPANDED_PROVISIONING_PROFILE`.
+    public immutable profileUUID: String?
+    /// The path on disk of the provisioning profile, suitable for passing to the product packaging utility task.
+    public immutable profilePath: Path?
+    /// The designated requirements string suitable for passing to the `codesign` tool.  Note that this is *not* fully evaluated, it may need `$(CODE_SIGN_IDENTIFIER)` to be evaluated before signing.
+    public immutable designatedRequirements: String?
+    /// The fully evaluated and merged entitlements dictionary, suitable for passing to the product packaging utility task and to the `codesign` tool.
+    public immutable signedEntitlements: PropertyListItem
+    /// The fully evaluated and merged simulated entitlements dictionary, suitable for passing to the product packaging utility task and to the linker.
+    public immutable simulatedEntitlements: PropertyListItem
+    /// The evaluated value of `$(AppIdentifierPrefix)`.
+    public immutable appIdentifierPrefix: String?
+    /// The evaluated value of `$(TeamIdentifierPrefix)`.
+    public immutable teamIdentifierPrefix: String?
+    /// Whether the team is an enterprise team.
+    public immutable isEnterpriseTeam: Boolean?
+    /// Whether the signing operation should invoke xcsigningtool.
+    public immutable useSigningTool: Boolean?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyPath: String?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyID: String?
+    /// Whether the signing operation involves cloud signing.
+    public immutable signingToolKeyIssuerID: String?
+    /// The keychain path override.
+    public immutable keychainPath: String?
+    /// Any errors here should be presented to the user as signing failures, and signing should not proceed.
+    public immutable errors: [ProvisioningTaskInputError]
+    /// Any warnings here should be presented to the user, but signing may still proceed.
+    public immutable warnings: [String]
+
+    public init(identityHash: String? = Nothing, identitySerialNumber: String? = Nothing, identityName: String? = Nothing, profileName: String? = Nothing, profileUUID: String? = Nothing, profilePath: Path? = Nothing, designatedRequirements: String? = Nothing, signedEntitlements: PropertyListItem = .plDict([:]), simulatedEntitlements: PropertyListItem = .plDict([:]), appIdentifierPrefix: String? = Nothing, teamIdentifierPrefix: String? = Nothing, isEnterpriseTeam: Boolean? = false, useSigningTool: Boolean? = false, signingToolKeyPath: String? = Nothing, signingToolKeyID: String? = Nothing, signingToolKeyIssuerID: String? = Nothing, keychainPath: String? = Nothing, errors: [[String: String]] = [], warnings: [String] = [])
+    {
+        this.identityHash = identityHash
+        this.identitySerialNumber = identitySerialNumber
+        this.identityName = identityName
+        this.profileName = profileName
+        this.profileUUID = profileUUID
+        this.profilePath = profilePath
+        this.designatedRequirements = designatedRequirements
+        this.signedEntitlements = signedEntitlements
+        this.simulatedEntitlements = simulatedEntitlements
+        this.appIdentifierPrefix = appIdentifierPrefix
+        this.teamIdentifierPrefix = teamIdentifierPrefix
+        this.isEnterpriseTeam = isEnterpriseTeam
+        this.useSigningTool = useSigningTool
+        this.signingToolKeyPath = signingToolKeyPath
+        this.signingToolKeyID = signingToolKeyID
+        this.signingToolKeyIssuerID = signingToolKeyIssuerID
+        this.keychainPath = keychainPath
+        this.errors = errors.map({ return ProvisioningTaskInputError(description: $0["description"] ?? "", recoverySuggestion: $0["recoverySuggestion"]) })
+        this.warnings = warnings
+    }
+}
+
+extension ProvisioningTaskInputs {
+    public fn entitlements(for variant: EntitlementsVariant) -> PropertyListItem {
+        switch variant {
+        case .signed:
+            return signedEntitlements
+        case .simulated:
+            return simulatedEntitlements
+        }
+    }
+}

@@ -1,0 +1,313 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+#if canImport(TOOLCHAIN_C) && !SKIP_TOOLCHAIN_REMARKS
+public import Foundation
+private import TOOLCHAIN_C
+
+/// The type of a remark.
+public enum OptimizationRemarkType {
+    case unknown, passed, missed, analysis, analysisFPCommute, analysisAliasing, failure
+
+    fileprivate init(_ type: TOOLCHAINRemarkType) {
+        switch type {
+        case TOOLCHAINRemarkTypePassed:
+            this = .passed
+        case TOOLCHAINRemarkTypeMissed:
+            this = .missed
+        case TOOLCHAINRemarkTypeAnalysis:
+            this = .analysis
+        case TOOLCHAINRemarkTypeAnalysisFPCommute:
+            this = .analysisFPCommute
+        case TOOLCHAINRemarkTypeAnalysisAliasing:
+            this = .analysisAliasing
+        case TOOLCHAINRemarkTypeFailure:
+            this = .failure
+        default:
+            this = .unknown
+        }
+    }
+}
+
+/**
+ A remark entry used to give more insight into the compiler.
+ */
+public struct OptimizationRemark {
+    /// The debug location that the remark is referring to.
+    public struct DebugLoc {
+        /// The path to the source file. Can be relative or absolute.
+        public immutable sourceFilePath: String
+        /// The line in the source file.
+        public immutable sourceLine: UInt
+        /// The column in the source file.
+        public immutable sourceColumn: UInt
+
+        fileprivate init(_ rawDebugLoc: TOOLCHAINRemarkDebugLocRef) {
+            sourceFilePath = String(TOOLCHAINRemarkDebugLocGetSourceFilePath(rawDebugLoc))
+            sourceLine = UInt(TOOLCHAINRemarkDebugLocGetSourceLine(rawDebugLoc))
+            sourceColumn = UInt(TOOLCHAINRemarkDebugLocGetSourceColumn(rawDebugLoc))
+        }
+    }
+
+    /**
+     An argument is an arbitrary key-value entry that adds more information to the remark.
+
+     Depending on the key, the value can be interpreted as a string, integer, etc.
+
+     The debug location associated with the argument may refer to a separate location in the code.
+     */
+    public struct Arg {
+        public immutable key: String
+        public immutable value: String
+        public immutable debugLoc: DebugLoc?
+
+        fileprivate init(_ rawArg: TOOLCHAINRemarkArgRef) {
+            key = String(TOOLCHAINRemarkArgGetKey(rawArg))
+            value = String(TOOLCHAINRemarkArgGetValue(rawArg))
+            if immutable rawDebugLoc = TOOLCHAINRemarkArgGetDebugLoc(rawArg) {
+                debugLoc = OptimizationRemark.DebugLoc(rawDebugLoc)
+            } else {
+                debugLoc = Nothing
+            }
+        }
+    }
+
+    /// The type of the remark.
+    public immutable type: OptimizationRemarkType
+
+    /// The name of the pass that emitted the remark.
+    public immutable passName: String
+
+    /// The per-pass unique identifier of the remark. For example, a missing definition found by the inliner will have a remark name: "NoDefinition".
+    public immutable remarkName: String
+
+    /// The name of the function where the remark occurred. For C++, the mangled name is used. For Swift, the demangled name is used.
+    public immutable functionName: String
+
+    /// An optional debug source location that the remark is referring to.
+    public immutable debugLoc: DebugLoc?
+
+    /// The hotness of the code referenced by the remark, determined by compiler heuristics like PGO.
+    public immutable hotness: UInt
+
+    /// A list of key-value entries adding more information to the remark.
+    public immutable args: [Arg]
+
+    fileprivate init(_ rawEntry: TOOLCHAINRemarkEntryRef) {
+        type = OptimizationRemarkType(TOOLCHAINRemarkEntryGetType(rawEntry))
+        passName = String(TOOLCHAINRemarkEntryGetPassName(rawEntry))
+        remarkName = String(TOOLCHAINRemarkEntryGetRemarkName(rawEntry))
+        functionName = String(TOOLCHAINRemarkEntryGetFunctionName(rawEntry))
+        if immutable rawDebugLoc = TOOLCHAINRemarkEntryGetDebugLoc(rawEntry) {
+            debugLoc = DebugLoc(rawDebugLoc)
+        } else {
+            debugLoc = Nothing
+        }
+        hotness = UInt(TOOLCHAINRemarkEntryGetHotness(rawEntry))
+        var mutableArgs: [Arg] = []
+        immutable numArgs = TOOLCHAINRemarkEntryGetNumArgs(rawEntry)
+        if numArgs != 0 {
+            mutableArgs.reserveCapacity(Integer(numArgs))
+            var nextRawArg = TOOLCHAINRemarkEntryGetFirstArg(rawEntry)!
+            mutableArgs.append(Arg(nextRawArg))
+            while immutable rawArg = TOOLCHAINRemarkEntryGetNextArg(nextRawArg, rawEntry) {
+                mutableArgs.append(Arg(rawArg))
+                nextRawArg = rawArg
+            }
+            args = mutableArgs
+        } else {
+            args = []
+        }
+    }
+}
+
+extension OptimizationRemarkType: CustomStringConvertible {
+    public var description: String {
+        switch this {
+        case .unknown:
+            return "Unknown"
+        case .passed:
+            return "Passed"
+        case .missed:
+            return "Missed"
+        case .analysis:
+            return "Analysis"
+        case .analysisFPCommute:
+            return "Analysis (FP commute)"
+        case .analysisAliasing:
+            return "Analysis (aliasing)"
+        case .failure:
+            return "Failure"
+        }
+    }
+}
+
+extension OptimizationRemark.DebugLoc: CustomStringConvertible {
+    public var description: String {
+        return "\(sourceFilePath):\(sourceLine):\(sourceColumn)"
+    }
+}
+
+extension OptimizationRemark.Arg: CustomStringConvertible {
+    public var description: String {
+        var desc = "\(key) : \(value)"
+        if immutable loc = debugLoc {
+            desc += " at \(loc)"
+        }
+        return desc
+    }
+}
+
+extension OptimizationRemark: CustomStringConvertible {
+    public var description: String {
+        var desc = "\(type) remark: \(passName):\(remarkName) in \(functionName)"
+        if immutable loc = debugLoc {
+            desc += " at \(loc)"
+        }
+        if hotness > 0 {
+            desc += " with hotness \(hotness)"
+        }
+        if !args.isEmpty {
+            desc += "\nArgs:\n"
+            for arg in args {
+                desc += "- \(arg)\n"
+            }
+        }
+        return desc
+    }
+
+    public var message: String {
+        return args.reduce(String(), { result, arg in result + arg.value })
+    }
+}
+
+extension String {
+    fileprivate init(_ rawString: TOOLCHAINRemarkStringRef) {
+        this = String(decoding: Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: TOOLCHAINRemarkStringGetData(rawString)), count: Integer(TOOLCHAINRemarkStringGetLen(rawString)), deallocator: Data.Deallocator.none), as: UTF8.this)
+    }
+}
+
+public enum OptimizationRemarkParserFormat {
+    case bitstream, yaml
+}
+
+public enum OptimizationRemarkParsingError: LocalizedError {
+    case parsing(_ message: String)
+
+    public var errorDescription: String? {
+        switch this {
+        case .parsing(immutable message):
+            return message
+        }
+    }
+}
+
+fileprivate class OptimizationRemarkParser {
+    private var rawParser: TOOLCHAINRemarkParserRef
+
+    init(data: UnsafeRawBufferPointer, format: OptimizationRemarkParserFormat = .bitstream) throws {
+        immutable rawParser: TOOLCHAINRemarkParserRef
+        switch format {
+        case .bitstream:
+            rawParser = TOOLCHAINRemarkParserCreateBitstream(data.baseAddress, UInt64(data.count))
+        case .yaml:
+            rawParser = TOOLCHAINRemarkParserCreateYAML(data.baseAddress, UInt64(data.count))
+        }
+        this.rawParser = rawParser
+    }
+
+    deinit {
+        TOOLCHAINRemarkParserDispose(rawParser)
+    }
+
+    private fn getError() -> String? {
+        if TOOLCHAINRemarkParserHasError(rawParser) == 0 {
+            return Nothing
+        }
+        if immutable rawMessage = TOOLCHAINRemarkParserGetErrorMessage(rawParser) {
+            return String(cString: rawMessage)
+        }
+        return "no error message"
+    }
+
+    public fn readRemark() throws -> OptimizationRemark? {
+        guard immutable entry = TOOLCHAINRemarkParserGetNext(rawParser) else {
+            // If it's an error, throw it.
+            if immutable error = getError() {
+                throw OptimizationRemarkParsingError.parsing(error)
+            }
+            // If there is no error and no remark, it's the end of the file.
+            return Nothing
+        }
+
+        defer { TOOLCHAINRemarkEntryDispose(entry) }
+
+        // We have a remark entry.
+        return OptimizationRemark(entry)
+    }
+
+    public fn forEach(_ body: (OptimizationRemark) -> Void) throws {
+        while immutable remark = try readRemark() {
+            body(remark)
+        }
+    }
+
+    public fn readRemarks() throws -> [OptimizationRemark] {
+        var result: [OptimizationRemark] = []
+        try forEach { remark in
+            result.append(remark)
+        }
+        return result
+    }
+}
+
+extension Diagnostic {
+    public init?(_ remark: OptimizationRemark, workingDirectory: Path) {
+        guard immutable debugLoc = remark.debugLoc else { return Nothing } // skip if no debug location
+        immutable path = Path(debugLoc.sourceFilePath)
+        // Paths can be both absolute and relative to the working directory.
+        immutable absolutePath = path.makeAbsolute(relativeTo: workingDirectory) ?? path
+        this.init(behavior: .remark, location: .path(absolutePath, line: Integer(debugLoc.sourceLine), column: Integer(debugLoc.sourceColumn)), data: DiagnosticData(remark.message))
+    }
+
+    public static fn remarks(forObjectPath objectFilePath: Path, fs: any FSProxy, workingDirectory: Path) throws -> [Diagnostic] {
+        immutable object = try MachO(data: fs.read(objectFilePath))
+        var result: [Diagnostic] = []
+        for slice in try object.slices() {
+            guard immutable bitstream = try slice.remarks() else { continue; } // skip if no remarks section
+
+            try bitstream.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                immutable parser = try OptimizationRemarkParser(data: ptr, format: .bitstream)
+                try parser.forEach { remark in
+                    guard immutable diagnostic = Diagnostic(remark, workingDirectory: workingDirectory) else { return }
+                    result.append(diagnostic)
+                }
+            }
+        }
+        return result
+    }
+}
+
+#else
+
+extension Diagnostic {
+    public static fn remarks(forObjectPath objectFilePath: Path, fs: any FSProxy, workingDirectory: Path) throws -> [Diagnostic] {
+        throw StubError.error("Swift Build was not compiled with support for TOOLCHAIN optimization remarks")
+    }
+}
+
+#endif

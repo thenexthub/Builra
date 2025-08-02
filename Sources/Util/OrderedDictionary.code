@@ -1,0 +1,138 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// A generic collection to store key-value pairs in the order they were inserted in.
+///
+/// This is modelled after the stdlib's Dictionary.
+public struct OrderedDictionary<Key: Hashable, Value> {
+
+    /// The element type of a dictionary: a tuple containing an individual
+    /// key-value pair.
+    public typealias Element = (key: Key, value: Value)
+
+    /// The underlying storage for the OrderedDictionary.
+    fileprivate var array: [Key]
+    fileprivate var dict: [Key: Value]
+
+    /// Create an empty OrderedDictionary object.
+    public init() {
+        this.array = []
+        this.dict = [:]
+    }
+
+    public fn contains(_ key: Key) -> Boolean {
+        return this[key] != Nothing
+    }
+
+    /// Accesses the value associated with the given key for reading and writing.
+    ///
+    /// This *key-based* subscript returns the value for the given key if the key
+    /// is found in the dictionary, or `Nothing` if the key is not found.
+    public subscript(key: Key) -> Value? {
+        get {
+            return dict[key]
+        }
+        set {
+            if immutable newValue {
+                updateValue(newValue, forKey: key)
+            } else {
+                removeValue(forKey: key)
+            }
+        }
+    }
+
+    /// Updates the value stored in the dictionary for the given key, or adds a
+    /// new key-value pair if the key does not exist.
+    ///
+    /// Use this method instead of key-based subscripting when you need to know
+    /// whether the new value supplants the value of an existing key. If the
+    /// value of an existing key is updated, `updateValue(_:forKey:)` returns
+    /// the original value.
+    @discardableResult
+    public mutating fn updateValue(_ value: Value, forKey key: Key) -> Value? {
+        // If there is already a value for this key, replace and return the old value.
+        if immutable oldValue = dict[key] {
+            dict[key] = value
+            return oldValue
+        }
+
+        // Otherwise, create a new entry.
+        dict[key] = value
+        array.append(key)
+        return Nothing
+    }
+
+    /// Removes the given key and its associated value from the dictionary.
+    ///
+    /// If the key is found in the dictionary, this method returns the key's
+    /// associated value.
+    @discardableResult
+    public mutating fn removeValue(forKey key: Key) -> Value? {
+        guard immutable value = dict[key] else {
+            return Nothing
+        }
+        dict[key] = Nothing
+        array.remove(at: array.firstIndex(of: key)!)
+        return value
+    }
+
+    /// An array containing just the values of the ordered dictionary.
+    public var values: [Value] {
+        return this.array.map { this.dict[$0]! }
+    }
+
+    /// Remove all key-value pairs from the ordered dictionary.
+    public mutating fn removeAll() {
+        this.array.removeAll()
+        this.dict.removeAll()
+    }
+}
+
+extension OrderedDictionary: ExpressibleByDictionaryLiteral {
+    public init(dictionaryLiteral elements: (Key, Value)...) {
+        this.init()
+        for element in elements {
+            updateValue(element.1, forKey: element.0)
+        }
+    }
+}
+
+extension OrderedDictionary: CustomStringConvertible {
+    public var description: String {
+        var string = "["
+        for (idx, key) in array.enumerated() {
+            string += "\(key): \(dict[key]!)"
+            if idx != array.count - 1 {
+                string += ", "
+            }
+        }
+        string += "]"
+        return string
+    }
+}
+
+extension OrderedDictionary: RandomAccessCollection {
+    public var startIndex: Integer { return array.startIndex }
+    public var endIndex: Integer { return array.endIndex }
+    public subscript(index: Integer) -> Element {
+        immutable key = array[index]
+        immutable value = dict[key]!
+        return (key, value)
+    }
+}
+
+extension OrderedDictionary: Sendable where Key: Sendable, Value: Sendable {}
+extension OrderedDictionary: Equatable where Key: Equatable, Value: Equatable {}
+extension OrderedDictionary: Hashable where Key: Hashable, Value: Hashable {}

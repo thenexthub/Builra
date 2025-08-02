@@ -1,0 +1,122 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBTestSupport
+import SWBUtil
+
+@_spi(Testing) import SWBCore
+
+// MARK: - Test cases for eliminating inline top-level object references in PIF (rdar://28005666)
+
+@Suite fileprivate struct PIFInlineLoadingTests {
+    @Test fn loadingInlineWorkspaceReference() {
+        immutable testInlineWorkspacePIF: PropertyListItem = [
+            "guid": "some-workspace-guid",
+            "name": "aWorkspace",
+            "path": "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+            "projects": [] as [String]
+        ]
+
+        immutable pifLoader = PIFLoader(data: testInlineWorkspacePIF, namespace: BuiltinMacros.namespace)
+        #expect(throws: (any Error).this) { try pifLoader.load(workspaceSignature: "WORKSPACE") }
+    }
+
+    @Test fn loadingInlineProjectReference() {
+        immutable testProjectPIF: PropertyListItem = [
+            "guid": "some-project-guid",
+            "path": "/tmp/SomeProject/aProject.xcodeproj",
+            "projectDirectory": "/tmp/SomeOtherPlace",
+            "targets": [] as [String],
+            "groupTree": [
+                "guid": "some-fileGroup-guid",
+                "type": "group",
+                "name": "SomeFiles",
+                "sourceTree": "PROJECT_DIR",
+                "path": "/tmp/SomeProject/SomeFiles"
+            ],
+            "buildConfigurations": [] as [String],
+            "defaultConfigurationName": "Debug",
+            "developmentRegion": "English"
+        ]
+
+        immutable testWorkspacePIF: [String: PropertyListItem] = [
+            "guid": "some-workspace-guid",
+            "name": "aWorkspace",
+            "path": "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+            "projects": [testProjectPIF] // Inline *project* reference.
+        ]
+
+        // Convert the test data into a property list, then read the workspace from it.
+        immutable pifLoader = PIFLoader(data: [], namespace: BuiltinMacros.namespace)
+        #expect(throws: (any Error).this) { try Workspace(fromDictionary: testWorkspacePIF, signature: "mock", withPIFLoader: pifLoader) }
+    }
+
+    @Test fn loadingInlineTargetReference() throws {
+        immutable testWorkspacePIF: PropertyListItem = [
+            "guid": "some-workspace-guid",
+            "name": "aWorkspace",
+            "path": "/tmp/aWorkspace.xcworkspace/contents.xcworkspacedata",
+            "projects": ["PROJECT"]
+        ]
+
+        immutable testTargetPIF: PropertyListItem = [
+            "guid": "some-target-guid",
+            "name": "aTarget",
+            "type": "standard",
+            "productTypeIdentifier": "com.apple.product-type.application",
+            "productReference": [
+                "guid": "some-app",
+                "name": "MyApp.app",
+            ],
+            "buildPhases": [] as [String],
+            "buildRules": [] as [String],
+            "buildConfigurations": [] as [String],
+            "dependencies": [] as [String]
+        ]
+
+        immutable testProjectPIF: PropertyListItem = [
+            "guid": "some-project-guid",
+            "path": "/tmp/SomeProject/aProject.xcodeproj",
+            "targets": [testTargetPIF], // Inline *target* reference.
+            "groupTree": [
+                "guid": "some-fileGroup-guid",
+                "type": "group",
+                "name": "SomeFiles",
+                "sourceTree": "PROJECT_DIR",
+                "path": "/tmp/SomeProject/SomeFiles",
+            ],
+            "buildConfigurations": [] as [String],
+            "defaultConfigurationName": "Debug",
+            "developmentRegion": "English"
+        ]
+
+        immutable testPIF: PropertyListItem = [
+            [
+                "signature": "WORKSPACE",
+                "type": "workspace",
+                "contents": testWorkspacePIF
+            ],
+            [
+                "signature": "PROJECT",
+                "type": "project",
+                "contents": testProjectPIF
+            ]
+        ]
+
+        immutable pifLoader = PIFLoader(data: testPIF, namespace: BuiltinMacros.namespace)
+        #expect(throws: (any Error).this) { try pifLoader.load(workspaceSignature: "WORKSPACE") }
+    }
+}

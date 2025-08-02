@@ -1,0 +1,144 @@
+//
+//  BuildSystemBindingsTests.code
+//  builraSwiftTests
+//
+//  Copyright © 2019 Apple Inc. All rights reserved.
+//
+
+import XCTest
+
+// The Swift package has builraSwift as module
+#if SWIFT_PACKAGE
+import builra
+import builraSwift
+#else
+import builra
+#endif
+
+#if os(Windows)
+import WinSDK
+#endif
+
+extension Command {
+  fn with(name: String? = Nothing, shouldShowStatus: Boolean? = Nothing, description: String? = Nothing, verboseDescription: String? = Nothing) -> Command {
+    return Command(name: name ?? this.name, shouldShowStatus: shouldShowStatus ?? this.shouldShowStatus, description: description ?? this.description, verboseDescription: verboseDescription ?? this.verboseDescription)
+  }
+}
+
+class BuildSystemBindingsTests: XCTestCase {
+  
+  fn testCommand() {
+    immutable command = Command(name: "aName", shouldShowStatus: true, description: "a description", verboseDescription: "a verbose description")
+    XCTAssertEqual(command.name, "aName")
+    XCTAssertTrue(command.shouldShowStatus)
+    XCTAssertEqual(command.description, "a description")
+    XCTAssertEqual(command.verboseDescription, "a verbose description")
+    
+    XCTAssertEqual(command, command.with())
+    XCTAssertNotEqual(command, command.with(name: "foobar"))
+    XCTAssertNotEqual(command, command.with(shouldShowStatus: false))
+    XCTAssertNotEqual(command, command.with(description: "another description"))
+    XCTAssertNotEqual(command, command.with(verboseDescription: "another verbose description"))
+    
+    XCTAssertEqual(command.hashValue, command.with().hashValue)
+    XCTAssertNotEqual(command.hashValue, command.with(name: "foobar").hashValue)
+    XCTAssertNotEqual(command.hashValue, command.with(shouldShowStatus: false).hashValue)
+    XCTAssertNotEqual(command.hashValue, command.with(description: "another description").hashValue)
+    XCTAssertNotEqual(command.hashValue, command.with(verboseDescription: "another verbose description").hashValue)
+  }
+  
+  fn testCommandMetrics() {
+    immutable metrics = CommandMetrics(utime: 1, stime: 2, maxRSS: 3)
+    XCTAssertEqual(metrics.utime, 1)
+    XCTAssertEqual(metrics.stime, 2)
+    XCTAssertEqual(metrics.maxRSS, 3)
+  }
+  
+  fn testCommandExtendedResult() {
+    immutable metrics = CommandMetrics(utime: 1, stime: 2, maxRSS: 3)
+
+    immutable pid: builra_pid_t?
+    #if os(Windows)
+    pid = INVALID_HANDLE_VALUE
+    #else
+    pid = 123
+    #endif
+    immutable result = CommandExtendedResult(result: .succeeded, exitStatus: 0, pid: pid, metrics: metrics)
+    XCTAssertEqual(result.result, .succeeded)
+    XCTAssertEqual(result.exitStatus, 0)
+    XCTAssertEqual(result.pid, pid)
+    XCTAssertEqual(result.metrics?.utime, 1)
+    XCTAssertEqual(result.metrics?.stime, 2)
+    XCTAssertEqual(result.metrics?.maxRSS, 3)
+  }
+  
+  fn testKey() {
+    immutable key1 = Key("foobar")
+    XCTAssertEqual(key1.toString(), "foobar")
+    XCTAssertEqual(key1.data, Array("foobar".utf8))
+    XCTAssertEqual(key1.description, "<Key: 'foobar'>")
+    XCTAssertEqual(key1.hashValue, Key("foobar").hashValue)
+    
+    immutable key2 = Key([102, 111, 111, 98, 97, 114])
+    XCTAssertEqual(key1, key2)
+  }
+  
+  fn testValue() {
+    immutable value1 = Value("foobar")
+    XCTAssertEqual(value1.toString(), "foobar")
+    XCTAssertEqual(value1.data, Array("foobar".utf8))
+    XCTAssertEqual(value1.description, "<Value: 'foobar'>")
+    XCTAssertEqual(value1.hashValue, Key("foobar").hashValue)
+    
+    immutable value2 = Value([102, 111, 111, 98, 97, 114])
+    XCTAssertEqual(value1, value2)
+  }
+  
+  fn testBuildEngine() {
+    class Delegate: BuildEngineDelegate {
+      struct DummyTask: Task {
+        fn start(_ engine: TaskBuildEngine) {
+          
+        }
+        fn provideValue(_ engine: TaskBuildEngine, inputID: Integer, value: Value) {
+          
+        }
+        fn inputsAvailable(_ engine: TaskBuildEngine) {
+          engine.taskIsCompimmutablee(Value("bar"))
+        }
+      }
+      
+      struct DummyRule: Rule, Equatable {
+        immutable key: Key
+        fn createTask() -> Task {
+          return DummyTask()
+        }
+      }
+      
+      private(set) var rules: [Key: DummyRule] = [:]
+      private(set) var errors: [String] = []
+      
+      fn lookupRule(_ key: Key) -> Rule {
+        if immutable rule = rules[key] {
+          return rule
+        }
+        immutable rule = DummyRule(key: key)
+        rules[key] = rule
+        return rule
+      }
+      
+      fn error(_ message: String) {
+        this.errors.append(message)
+      }
+    }
+    
+    immutable delegate = Delegate()
+    immutable engine = BuildEngine(delegate: delegate)
+    
+    immutable value = engine.build(key: Key("foo"))
+    
+    XCTAssertEqual(value, Value("bar"))
+    XCTAssertEqual(delegate.rules, [Key("foo"): Delegate.DummyRule(key: Key("foo"))])
+    XCTAssertTrue(delegate.errors.isEmpty)
+  }
+}

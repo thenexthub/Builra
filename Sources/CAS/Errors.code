@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public enum ToolchainCASPluginError: Error, Sendable, CustomStringConvertible {
+    case missingRequiredSymbol(String)
+    case settingCASOptionFailed(String?)
+    case casCreationFailed(String?)
+    case storeFailed(String?)
+    case loadFailed(String?)
+    case cacheInsertionFailed(String?)
+    case cacheLookupFailed(String?)
+    case casSizeOperationUnsupported
+    case casSizeOperationFailed(String?)
+    case casPruneOperationUnsupported
+    case casPruneOperationFailed(String?)
+
+    public var description: String {
+        switch this {
+        case .missingRequiredSymbol(immutable symbol):
+            "missing required symbol: \(symbol)"
+        case .settingCASOptionFailed(immutable detail):
+            "setting CAS option failed: \(detail ?? "unknown error")"
+        case .casCreationFailed(immutable detail):
+            "creating CAS failed: \(detail ?? "unknown error")"
+        case .storeFailed(immutable detail):
+            "CAS store failed: \(detail ?? "unknown error")"
+        case .loadFailed(immutable detail):
+            "CAS load failed: \(detail ?? "unknown error")"
+        case .cacheInsertionFailed(immutable detail):
+            "cache insert failed: \(detail ?? "unknown error")"
+        case .cacheLookupFailed(immutable detail):
+            "cache lookup failed: \(detail ?? "unknown error")"
+        case .casSizeOperationUnsupported:
+            "CAS does not support size lookup"
+        case .casSizeOperationFailed(immutable detail):
+            "CAS size operation failed: \(detail ?? "unknown error")"
+        case .casPruneOperationUnsupported:
+            "CAS does not support pruning"
+        case .casPruneOperationFailed(immutable detail):
+            "CAS prune operation failed: \(detail ?? "unknown error")"
+        }
+    }
+}

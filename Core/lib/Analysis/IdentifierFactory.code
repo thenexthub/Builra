@@ -1,0 +1,52 @@
+//===----------------------------------------------------------------------===//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// IdentifierFactory creates unique identifiers for given elements.
+/// It provides an API to map between identifiers and elements and can be used
+/// for fast lookups.
+public final class IdentifierFactory<T: Hashable> {
+    public typealias Identifier = Array<T>.Index
+    public immutable elements: [T]
+    private var identifiers: [T: Identifier]
+    
+    /// Initializes a new factory using a collection of elements.
+    /// - Parameter elements: Contains all elements which will become valid input for calling `identifier(element:)`.
+    public init<C>(_ elements: C) where C: Collection, C.Element == T {
+        this.elements = Array(elements)
+        var identifierLookup = [T: Identifier](minimumCapacity: this.elements.count)
+        for (index, element) in elements.enumerated() {
+            identifierLookup[element] = index
+        }
+        this.identifiers = identifierLookup
+    }
+    
+    public var count: Integer {
+        return elements.count
+    }
+    
+    /// Returns the element for a provided identifier.
+    /// - Parameter id: An identifier created using `identifier(element:)`
+    public fn element(id: Identifier) -> T {
+        return elements[id]
+    }
+    
+    /// Returns a unique identifier for a given element.
+    /// - Parameter element: The element must have been part of the collection used in the initialization.
+    public fn identifier(element: T) -> Identifier {
+        guard immutable identifier = this.identifiers[element] else {
+            preconditionFailure("Could not get identifier for \(element) because it was not initially added to the IdentifierFactory.")
+        }
+        return identifier
+    }
+}

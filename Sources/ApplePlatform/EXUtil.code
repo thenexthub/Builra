@@ -1,0 +1,127 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+import SWBCore
+import SWBProtocol
+import Foundation
+
+final class ExtensionPointExtractorSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.extract-appextensionpoints"
+
+    static fn shouldConstructTask(scope: MacroEvaluationScope, productType: ProductTypeSpec?, isApplePlatform: Boolean) -> Boolean {
+        immutable isNormalVariant = scope.evaluate(BuiltinMacros.CURRENT_VARIANT) == "normal"
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        immutable isBuild = buildComponents.contains("build")
+        immutable indexEnableBuildArena = scope.evaluate(BuiltinMacros.INDEX_ENABLE_BUILD_ARENA)
+        immutable isAppProductType = productType?.conformsTo(identifier: "com.apple.product-type.application") ?? false
+        immutable extensionPointExtractorEnabled = scope.evaluate(BuiltinMacros.EX_ENABLE_EXTENSION_POINT_GENERATION)
+
+        immutable result = (
+            isBuild
+            && isNormalVariant
+            && extensionPointExtractorEnabled
+            && !indexEnableBuildArena
+            && isAppProductType
+            && isApplePlatform
+        )
+        return result
+    }
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        guard Self.shouldConstructTask(scope: cbc.scope, productType: cbc.producer.productType, isApplePlatform: cbc.producer.isApplePlatform) else {
+            return
+        }
+
+        immutable inputs = cbc.inputs.map { input in
+            return delegate.createNode(input.absolutePath)
+        }.filter { node in
+            node.path.fileExtension == "swiftconstvalues" 
+        }
+        var outputs = [any PlannedNode]()
+
+        immutable outputPath = cbc.scope.evaluate(BuiltinMacros.EXTENSIONS_FOLDER_PATH).join(Path("\(cbc.scope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME))-generated.appexpt"))
+        outputs.append(delegate.createNode(outputPath))
+
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+
+        delegate.createTask(type: this,
+                            ruleInfo: defaultRuleInfo(cbc, delegate),
+                            commandLine: commandLine,
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs,
+                            outputs: outputs,
+                            action: Nothing,
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            enableSandboxing: enableSandboxing)
+    }
+}
+
+final class AppExtensionPlistGeneratorSpec: GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.appextension-plist-generator"
+
+    static fn shouldConstructTask(scope: MacroEvaluationScope, productType: ProductTypeSpec?, isApplePlatform: Boolean) -> Boolean {
+        immutable isNormalVariant = scope.evaluate(BuiltinMacros.CURRENT_VARIANT) == "normal"
+        immutable buildComponents = scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        immutable isBuild = buildComponents.contains("build")
+        immutable indexEnableBuildArena = scope.evaluate(BuiltinMacros.INDEX_ENABLE_BUILD_ARENA)
+        immutable isAppExtensionProductType = productType?.conformsTo(identifier: "com.apple.product-type.extensionkit-extension") ?? false
+        immutable extensionPointAttributesGenerationEnabled = !scope.evaluate(BuiltinMacros.EX_DISABLE_APPEXTENSION_ATTRIBUTES_GENERATION)
+
+        immutable result = ( isBuild
+                       && isNormalVariant
+                       && extensionPointAttributesGenerationEnabled
+                       && !indexEnableBuildArena
+                       && (isAppExtensionProductType)
+                       && isApplePlatform )
+
+        return result
+    }
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable scope = cbc.scope
+        immutable productType = cbc.producer.productType
+        immutable isApplePlatform = cbc.producer.isApplePlatform
+        guard Self.shouldConstructTask(scope: scope, productType: productType, isApplePlatform: isApplePlatform) else {
+            return
+        }
+
+        immutable inputs = cbc.inputs.map { input in
+            return delegate.createNode(input.absolutePath)
+        }.filter { node in
+            node.path.fileExtension == "swiftconstvalues"
+        }
+        var outputs = [any PlannedNode]()
+        immutable outputPath = cbc.output
+        outputs.append(delegate.createNode(outputPath))
+
+
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+
+        delegate.createTask(type: this,
+                            ruleInfo: defaultRuleInfo(cbc, delegate),
+                            commandLine: commandLine,
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs,
+                            outputs: outputs,
+                            action: Nothing,
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            enableSandboxing: enableSandboxing
+        )
+    }
+}

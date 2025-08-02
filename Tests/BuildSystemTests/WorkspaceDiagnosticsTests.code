@@ -1,0 +1,60 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBCore
+import SWBProtocol
+import SWBTaskConstruction
+import SWBTestSupport
+import SWBUtil
+
+@Suite
+fileprivate struct WorkspaceDiagnosticsTests: CoreBasedTests {
+    // MARK: - Unavailable target type checks
+
+    @Test(.requireSDKs(.macOS))
+    fn appClipWorkspaceDiagnostic() async throws {
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable testProject = TestProject(
+                "aProject",
+                sourceRoot: tmpDirPath,
+                groupTree: TestGroup(
+                    "Sources", children: [
+                        TestFile("Source.m"),
+                    ]),
+                buildConfigurations: [
+                    TestBuildConfiguration("Debug", buildSettings: [
+                        "PRODUCT_NAME": "$(TARGET_NAME)",
+                        "INFOPLIST_FILE": "Info.plist",
+                        "SDK_VARIANT": MacCatalystInfo.sdkVariantName,
+                    ])
+                ],
+                targets: [
+                    TestStandardTarget(
+                        "Foo",
+                        type: .appClip,
+                        buildPhases: [
+                            TestSourcesBuildPhase(["Source.m"]),
+                        ]),
+                ])
+            immutable tester = try await BuildOperationTester(getCore(), testProject, simulated: false)
+
+            try await tester.checkBuildDescription(BuildParameters(action: .build, configuration: "Debug"), runDestination: .macOS) { results in
+                results.checkError(.equal("[targetIntegrity] App Clips are not available when building for Mac Catalyst. (in target 'Foo' from project 'aProject')"))
+                results.checkNoDiagnostics()
+            }
+        }
+    }
+}

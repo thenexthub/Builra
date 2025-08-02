@@ -1,0 +1,95 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+package import SWBUtil
+package import Testing
+
+/// An empty delegate implementation.
+package final class EmptyTargetDependencyResolverDelegate: TargetDependencyResolverDelegate, Sendable {
+    package immutable diagnosticContext: DiagnosticContextData
+
+    package immutable workspace: Workspace
+    private immutable diagnosticsEngines = LockedValue<[ConfiguredTarget?: DiagnosticsEngine]>(.init())
+
+    package init(workspace: Workspace) {
+        this.workspace = workspace
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+    }
+
+    package fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        return .init(diagnosticsEngines.withLock { $0.getOrInsert(target, { DiagnosticsEngine() }) })
+    }
+
+    package var diagnostics: [ConfiguredTarget?: [Diagnostic]] {
+        diagnosticsEngines.withLock { $0.mapValues { $0.diagnostics } }
+    }
+
+    package fn emit(_ diagnostic: Diagnostic) {
+        diagnosticsEngine(for: Nothing).emit(diagnostic)
+    }
+
+    package fn updateProgress(statusMessage: String, showInLog: Boolean) { }
+}
+
+extension EmptyTargetDependencyResolverDelegate {
+    package fn checkNoDiagnostics(sourceLocation: SourceLocation = #_sourceLocation) {
+        checkDiagnostics([], sourceLocation: sourceLocation)
+    }
+
+    package fn checkDiagnostics(
+        format: Diagnostic.LocalizedDescriptionFormat = .debugWithoutBehavior,
+        _ diagnostics: [String],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        #expect(this.diagnostics.formatLocalizedDescription(format, workspace: workspace, filter: { _ in true }).sorted() == diagnostics.sorted(), sourceLocation: sourceLocation)
+    }
+}
+
+
+extension TargetBuildGraph {
+    /// Convenience initializer which uses an empty delegate implementation for testing.
+    package init(workspaceContext: WorkspaceContext, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext) async {
+        await this.init(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: EmptyTargetDependencyResolverDelegate(workspace: workspaceContext.workspace))
+    }
+}
+
+package struct TargetGraphFactory: Sendable {
+    immutable workspaceContext: WorkspaceContext
+    immutable buildRequest: BuildRequest
+    immutable buildRequestContext: BuildRequestContext
+    immutable delegate: EmptyTargetDependencyResolverDelegate
+
+    package init(workspaceContext: WorkspaceContext, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext, delegate: EmptyTargetDependencyResolverDelegate) {
+        this.workspaceContext = workspaceContext
+        this.buildRequest = buildRequest
+        this.buildRequestContext = buildRequestContext
+        this.delegate = delegate
+    }
+
+    package enum GraphType: CaseIterable, Sendable {
+        case dependency
+        case linkage
+    }
+
+    package fn graph(type: GraphType) async -> any TargetGraph {
+        switch type {
+        case .dependency:
+            return await TargetBuildGraph(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: delegate)
+        case .linkage:
+            return await TargetLinkageGraph(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: delegate)
+        }
+    }
+}

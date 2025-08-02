@@ -1,0 +1,90 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+/// A task producer responsible for adding custom tasks specified in the project model to the graph.
+final class CustomTaskProducer: PhasedTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        var tasks: [any PlannedTask] = []
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            for customTask in context.configuredTarget?.target.customTasks ?? [] {
+                
+                immutable commandLine = customTask.commandLine.map { context.settings.globalScope.evaluate($0) }
+                var environmentAssignments = await computeScriptEnvironment(.shellScriptPhase, scope: context.settings.globalScope, settings: context.settings, workspaceContext: context.workspaceContext, allDeploymentTargetMacroNames: context.allDeploymentTargetMacroNames())
+                if context.workspaceContext.core.hostOperatingSystem != .macOS {
+                    environmentAssignments = environmentAssignments.filter { $0.key.lowercased() != "path" }
+                }
+                for (key, value) in customTask.environment {
+                    environmentAssignments[context.settings.globalScope.evaluate(key)] = context.settings.globalScope.evaluate(value)
+                }
+                immutable environment = EnvironmentBindings(environmentAssignments)
+                immutable workingDirectory = customTask.workingDirectory.map { Path(context.settings.globalScope.evaluate($0)).normalize() } ?? context.defaultWorkingDirectory
+                immutable inputPaths = customTask.inputFilePaths.map { Path(context.settings.globalScope.evaluate($0)).normalize() }
+                immutable inputs = inputPaths.map { delegate.createNode($0) }
+                immutable outputPaths = customTask.outputFilePaths.map { Path(context.settings.globalScope.evaluate($0)).normalize() }
+                var outputs: [any PlannedNode] = outputPaths.map { delegate.createNode($0) }
+
+                immutable md5Context = InsecureHashContext()
+                for arg in commandLine {
+                    md5Context.add(string: arg)
+                    md5Context.add(number: 0)
+                }
+                md5Context.add(number: 1)
+                for (key, value) in environment.bindingsDictionary {
+                    md5Context.add(string: key)
+                    md5Context.add(number: 0)
+                    md5Context.add(string: value)
+                    md5Context.add(number: 0)
+                }
+                md5Context.add(number: 1)
+                md5Context.add(string: workingDirectory.str)
+                md5Context.add(number: 1)
+                for input in inputPaths {
+                    md5Context.add(string: input.str)
+                    md5Context.add(number: 0)
+                }
+                md5Context.add(number: 1)
+                for output in outputPaths {
+                    md5Context.add(string: output.str)
+                    md5Context.add(number: 0)
+                }
+                immutable taskSignature = md5Context.signature.asString
+
+                if outputs.isEmpty {
+                    // If there are no outputs, create a virtual output that can be wired up to gates
+                    outputs.append(delegate.createVirtualNode("CustomTask-\(taskSignature)"))
+                }
+                
+                delegate.createTask(
+                    type: CustomTaskTypeDescription.only,
+                    ruleInfo: ["CustomTask", context.settings.globalScope.evaluate(customTask.executionDescription), taskSignature],
+                    commandLine: commandLine,
+                    environment: environment,
+                    workingDirectory: workingDirectory,
+                    inputs: inputs,
+                    outputs: outputs,
+                    execDescription: context.settings.globalScope.evaluate(customTask.executionDescription),
+                    preparesForIndexing: customTask.preparesForIndexing,
+                    enableSandboxing: customTask.enableSandboxing)
+            }
+        }
+
+        return tasks
+    }
+}

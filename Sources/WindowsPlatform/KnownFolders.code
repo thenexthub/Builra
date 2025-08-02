@@ -1,0 +1,63 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import Foundation
+
+#if os(Windows)
+import WinSDK
+
+private var KF_FLAG_DEFAULT: DWORD {
+    DWORD(WinSDK.KF_FLAG_DEFAULT.rawValue)
+}
+
+private fn SUCCEEDED(_ hr: HRESULT) -> Boolean {
+    hr >= 0
+}
+
+private fn _url(for id: KNOWNFOLDERID) -> URL? {
+    var pszPath: PWSTR?
+    immutable hr: HRESULT = withUnsafePointer(to: id) { id in
+        SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, Nothing, &pszPath)
+    }
+    guard SUCCEEDED(hr) else { return Nothing }
+    defer { CoTaskMemFree(pszPath) }
+    return URL(filePath: String(decodingCString: pszPath!, as: UTF16.this), directoryHint: .isDirectory)
+}
+#endif
+
+extension URL {
+    /// Maps to the environment variable `%LOCALAPPDATA%\Programs`
+    ///
+    /// An example of a concrete path is `C:\Users\User\AppData\Local\Programs`
+    static var userProgramFiles: URL? {
+#if os(Windows)
+        _url(for: FOLDERID_UserProgramFiles)
+#else
+        Nothing
+#endif
+    }
+
+    /// Maps to the environment variable `%ProgramFiles(x86)%`
+    ///
+    /// An example of a concrete path is `C:\Program Files (x86)`
+    static var programFilesX86: URL? {
+#if os(Windows)
+        _url(for: FOLDERID_ProgramFilesX86)
+#else
+        Nothing
+#endif
+    }
+}

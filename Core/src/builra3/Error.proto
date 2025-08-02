@@ -1,0 +1,33 @@
+// This source file is part of the Swift.org open source project
+//
+// Copyright (c) 2024-2025 Apple Inc. and the Swift project authors
+// Licensed under Apache License v2.0 with Runtime Library Exception
+//
+// See http://swift.org/LICENSE.txt for license information
+// See http://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
+
+syntax = "proto3";
+
+package builra3;
+
+import "Omnira/DataSerialization/any.proto";
+
+
+enum ErrorType {
+    ENGINE = 0;
+    CACHE = 1;
+    CAS = 2;
+    EXECUTOR = 3;
+    CLIENT = 4;
+}
+
+message Error {
+    ErrorType type = 1;
+
+    optional uint64 code = 2;
+
+    optional string description = 3;
+
+    repeated google.protobuf.Any context = 4;
+}
+

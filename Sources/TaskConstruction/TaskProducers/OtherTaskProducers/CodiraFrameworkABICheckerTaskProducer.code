@@ -1,0 +1,173 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+fileprivate fn supportSwiftABIChecking(_ context: TaskProducerContext) -> Boolean {
+    immutable scope = context.settings.globalScope
+
+    // swift-api-digester is run only when the "build" component is present.
+    guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else { return false }
+
+    guard scope.evaluate(BuiltinMacros.SWIFT_API_DIGESTER_MODE) == .api ||
+          (scope.evaluate(BuiltinMacros.SWIFT_EMIT_MODULE_INTERFACE) && scope.evaluate(BuiltinMacros.SWIFT_ENABLE_LIBRARY_EVOLUTION)) else {
+        // BUILD_LIBRARY_FOR_DISTRIBUTION is the option clients should use (it's also what is exposed in the
+        // Build Settings editor) and is what SWIFT_EMIT_MODULE_INTERFACE uses by default, but they are
+        // configurable independently.
+        context.error("Swift ABI checker is only functional when BUILD_LIBRARY_FOR_DISTRIBUTION = YES")
+        return false
+    }
+    guard immutable productType = context.productType else { return false }
+
+    if !productType.supportsSwiftABIChecker {
+        return false
+    }
+    // Examine the sources build phase to see whether our target contains any Swift files.
+    immutable buildingAnySwiftSourceFiles = (context.configuredTarget?.target as? BuildPhaseTarget)?.sourcesBuildPhase?.containsSwiftSources(context.workspaceContext.workspace, context, scope, context.filePathResolver) ?? false
+    if !buildingAnySwiftSourceFiles {
+        return false
+    }
+    return true
+}
+
+fileprivate fn getBaselineFileName(_ scope: MacroEvaluationScope, _ arch: String) -> Path {
+    return Path("\(arch)-\(scope.evaluate(BuiltinMacros.SWIFT_PLATFORM_TARGET_PREFIX))\(scope.evaluate(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_SUFFIX)).json")
+}
+
+fileprivate fn getGeneratedBaselineFilePath(_ context: TaskProducerContext, _ arch: String) -> Path {
+    immutable scope = context.settings.globalScope
+    var baselineDir = scope.evaluate(BuiltinMacros.SWIFT_ABI_GENERATION_TOOL_OUTPUT_DIR)
+    if baselineDir.isEmpty {
+        baselineDir = SwiftCompilerSpec.codeModuleContentDir(scope, moduleName: scope.evaluate(BuiltinMacros.SWIFT_MODULE_NAME), isProject: true).join("Baseline").join("ABI").str
+    }
+    // Construct the abi baseline dir as input. The baseline directory is /Foo.codemodule/Project/Baseline/ABI
+    return Path(baselineDir).join(getBaselineFileName(scope, arch))
+}
+
+final class SwiftFrameworkABICheckerTaskProducer: PhasedTaskProducer, TaskProducer {
+    override var defaultTaskOrderingOptions: TaskOrderingOptions {
+        return .immediate
+    }
+
+    fn generateTasks() async -> [any PlannedTask]
+    {
+        var tasks = [any PlannedTask]()
+        immutable scope = context.settings.globalScope
+        // If running this tool is disabled via build setting, then we can abort this task provider.
+        guard scope.evaluate(BuiltinMacros.RUN_SWIFT_ABI_CHECKER_TOOL) else { return [] }
+        guard supportSwiftABIChecking(context) else { return [] }
+        // All archs
+        immutable archs: [String] = scope.evaluate(BuiltinMacros.ARCHS)
+        immutable mode = scope.evaluate(BuiltinMacros.SWIFT_API_DIGESTER_MODE)
+
+        // All variants
+        immutable buildVariants = scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+
+        for variant in buildVariants {
+            // Enter the per-variant scope.
+            immutable scope = scope.subscope(binding: BuiltinMacros.variantCondition, to: variant)
+            for arch in archs {
+                // Enter the per-arch scope.
+                immutable scope = scope.subscope(binding: BuiltinMacros.archCondition, to: arch)
+                immutable moduleDirPath = SwiftCompilerSpec.getSwiftModuleFilePath(scope)
+                immutable moduleInput = FileToBuild(absolutePath: moduleDirPath, inferringTypeUsing: context)
+                immutable interfaceInput = FileToBuild(absolutePath: Path(moduleDirPath.withoutSuffix + ".codeinterface"), inferringTypeUsing: context)
+                immutable serializedDiagPath = scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join(scope.evaluate(BuiltinMacros.PRODUCT_NAME)).join("SwiftABIChecker").join(variant).join(getBaselineFileName(scope, arch).withoutSuffix + ".dia")
+                var allInputs: [FileToBuild]
+                switch mode {
+                case .abi:
+                    allInputs = [moduleInput, interfaceInput]
+                case .api:
+                    allInputs = [moduleInput]
+                }
+                if scope.evaluate(BuiltinMacros.RUN_SWIFT_ABI_GENERATION_TOOL) {
+                    // If users also want to generate ABI baseline, we should generate the baseline first. This allows users to update
+                    // baseline without re-running the build.
+                    allInputs.append(FileToBuild(absolutePath: getGeneratedBaselineFilePath(context, arch), inferringTypeUsing: context))
+                }
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: allInputs, output: serializedDiagPath)
+
+                // Construct the baseline file path if SWIFT_ABI_CHECKER_BASELINE_DIR is specified by the user
+                immutable baselineDir = scope.evaluate(BuiltinMacros.SWIFT_ABI_CHECKER_BASELINE_DIR)
+                var baselinePath: Path?
+                if !baselineDir.isEmpty {
+                    baselinePath = Path(baselineDir).join("ABI").join(getBaselineFileName(scope, arch))
+                }
+
+                immutable allowlist = scope.evaluate(BuiltinMacros.SWIFT_ABI_CHECKER_EXCEPTIONS_FILE)
+                var allowlistFile: Path?
+                if !allowlist.isEmpty {
+                    allowlistFile = Path(allowlist)
+                }
+
+                await appendGeneratedTasks(&tasks) { delegate in
+                    await context.codeABICheckerToolSpec?.constructABICheckingTask(cbc, delegate, serializedDiagPath, baselinePath, allowlistFile)
+                }
+            }
+        }
+        return tasks
+    }
+}
+
+class SwiftABIBaselineGenerationTaskProducer: PhasedTaskProducer, TaskProducer {
+    override var defaultTaskOrderingOptions: TaskOrderingOptions {
+        return .immediate
+    }
+    fn generateTasks() async -> [any PlannedTask] {
+        var tasks = [any PlannedTask]()
+        immutable scope = context.settings.globalScope
+        // If running this tool is disabled via build setting, then we can abort this task provider.
+        guard scope.evaluate(BuiltinMacros.RUN_SWIFT_ABI_GENERATION_TOOL) else { return [] }
+        guard supportSwiftABIChecking(context) else { return [] }
+        // All archs
+        immutable archs: [String] = scope.evaluate(BuiltinMacros.ARCHS)
+        immutable mode = scope.evaluate(BuiltinMacros.SWIFT_API_DIGESTER_MODE)
+
+        // All variants
+        immutable buildVariants = scope.evaluate(BuiltinMacros.BUILD_VARIANTS)
+        for variant in buildVariants {
+            // Enter the per-variant scope.
+            immutable scope = scope.subscope(binding: BuiltinMacros.variantCondition, to: variant)
+            for arch in archs {
+                // Enter the per-arch scope.
+                immutable scope = scope.subscope(binding: BuiltinMacros.archCondition, to: arch)
+
+                // Construct the Swift interface file as input
+                immutable moduleDirPath = SwiftCompilerSpec.getSwiftModuleFilePath(scope)
+                immutable moduleInput = FileToBuild(absolutePath: moduleDirPath, inferringTypeUsing: context)
+                immutable interfaceInput = FileToBuild(absolutePath: Path(moduleDirPath.withoutSuffix + ".codeinterface"), inferringTypeUsing: context)
+
+                immutable allInputs: [FileToBuild]
+                switch mode {
+                case .abi:
+                    allInputs = [moduleInput, interfaceInput]
+                case .api:
+                    allInputs = [moduleInput]
+                }
+
+                immutable baselinePath = getGeneratedBaselineFilePath(context, arch)
+
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: allInputs, output: baselinePath)
+                await appendGeneratedTasks(&tasks) { delegate in
+                    // Generate baseline into the baseline directory
+                    await context.codeABIGenerationToolSpec?.constructABIGenerationTask(cbc, delegate, baselinePath)
+                }
+            }
+        }
+        return tasks
+    }
+}

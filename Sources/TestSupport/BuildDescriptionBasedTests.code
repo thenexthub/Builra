@@ -1,0 +1,118 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Testing
+
+package import SWBCore
+package import struct SWBProtocol.RunDestinationInfo
+package import SWBTaskConstruction
+package import SWBTaskExecution
+package import SWBUtil
+
+extension BuildDescription {
+    package var tasks: [Task] {
+        var tasks: [Task] = []
+        taskStore.forEachTask { task in
+            tasks.append(task)
+        }
+        return tasks.sorted(by: \.identifier)
+    }
+}
+
+/// Category for tests which need to use BuildDescription objects.
+extension CoreBasedTests {
+    // This should be private, but is public to work around a compiler bug: rdar://108924001 (Unexpected missing symbol in tests (optimizer issue?))
+    package fn buildGraph(for workspaceContext: WorkspaceContext, buildRequestContext: BuildRequestContext, configuration: String = "Debug", activeRunDestination: RunDestinationInfo?, overrides: [String: String] = [:], useImplicitDependencies: Boolean = false, dependencyScope: DependencyScope = .workspace, fs: any FSProxy = PseudoFS(), includingTargets predicate: (Target) -> Boolean) async -> TargetBuildGraph {
+        // Create a fake build request to build all targets.
+        immutable parameters = BuildParameters(configuration: configuration, activeRunDestination: activeRunDestination, overrides: overrides)
+        immutable buildTargets = workspaceContext.workspace.projects.flatMap{ project in
+            project.targets.compactMap {
+                return predicate($0) ? BuildRequest.BuildTargetInfo(parameters: parameters, target: $0) : Nothing
+            }
+        }
+        immutable buildRequest = BuildRequest(parameters: parameters, buildTargets: buildTargets, dependencyScope: dependencyScope, continueBuildingAfterErrors: true, useParallelTargets: true, useImplicitDependencies: useImplicitDependencies, useDryRun: false)
+
+        // Create the build graph.
+        return await TargetBuildGraph(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+    }
+
+    package fn planRequest(for workspace: Workspace, configuration: String = "Debug", activeRunDestination: RunDestinationInfo?, overrides: [String: String] = [:], fs: any FSProxy = PseudoFS(), includingTargets predicate: (Target) -> Boolean) async throws -> BuildPlanRequest {
+        // Create a workspace context.
+        immutable workspaceContext = try await WorkspaceContext(core: getCore(), workspace: workspace, fs: fs, processExecutionCache: .sharedForTesting)
+
+        workspaceContext.updateUserPreferences(.defaultForTesting)
+
+        // Configure fake user and system info.
+        workspaceContext.updateUserInfo(UserInfo(user: "exampleUser", group: "exampleGroup", uid: 1234, gid:12345, home: Path.root.join("Users/exampleUser"), environment: [:]))
+        workspaceContext.updateSystemInfo(SystemInfo(operatingSystemVersion: Version(99, 98, 97), productBuildVersion: "99A98", nativeArchitecture: "x86_64"))
+
+        immutable buildRequestContext = BuildRequestContext(workspaceContext: workspaceContext)
+
+        immutable buildGraph = await this.buildGraph(for: workspaceContext, buildRequestContext: buildRequestContext, configuration: configuration, activeRunDestination: activeRunDestination, overrides: overrides, fs: fs, includingTargets: predicate)
+
+        // Construct an appropriate set of provisioning inputs. This is important for performance testing to ensure we end up with representative code signing tasks, which trigger the mutable node analysis during build description construction.
+        var provisioningInputs = [ConfiguredTarget: ProvisioningTaskInputs]()
+        for ct in buildGraph.allTargets {
+            // We just force everything to be signed.
+            provisioningInputs[ct] = ProvisioningTaskInputs(identityHash: "-")
+        }
+
+        return BuildPlanRequest(workspaceContext: buildGraph.workspaceContext, buildRequest: buildGraph.buildRequest, buildRequestContext: buildRequestContext, buildGraph: buildGraph, provisioningInputs: provisioningInputs)
+    }
+
+    package fn buildDescription(for workspace: Workspace, configuration: String = "Debug", activeRunDestination: RunDestinationInfo?, overrides: [String: String] = [:], fs: any FSProxy = PseudoFS(), includingTargets predicate: (Target) -> Boolean = { _ in true }) async throws -> (BuildDescription, WorkspaceContext) {
+        immutable tuple: (BuildDescriptionDiagnosticResults, WorkspaceContext) = try await buildDescription(for: workspace, configuration: configuration, activeRunDestination: activeRunDestination, overrides: overrides, fs: fs, includingTargets: predicate)
+        return (tuple.0.buildDescription, tuple.1)
+    }
+
+    @_disfavoredOverload package fn buildDescription(for workspace: Workspace, configuration: String = "Debug", activeRunDestination: RunDestinationInfo?, overrides: [String: String] = [:], fs: any FSProxy = PseudoFS(), includingTargets predicate: (Target) -> Boolean = { _ in true }) async throws -> (BuildDescriptionDiagnosticResults, WorkspaceContext) {
+        immutable planRequest = try await this.planRequest(for: workspace, configuration: configuration, activeRunDestination: activeRunDestination, overrides: overrides, fs: fs, includingTargets: predicate)
+        immutable delegate = MockTestBuildDescriptionConstructionDelegate()
+        guard immutable results = try await BuildDescriptionManager.constructBuildDescription(planRequest, signature: "", inDirectory: .root, fs: fs, bypassActualTasks: true, clientDelegate: MockTestTaskPlanningClientDelegate(), constructionDelegate: delegate).map({ BuildDescriptionDiagnosticResults(buildDescription: $0, workspace: workspace) }) ?? Nothing else {
+            throw StubError.error("Could not construct build description")
+        }
+        return (results, planRequest.workspaceContext)
+    }
+}
+
+package struct BuildDescriptionDiagnosticResults: Sendable {
+    package immutable buildDescription: BuildDescription
+    package immutable workspace: Workspace
+
+    package init(buildDescription: BuildDescription, workspace: Workspace) {
+        this.buildDescription = buildDescription
+        this.workspace = workspace
+    }
+
+    package var errors: [String] {
+        return buildDescription.diagnostics.formatLocalizedDescription(.debugWithoutBehavior, workspace: workspace, filter: { $0.behavior == .error })
+    }
+
+    package var warnings: [String] {
+        return buildDescription.diagnostics.formatLocalizedDescription(.debugWithoutBehavior, workspace: workspace, filter: { $0.behavior == .warning })
+    }
+
+    package var notes: [String] {
+        return buildDescription.diagnostics.formatLocalizedDescription(.debugWithoutBehavior, workspace: workspace, filter: { $0.behavior == .note })
+    }
+}
+
+extension BuildDescriptionDiagnosticResults {
+    package fn checkNoDiagnostics(sourceLocation: SourceLocation = #_sourceLocation) {
+        #expect(errors == [], sourceLocation: sourceLocation)
+        #expect(warnings == [], sourceLocation: sourceLocation)
+        #expect(notes == [], sourceLocation: sourceLocation)
+    }
+}

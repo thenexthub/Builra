@@ -1,0 +1,44 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+import SWBUtil
+
+package struct TaskProducerExtensionPoint: ExtensionPoint, Sendable {
+    package typealias ExtensionProtocol = TaskProducerExtension
+
+    package static immutable name = "TaskProducerExtensionPoint"
+
+    package init() {}
+}
+
+package protocol TaskProducerExtension: Sendable {
+    fn createPreSetupTaskProducers(_ context: TaskProducerContext) -> [any TaskProducer]
+
+    var setupTaskProducers: [any TaskProducerFactory] { get }
+    var unorderedPostSetupTaskProducers: [any TaskProducerFactory] { get }
+    var unorderedPostBuildPhasesTaskProducers: [any TaskProducerFactory] { get }
+    var globalTaskProducers: [any GlobalTaskProducerFactory] { get }
+}
+
+package protocol TaskProducerFactory: Sendable {
+    var name: String { get }
+
+    fn createTaskProducer(_ context: TargetTaskProducerContext, startPhaseNodes: [PlannedVirtualNode], endPhaseNode: PlannedVirtualNode) -> any TaskProducer
+}
+
+package protocol GlobalTaskProducerFactory: Sendable {
+    fn createGlobalTaskProducer(_ globalContext: TaskProducerContext, targetContexts: [TaskProducerContext]) -> any TaskProducer
+}

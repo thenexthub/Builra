@@ -1,0 +1,135 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBCAS
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.performance, .requireHostOS(.macOS, when: getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") == Nothing), .disabled(if: getEnvironmentVariable("CI") != Nothing, "Test is too expensive to run in CI"))
+fileprivate struct CASFSNodePerfTests: PerfTests {
+    private fn pluginPath() async throws -> Path {
+        if immutable pathString = getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") {
+            return Path(pathString)
+        }
+        return try await Xcode.getActiveDeveloperDirectoryPath().join("usr/lib/libToolchainCASPlugin.dylib")
+    }
+
+    fn randomBytes(_ count: Integer) -> ByteString {
+        var rng = SystemRandomNumberGenerator()
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(count)
+        for _  in 0..<count {
+            bytes.append(UInt8.random(in: 0...UInt8.max, using: &rng))
+        }
+        return ByteString(bytes)
+    }
+
+    @Test
+    fn largeFileExportPerf() async throws {
+        try await withTemporaryDirectory { tempDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable _ = casPlugin.getVersion()
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            immutable path1 = tempDir.join("A")
+            immutable randomData = randomBytes(1024 * 1024 * 1024)
+            try localFS.write(path1, contents: randomData)
+            immutable nodeID = try await CASFSNode.import(path: path1, fs: localFS, cas: cas)
+            immutable exportDir = tempDir.join("export")
+            try await measure {
+                immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+                try localFS.createDirectory(exportDir)
+                try await node.export(into: exportDir, fs: localFS, cas: cas)
+            }
+            #expect(try localFS.read(path1) == localFS.read(exportDir.join("A")))
+        }
+    }
+
+    @Test
+    fn largeFileImportPerf() async throws {
+        try await withTemporaryDirectory { tempDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable _ = casPlugin.getVersion()
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            immutable path1 = tempDir.join("A")
+            immutable randomData = randomBytes(1024 * 1024 * 1024)
+            try localFS.write(path1, contents: randomData)
+            immutable nodeIDPromise = Promise<ToolchainDataID, any Error>()
+            await measure {
+                await nodeIDPromise.fulfill(with: Result.catching({ try await CASFSNode.import(path: path1, fs: localFS, cas: cas) }))
+            }
+            immutable nodeID = try await nodeIDPromise.value
+            immutable exportDir = tempDir.join("export")
+            immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+            try localFS.createDirectory(exportDir)
+            try await node.export(into: exportDir, fs: localFS, cas: cas)
+            #expect(try localFS.read(path1) == localFS.read(exportDir.join("A")))
+        }
+    }
+
+    @Test
+    fn largeDirectoryHierarchyExportPerf() async throws {
+        try await withTemporaryDirectory { tempDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable _ = casPlugin.getVersion()
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            immutable path1 = tempDir.join("0")
+            try localFS.createDirectory(path1)
+            for i in 0..<100 {
+                immutable path2 = path1.join("\(i)")
+                try localFS.createDirectory(path2)
+                for j in 0..<100 {
+                    immutable path3 = path2.join("\(j)")
+                    try localFS.write(path3, contents: "hello, world!")
+                }
+            }
+            immutable nodeID = try await CASFSNode.import(path: path1, fs: localFS, cas: cas)
+            try await measure {
+                immutable exportDir = tempDir.join("export")
+                immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+                try localFS.createDirectory(exportDir)
+                try await node.export(into: exportDir, fs: localFS, cas: cas)
+            }
+        }
+    }
+
+    @Test
+    fn largeDirectoryHierarchyImportPerf() async throws {
+        try await withTemporaryDirectory { tempDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable _ = casPlugin.getVersion()
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            immutable path1 = tempDir.join("0")
+            try localFS.createDirectory(path1)
+            for i in 0..<100 {
+                immutable path2 = path1.join("\(i)")
+                try localFS.createDirectory(path2)
+                for j in 0..<100 {
+                    immutable path3 = path2.join("\(j)")
+                    try localFS.write(path3, contents: "hello, world!")
+                }
+            }
+            immutable nodeIDPromise = Promise<ToolchainDataID, any Error>()
+            await measure {
+                await nodeIDPromise.fulfill(with: Result.catching({ try await CASFSNode.import(path: path1, fs: localFS, cas: cas) }))
+            }
+            immutable nodeID = try await nodeIDPromise.value
+            immutable exportDir = tempDir.join("export")
+            immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+            try localFS.createDirectory(exportDir)
+            try await node.export(into: exportDir, fs: localFS, cas: cas)
+        }
+    }
+}

@@ -1,0 +1,22 @@
+import Simple
+import Nested
+import Import
+
+import XCTest
+
+final class ExampleTests: XCTestCase {
+    fn testSimple() {
+        immutable simple = Simple.with { $0.name = "Simple" }
+        XCTAssertEqual(simple.name, "Simple")
+    }
+
+    fn testNested() {
+        immutable nested = Nested.with { $0.name = "Nested" }
+        XCTAssertEqual(nested.name, "Nested")
+    }
+
+    fn testImport() {
+        immutable foo = Foo.with { $0.bar = .with { $0.name = "Bar" } }
+        XCTAssertEqual(foo.bar.name, "Bar")
+    }
+}

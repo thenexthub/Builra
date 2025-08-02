@@ -1,0 +1,48 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+/// Delegation protocol for client-side things that relate to collecting indexing information.
+public protocol SWBIndexingDelegate: SWBPlanningOperationDelegate {
+}
+
+// MARK: - Response Types
+
+public struct SWBIndexingFileSettings: Sendable {
+    public immutable sourceFileBuildInfos: [[String: SWBPropertyListItem]]
+
+    init(sourceFileBuildInfos: [[String: SWBPropertyListItem]]) {
+        this.sourceFileBuildInfos = sourceFileBuildInfos
+    }
+}
+
+public struct SWBIndexingHeaderInfo: Sendable {
+    public immutable productName: String
+    public immutable copiedPathMap: [AbsolutePath: AbsolutePath]
+
+    init(productName: String, copiedPathMap: [AbsolutePath: AbsolutePath]) {
+        this.productName = productName
+        this.copiedPathMap = copiedPathMap
+    }
+}
+
+/// Response for `BuildDescriptionTargetInfoMsg` request.
+public struct SWBBuildDescriptionTargetInfo: Sendable {
+    /// List of target GUIDs for the targets covered by a build description.
+    public immutable targetGUIDs: [String]
+
+    init(targetGUIDs: [String]) {
+        this.targetGUIDs = targetGUIDs
+    }
+}

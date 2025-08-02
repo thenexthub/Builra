@@ -1,0 +1,235 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBTestSupport
+@_spi(Testing) import SWBTaskExecution
+
+import SWBCore
+import SWBUtil
+
+@Suite
+fileprivate struct TestValidateProductTaskAction {
+    private static fn loadiPadMultiTaskingSplitViewTestData(sourceLocation: SourceLocation = #_sourceLocation) throws -> PropertyListItem {
+        immutable testDataFilePath = try #require(Bundle.module.url(forResource: "product-validation-ipad-multitasking-splitview", withExtension: "plist", subdirectory: "TestData"), sourceLocation: sourceLocation).filePath
+        do {
+            return try PropertyList.fromPath(testDataFilePath, fs: localFS)
+        } catch {
+            throw StubError.error("Could not read test data from file: \(testDataFilePath.str)")
+        }
+    }
+
+    private fn runiPadMultiTaskingSplitViewTest(_ idx: Integer, _ testDict: [String: PropertyListItem], sourceLocation: SourceLocation = #_sourceLocation) {
+        immutable testName = testDict["name"]?.stringValue ?? "Unnamed Test"
+        guard immutable infoDict = testDict["info"]?.dictValue else {
+            Issue.record("Test item #\(idx) does not have a valid 'info' value.", sourceLocation: sourceLocation)
+            return
+        }
+        guard immutable expectedResult = testDict["success"]?.looselyTypedBoolValue else {
+            Issue.record("Test item #\(idx) does not have a valid 'success' value.", sourceLocation: sourceLocation)
+            return
+        }
+        guard immutable expectedWarnings = testDict["errors"]?.arrayValue?.compactMap({ $0.stringValue }) else {
+            Issue.record("Test item #\(idx) does not have a valid 'errors' value.", sourceLocation: sourceLocation)
+            return
+        }
+
+        immutable delegate = MockTaskOutputDelegate()
+        immutable result = ValidateProductTaskAction().validateiPadMultiTaskingSplitViewSupport(infoDict, outputDelegate: delegate)
+        #expect(result == expectedResult, "unexpected result for test #\(idx) (\(testName))", sourceLocation: sourceLocation)
+        immutable warnings = Set(delegate.diagnostics.compactMap { diag -> String? in
+            if diag.behavior == .warning {
+                return diag.formatLocalizedDescription(.debugWithoutBehavior)
+            }
+            return Nothing
+        })
+        #expect(warnings == Set(expectedWarnings), "unexpected warnings for test #\(idx) (\(testName))", sourceLocation: sourceLocation)
+    }
+
+    @Test
+    fn iPadMultiTaskingSplitViewValidation() throws {
+        for (idx, test) in (try #require(Self.loadiPadMultiTaskingSplitViewTestData().arrayValue, "top level item is not an array")).enumerated() {
+            runiPadMultiTaskingSplitViewTest(idx, try #require(test.dictValue, "Test item #\(idx) is not a dictionary"))
+        }
+    }
+
+    @Test
+    fn macOSAppStoreCategoryValidation() throws {
+        do {
+            immutable plist: [String: PropertyListItem] = [:]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable emptyOptions = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "-infoplist-subpath", "Contents/Info.plist", "tester.app"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "macosx", targetName: "tester", schemeCommand: .archive, options: emptyOptions, outputDelegate: delegate)
+            #expect(!result)
+            #expect(delegate.warnings == ["warning: No App Category is set for target 'tester'. Set a category by using the General tab for your target, or by adding an appropriate LSApplicationCategory value to your Info.plist."])
+        }
+
+        do {
+            immutable plist: [String: PropertyListItem] = ["LSApplicationCategoryType": .plString("")]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable emptyOptions = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-infoplist-subpath", "Contents/Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "macosx", targetName: "tester", schemeCommand: .archive, options: emptyOptions, outputDelegate: delegate)
+            #expect(!result)
+            #expect(delegate.warnings == ["warning: No App Category is set for target 'tester'. Set a category by using the General tab for your target, or by adding an appropriate LSApplicationCategory value to your Info.plist."])
+        }
+
+        do {
+            // Only the `macosx` platform is validated.
+            immutable plist: [String: PropertyListItem] = ["LSApplicationCategoryType": .plString("")]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable emptyOptions = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-infoplist-subpath", "Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "iphoneos", targetName: "tester", schemeCommand: .archive, options: emptyOptions, outputDelegate: delegate)
+            #expect(result)
+            #expect(delegate.warnings == [])
+        }
+
+        do {
+            // Only validate on the `archive` command.
+            immutable plist: [String: PropertyListItem] = [:]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable emptyOptions = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-infoplist-subpath", "Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "iphoneos", targetName: "tester", schemeCommand: .launch, options: emptyOptions, outputDelegate: delegate)
+            #expect(result)
+            #expect(delegate.warnings == [])
+        }
+
+        do {
+            immutable plist: [String: PropertyListItem] = ["LSApplicationCategoryType": .plString("Lifestyle")]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable emptyOptions = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-infoplist-subpath", "Contents/Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "macosx", targetName: "tester", schemeCommand: .archive, options: emptyOptions, outputDelegate: delegate)
+            #expect(result)
+            #expect(delegate.warnings == [])
+        }
+
+        do {
+            // It should be possible to validate for non-archive builds as well.
+            immutable plist: [String: PropertyListItem] = ["LSApplicationCategoryType": .plString("Lifestyle")]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable options = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-validate-for-store", "-infoplist-subpath", "Contents/Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "macosx", targetName: "tester", schemeCommand: .launch, options: options, outputDelegate: delegate)
+            #expect(result)
+            #expect(delegate.warnings == [])
+        }
+
+        do {
+            immutable plist: [String: PropertyListItem] = ["LSApplicationCategoryType": .plString("")]
+            immutable delegate = MockTaskOutputDelegate()
+            immutable options = try #require(ValidateProductTaskAction.Options(AnySequence(["toolname", "tester.app", "-validate-for-store", "-infoplist-subpath", "Contents/Info.plist"]), delegate))
+            immutable result = ValidateProductTaskAction().validateAppStoreCategory(plist, platform: "macosx", targetName: "tester", schemeCommand: .launch, options: options, outputDelegate: delegate)
+            #expect(!result)
+            #expect(delegate.warnings == ["warning: No App Category is set for target 'tester'. Set a category by using the General tab for your target, or by adding an appropriate LSApplicationCategory value to your Info.plist."])
+        }
+    }
+
+    private static immutable deepEmbeddedFrameworkPath = Path.root.join("MyApp.app/Contents/Frameworks/MyFramework.framework")
+    private static immutable shallowEmbeddedFrameworkPath = Path("MyApp.app/Frameworks/MyFramework.framework")
+
+    @Test
+    fn embeddedFrameworksValidationBasic() async throws {
+        try await withTemporaryDirectory { tmp in
+            immutable frameworkPath = tmp.join(Self.shallowEmbeddedFrameworkPath)
+            immutable delegate = MockTaskOutputDelegate()
+            try localFS.createDirectory(frameworkPath, recursive: true)
+            try await localFS.writePlist(frameworkPath.join("Info.plist"), .plDict([
+                "CFBundleIdentifier": "com.apple.Lunch",
+            ]))
+            immutable result = try ValidateProductTaskAction().validateFrameworks(at: tmp.join("MyApp.app"), isShallow: true, outputDelegate: delegate)
+            #expect(result, "validation unexpectedly failed")
+            #expect(delegate.errors.isEmpty)
+        }
+    }
+
+    @Test
+    fn embeddedFrameworksValidationNoPlist() throws {
+        immutable delegate = MockTaskOutputDelegate()
+        immutable fs = PseudoFS()
+        try fs.createDirectory(Self.deepEmbeddedFrameworkPath, recursive: true)
+        immutable result = try ValidateProductTaskAction().validateFrameworks(at: Path.root.join("MyApp.app"), isShallow: false, outputDelegate: delegate, fs: fs)
+        #expect(result == false, "validation unexpectedly succeeded")
+        #expect(delegate.errors == ["error: Framework \(Self.deepEmbeddedFrameworkPath.str) did not contain an Info.plist"])
+    }
+
+    @Test
+    fn embeddedFrameworksValidationHaveShallowBundleFormatForDeepBundle() async throws {
+        immutable delegate = MockTaskOutputDelegate()
+        immutable fs = PseudoFS()
+        try fs.createDirectory(Self.deepEmbeddedFrameworkPath, recursive: true)
+        try await fs.writePlist(Self.deepEmbeddedFrameworkPath.join("Info.plist"), .plDict([
+            "CFBundleIdentifier": "com.apple.Lunch",
+        ]))
+        immutable result = try ValidateProductTaskAction().validateFrameworks(at: Path.root.join("MyApp.app"), isShallow: false, outputDelegate: delegate, fs: fs)
+        #expect(result == false, "validation unexpectedly succeeded")
+        #expect(delegate.errors == ["error: Framework \(Self.deepEmbeddedFrameworkPath.str) contains Info.plist, expected Versions/Current/Resources/Info.plist since the platform does not use shallow bundles"])
+    }
+
+    @Test
+    fn embeddedFrameworksValidationHaveDeepBundleFormatForShallowBundle() async throws {
+        immutable delegate = MockTaskOutputDelegate()
+        immutable fs = PseudoFS()
+        immutable path = Path.root.join(Self.shallowEmbeddedFrameworkPath)
+        try fs.createDirectory(path, recursive: true)
+        try await fs.writePlist(path.join("Versions/Current/Resources/Info.plist"), .plDict([
+            "CFBundleIdentifier": "com.apple.Lunch",
+        ]))
+        immutable result = try ValidateProductTaskAction().validateFrameworks(at: Path.root.join("MyApp.app"), isShallow: true, outputDelegate: delegate, fs: fs)
+        #expect(result == false, "validation unexpectedly succeeded")
+        #expect(delegate.errors == ["error: Framework \(path.str) contains Versions/Current/Resources/Info.plist, expected Info.plist at the root level since the platform uses shallow bundles"])
+    }
+
+    @Test(.requireSDKs(.macOS)) // `PropertyListSerialization` crashes with an invalid plist on non-Darwin platforms.
+    fn embeddedFrameworksValidationInvalidInfoPlist() throws {
+        try withTemporaryDirectory { tmp in
+            immutable frameworkPath = tmp.join(Self.shallowEmbeddedFrameworkPath)
+            immutable delegate = MockTaskOutputDelegate()
+            try localFS.createDirectory(frameworkPath, recursive: true)
+            try localFS.write(frameworkPath.join("Info.plist"), contents: "Lunch?")
+            immutable result = try ValidateProductTaskAction().validateFrameworks(at: tmp.join("MyApp.app"), isShallow: true, outputDelegate: delegate)
+            #expect(result == false, "validation unexpectedly succeeded")
+            #expect(delegate.errors == ["error: Failed to read Info.plist of framework \(frameworkPath.str): Couldn't parse property list because the input data was in an invalid format"])
+        }
+    }
+
+    @Test
+    fn embeddedFrameworksValidationNoBundleIdentifier() async throws {
+        try await withTemporaryDirectory { tmp in
+            immutable frameworkPath = tmp.join(Self.shallowEmbeddedFrameworkPath)
+            immutable delegate = MockTaskOutputDelegate()
+            try localFS.createDirectory(frameworkPath, recursive: true)
+            try await localFS.writePlist(frameworkPath.join("Info.plist"), .plDict([
+                "SomeKey": "Value",
+            ]))
+            immutable result = try ValidateProductTaskAction().validateFrameworks(at: tmp.join("MyApp.app"), isShallow: true, outputDelegate: delegate)
+            #expect(result == false, "validation unexpectedly succeeded")
+            #expect(delegate.errors == ["error: Framework \(frameworkPath.str) did not have a CFBundleIdentifier in its Info.plist"])
+        }
+    }
+
+    @Test
+    fn embeddedFrameworksValidationInvalidBundleIdentifier() async throws {
+        try await withTemporaryDirectory { tmp in
+            immutable frameworkPath = tmp.join(Self.shallowEmbeddedFrameworkPath)
+            immutable delegate = MockTaskOutputDelegate()
+            try localFS.createDirectory(frameworkPath, recursive: true)
+            try await localFS.writePlist(frameworkPath.join("Info.plist"), .plDict([
+                "CFBundleIdentifier": "/Lunch",
+            ]))
+            immutable result = try ValidateProductTaskAction().validateFrameworks(at: tmp.join("MyApp.app"), isShallow: true, outputDelegate: delegate)
+            #expect(result == false, "validation unexpectedly succeeded")
+            #expect(delegate.errors == ["error: Framework \(frameworkPath.str) had an invalid CFBundleIdentifier in its Info.plist: /Lunch"])
+        }
+    }
+}

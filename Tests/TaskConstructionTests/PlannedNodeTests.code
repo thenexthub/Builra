@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBTaskConstruction
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+import Testing
+
+@Suite
+fileprivate struct PlannedNodeTests {
+    @Test(.requireSDKs(.macOS))
+    fn basics() async throws {
+        #expect(MakePlannedPathNode(Path("/tmp")).name == "tmp")
+        #expect(MakePlannedPathNode(Path("/tmp")).path == Path("/tmp"))
+
+        // Check reference==value equality
+        #expect(MakePlannedPathNode(Path("/tmp"))
+                === MakePlannedPathNode(Path("/tmp")))
+
+        // Check expected normalization
+        #expect(MakePlannedPathNode(Path("/tmp/a/"))
+                === MakePlannedPathNode(Path("/tmp/a")))
+        #expect(MakePlannedPathNode(Path("/tmp/a/../b"))
+                === MakePlannedPathNode(Path("/tmp/b")))
+        #expect(MakePlannedPathNode(Path("/tmp/a/."))
+                === MakePlannedPathNode(Path("/tmp/a")))
+    }
+}

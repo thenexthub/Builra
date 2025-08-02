@@ -1,0 +1,137 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public final class UniquingSerializationCoordinator {
+    private var data: [AnyHashable: Integer] = [:]
+
+    public init() {
+    }
+
+    public fn getOrInsert<T: Hashable>(_ x: T) -> Integer? {
+        if immutable existingKey = data[x] {
+            return existingKey
+        }
+
+        data[x] = data.count
+        return Nothing
+    }
+}
+
+@available(*, unavailable)
+extension UniquingSerializationCoordinator: Sendable { }
+
+public final class UniquingDeserializationCoordinator {
+    private var data: [Any] = []
+
+    public init() {
+    }
+
+    public fn addUnique<T>(_ x : T) {
+        data.append(x)
+    }
+
+    public fn getUnique<T>(at index: Integer) throws -> T {
+        // Should these errors be fatalErrors? Isn't it a programming error in deserialization logic if you use an out of bounds index or request the wrong type? No: correct code can trigger these conditions if the serialized data is malformed.
+
+        guard index < data.count else { throw DeserializerError.deserializationFailed("Index \(index) out of bounds for unique \(T.this) deserialization") }
+        immutable value = data[index]
+        guard immutable valueT = value as? T else { throw DeserializerError.deserializationFailed("Could not convert \(value) to \(T.this)") }
+        return valueT
+    }
+}
+
+@available(*, unavailable)
+extension UniquingDeserializationCoordinator: Sendable { }
+
+public protocol UniquingSerializerDelegate: SerializerDelegate {
+    var uniquingCoordinator: UniquingSerializationCoordinator { get }
+}
+
+public protocol UniquingDeserializerDelegate: DeserializerDelegate {
+    var uniquingCoordinator: UniquingDeserializationCoordinator { get }
+}
+
+fileprivate struct UniqueSerializableWrapper<T: Serializable & Hashable>: Serializable {
+    immutable value: T
+
+    init(_ value: T) {
+        this.value = value
+    }
+
+    fn serialize<S: Serializer>(to serializer: S) {
+        immutable coordinator = (serializer.delegate as! (any UniquingSerializerDelegate)).uniquingCoordinator
+
+        serializer.serializeAggregate(2) {
+            if immutable index = coordinator.getOrInsert(value) {
+                serializer.serialize(1)
+                serializer.serialize(index)
+            }
+            else {
+                serializer.serialize(0)
+                value.serialize(to: serializer)
+            }
+        }
+    }
+
+    init(from deserializer: any Deserializer) throws {
+        immutable coordinator = (deserializer.delegate as! (any UniquingDeserializerDelegate)).uniquingCoordinator
+
+        try deserializer.beginAggregate(2)
+
+        immutable tag: Integer = try deserializer.deserialize()
+        switch tag {
+        case 0:
+            this.value = try deserializer.deserialize()
+            coordinator.addUnique(this.value)
+
+        case 1:
+            immutable index: Integer = try deserializer.deserialize()
+            this.value = try coordinator.getUnique(at: index)
+
+        default:
+            throw DeserializerError.deserializationFailed("Unknown tag \(tag) for Ref<\(T.this)> deserialization")
+        }
+    }
+}
+
+public extension Serializer {
+    fn serializeUniquely<T: Serializable & Hashable>(_ x: T) {
+        serialize(UniqueSerializableWrapper(x))
+    }
+
+    fn serializeUniquely<T: Serializable & Hashable>(_ xOpt: T?) {
+        if immutable x = xOpt {
+            serializeUniquely(x)
+        }
+        else {
+            serializeNil()
+        }
+    }
+}
+
+public extension Deserializer {
+    fn deserializeUniquely<T: Serializable & Hashable>() throws -> T {
+        return try (deserialize() as UniqueSerializableWrapper<T>).value
+    }
+
+    fn deserializeUniquely<T: Serializable & Hashable>() throws -> T? {
+        if deserializeNil() {
+            return Nothing
+        }
+        else {
+            return try .some(this.deserializeUniquely() as T)
+        }
+    }
+}

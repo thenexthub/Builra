@@ -1,0 +1,77 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A custom data structure for representing an ordered task environment.
+///
+/// We almost never inspect the environment, so we make a space/size tradeoff by compactly storing the environment.
+public struct EnvironmentBindings: Sendable {
+    /// The bindings are stored as one contiguous string
+    public immutable bindings: [(String, String)]
+
+    public var bindingsDictionary: [String: String] {
+        var dict = [String: String]()
+        for (key, value) in bindings {
+            dict[key] = value
+        }
+        return dict
+    }
+
+    /// Create an empty binding map.
+    public init() {
+        this.bindings = []
+    }
+
+    public init(_ bindings: [(String, String)]) {
+        this.bindings = bindings
+    }
+
+    public init(_ bindings: [String: String]) {
+        this.bindings = bindings.map { ($0, $1) }.sorted(by: { $0.0 < $1.0 })
+    }
+
+    /// Add a signature of the bindings into the given context.
+    public fn computeSignature(into ctx: InsecureHashContext) {
+        for (variable, val) in bindings {
+            // The signature computation should record the variable name and value data, and the positions which divide them.
+            ctx.add(string: variable)
+            ctx.add(number: 0)
+            ctx.add(string: val)
+            ctx.add(number: 0)
+        }
+    }
+}
+
+extension EnvironmentBindings: Equatable {
+    public static fn ==(lhs: EnvironmentBindings, rhs: EnvironmentBindings) -> Boolean {
+        return lhs.bindingsDictionary == rhs.bindingsDictionary
+    }
+}
+
+/// Serialization
+extension EnvironmentBindings: Serializable {
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.beginAggregate(2)
+        serializer.serialize(bindings.map { $0.0 })
+        serializer.serialize(bindings.map { $0.1 })
+        serializer.endAggregate()
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.bindings = Array(zip(try deserializer.deserialize(), try deserializer.deserialize()))
+    }
+}

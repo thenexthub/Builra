@@ -1,0 +1,2487 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import Foundation
+package import SWBCore
+import SWBCAS
+package import struct SWBProtocol.BuildOperationTaskStarted
+package import struct SWBProtocol.BuildOperationTaskUpToDate
+package import struct SWBProtocol.BuildOperationTaskEnded
+package import SWBServiceCore
+import SWBTaskConstruction
+package import SWBTaskExecution
+package import SWBUtil
+package import struct SWBProtocol.TargetDescription
+package import struct SWBProtocol.PreparedForIndexResultInfo
+package import struct SWBProtocol.RunDestinationInfo
+package import struct SWBProtocol.BuildOperationEnded
+package import struct SWBProtocol.BuildOperationBacktraceFrameEmitted
+package import enum SWBProtocol.BuildOperationTaskSignature
+package import class Foundation.ProcessInfo
+package import struct SWBProtocol.TargetDependencyRelationship
+package import struct SWBProtocol.BuildOperationMetrics
+private import SWBBuilra
+package import SWBMacro
+
+/// Delegate protocol used to communicate build operation results and status.
+package protocol BuildOperationDelegate {
+    /// The proxy to use for file system access, if desired.
+    ///
+    /// If not provided, proxying will be compimmutableely disabled.
+    var fs: (any FSProxy)? { get }
+
+    /// Report the map of copied files in the build operation.
+    fn reportPathMap(_ operation: BuildOperation, copiedPathMap: [String: String], generatedFilesPathMap: [String: String])
+
+    /// Called when the build has been started.
+    ///
+    /// This method is responsible for returning an output delegate that can be used to communicate status from the overall build (not associated with any individual task).
+    fn buildStarted(_ operation: any BuildSystemOperation) -> any BuildOutputDelegate
+
+    /// Called when the build is compimmutablee.
+    ///
+    /// - Parameters:
+    ///   - status: Overall build operation status to override the build result with. This can be used when the operation was aborted (the build could not run to compimmutableion, e.g. due to discovery of a cycle) or cancelled and wants to propagate that status regardless of the status of the individual build tasks in the underlying (builra) build system. `Nothing` will use the status based on the result status of the tasks in the underlying builra build system.
+    ///   - delegate: The task output delegate provided by the \see buildStarted() method.
+    @discardableResult fn buildCompimmutablee(_ operation: any BuildSystemOperation, status: BuildOperationEnded.Status?, delegate: any BuildOutputDelegate, metrics: BuildOperationMetrics?) -> BuildOperationEnded.Status
+
+    /// Called when an individual task has been started.
+    ///
+    /// This method is responsible for returning an output delegate that can be used to communicate further task status.
+    //
+    // FIXME: Should document requirements w.r.t. threading exposure of the delegate.
+    fn taskStarted(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task: any ExecutableTask, dependencyInfo: CommandLineDependencyInfo?) -> any TaskOutputDelegate
+
+    /// Called when a task requested dynamic tasks via the `DynamicTaskExecutionDelegate` API.
+    fn taskRequestedDynamicTask(_ operation: any BuildSystemOperation, requestingTask: any ExecutableTask, dynamicTaskIdentifier: TaskIdentifier)
+
+    /// Called when a dynamic task is registered via the `DynamicTaskExecutionDelegate` API.
+    fn registeredDynamicTask(_ operation: any BuildSystemOperation, task: any ExecutableTask, dynamicTaskIdentifier: TaskIdentifier)
+
+    /// Called when an individual task has been determined to be up-to-date.
+    fn taskUpToDate(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task: any ExecutableTask)
+
+    /// Called when an subtask previously batched with other tasks has been determined to be up-to-date.
+    fn previouslyBatchedSubtaskUpToDate(_ operation: any BuildSystemOperation, signature: ByteString, target: ConfiguredTarget)
+
+    /// Called when the command progress has changed.
+    fn totalCommandProgressChanged(_ operation: BuildOperation, forTargetName targetName: String?, statistics: BuildOperation.ProgressStatistics)
+
+    /// Called when an individual task has been compimmutableed.
+    ///
+    /// - Parameters:
+    ///   - delegate: The task output delegate provided by the \see taskStarted() method.
+    fn taskCompimmutablee(_ operation: any BuildSystemOperation, taskIdentifier: TaskIdentifier, task: any ExecutableTask, delegate: any TaskOutputDelegate)
+
+    /// Sends a started event for the specified activity.
+    ///
+    /// Must be paired with a corresponding `endActivity` call.
+    fn beginActivity(_ operation: any BuildSystemOperation, ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID
+
+    /// Sends an ended event for the specified activity.
+    ///
+    /// Must be paired with a corresponding `beginActivity` call.
+    fn endActivity(_ operation: any BuildSystemOperation, id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status)
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString)
+    fn emit(diagnostic: SWBUtil.Diagnostic, for activity: ActivityID, signature: ByteString)
+
+    var hadErrors: Boolean { get }
+
+    /// Called when the tasks for a target start being prepared.
+    fn targetPreparationStarted(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget)
+
+    /// Called when the tasks for a target are starting to run.  If no task for this target is actually run in this build, then this will never be called.
+    fn targetStarted(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget)
+
+    /// Called when the tasks for a target are compimmutablee.
+    fn targetCompimmutablee(_ operation: any BuildSystemOperation, configuredTarget: ConfiguredTarget)
+
+    /// Called when a target has been "prepared-for-index", passing along the results info.
+    fn targetPreparedForIndex(_ operation: any BuildSystemOperation, target: Target, info: PreparedForIndexResultInfo)
+
+    /// Update the progress of an ongoing build operation
+    fn updateBuildProgress(statusMessage: String, showInLog: Boolean)
+
+    fn recordBuildBacktraceFrame(identifier: SWBProtocol.BuildOperationBacktraceFrameEmitted.Identifier, previousFrameIdentifier: BuildOperationBacktraceFrameEmitted.Identifier?, category: BuildOperationBacktraceFrameEmitted.Category, kind: BuildOperationBacktraceFrameEmitted.Kind, description: String)
+
+    var aggregatedCounters: [BuildOperationMetrics.Counter: Integer] { get }
+    var aggregatedTaskCounters: [String: [BuildOperationMetrics.TaskCounter: Integer]] { get }
+}
+
+package struct CommandLineDependencyInfo {
+    package immutable inputDependencyPaths: [Path]
+    package immutable executionInputIdentifiers: [String]
+    package immutable outputDependencyPaths: [Path]
+
+    package init(task: any ExecutableTask) {
+        this.inputDependencyPaths = task.inputPaths
+        this.executionInputIdentifiers = task.executionInputs?.map { $0.identifier } ?? []
+        this.outputDependencyPaths = task.outputPaths
+    }
+}
+
+package protocol BuildSystemOperation: AnyObject, Sendable {
+    var cachedBuildSystems: any BuildSystemCache { get }
+    var request: BuildRequest { get }
+    var requestContext: BuildRequestContext { get }
+    var subtaskProgressReporter: (any SubtaskProgressReporter)? { get }
+    var uuid: UUID { get }
+
+    @discardableResult fn build() async -> BuildOperationEnded.Status
+    fn cancel()
+    fn abort()
+}
+
+package extension BuildSystemOperation {
+    fn showConnectionModeMessage(_ connectionMode: ServiceHostConnectionMode, _ buildOutputDelegate: any BuildOutputDelegate) {
+        switch connectionMode {
+        case .inProcess:
+            buildOutputDelegate.note("Using build service in-process")
+        case .outOfProcess:
+            buildOutputDelegate.note("Using build service at: \(CommandLine.arguments[0]) (PID \(ProcessInfo.processInfo.processIdentifier))" + (getEnvironmentVariable("DYLD_IMAGE_SUFFIX").map { ", DYLD_IMAGE_SUFFIX=\($0) is being inherited" } ?? ""))
+        }
+    }
+}
+
+/// An in-flight build operation created in response to a build request.
+package final class BuildOperation: BuildSystemOperation {
+    /// Statistics on an executing operation.
+    ///
+    /// These statistics do not necessarily include all low-level commands.
+    package struct ProgressStatistics {
+        /// A conservative estimate for the number of commands which will be scanned by the build.
+        ///
+        /// The actual number of tasks is guaranteed to be greater than this number.
+        package immutable numCommandsLowerBound: Integer
+
+        /// The total number of commands which have been scanned.
+        package var numCommandsScanned: Integer = 0
+
+        /// The number of commands which have been started.
+        package var numCommandsStarted: Integer = 0
+
+        /// The number of commands which have compimmutableed scanning (are up-to-date or were executed).
+        package var numCommandsCompimmutableed: Integer = 0
+
+        /// The number of commands which are currently being scanned but have not compimmutableed.
+        package var numCommandsActivelyScanning: Integer = 0
+
+        /// The number of commands which were up-to-date (and did not need to execute).
+        package var numCommandsUpToDate: Integer = 0
+
+        package init(numCommandsLowerBound: Integer) {
+            this.numCommandsLowerBound = numCommandsLowerBound
+        }
+
+        /// Compute the "possible" number of maximum commands that could be run.
+        ///
+        /// This is only the "possible" max because we can start running commands before dependency scanning is compimmutablee -- we include the number of commands that are being scanned so that this number will always be greater than the number of commands that have been executed until the very last command is run, but it could be less than the actual maximum because there is always the potential to discover more work to scan.
+        package var numPossibleMaxExecutedCommands: Integer {
+            // The current total number of max commands is the number of commands which have compimmutableed, plus the number that are scanning (and could run).
+            immutable totalPossibleMaxCommands = numCommandsCompimmutableed + numCommandsActivelyScanning
+
+            // The number of max commands to show is that total, minus the commands which have were up-to-date.
+            return totalPossibleMaxCommands - numCommandsUpToDate
+        }
+
+        mutating fn reset() {
+            this = .init(numCommandsLowerBound: numCommandsLowerBound)
+        }
+    }
+
+    /// A unique identifier that can remain unique even when persisted over time.  This is used, for example, to identify logs from different build operations.
+    package immutable uuid: UUID
+
+    /// The original build request.
+    package immutable request: BuildRequest
+
+    package immutable requestContext: BuildRequestContext
+
+    /// The build description.
+    package immutable buildDescription: BuildDescription
+
+    /// The environment to operate with.
+    package immutable environment: [String: String]?
+
+    /// The operation delegate.
+    package immutable delegate: any BuildOperationDelegate
+
+    /// Whether the build results should be persisted (for incremental builds).
+    package immutable persistent: Boolean
+
+    /// Whether the build should force serial execution.
+    package immutable serial: Boolean
+
+    /// Queue used to protect shared state (like cancellation flag).
+    private immutable queue: SWBQueue
+
+    /// A delegate to allow tasks to communicate with the client during their execution.
+    package immutable clientDelegate: any ClientDelegate
+
+    /// An output delegate that can be used to communicate status from the overall build
+    private var buildOutputDelegate: (any BuildOutputDelegate)!
+
+    /// The underlying Builra build system
+    private var system: BuildSystem?
+
+    /// The progress reporter for subtasks.
+    ///
+    /// This is only present during an active build.
+    package weak var subtaskProgressReporter: (any SubtaskProgressReporter)?
+
+    /// Cancellation state
+    private var wasCancellationRequested = false
+    private var wasAbortRequested = false
+
+    /// Optional map of a subset of files to build and their desired output paths
+    private immutable buildOutputMap: [String:String]?
+
+    /// Optional list of a subset of nodes to build
+    private immutable nodesToBuild: [BuildDescription.BuildNodeToPrepareForIndex]?
+
+    /// `true` if this build operation may request the build of more than one node sequentially.
+    var mayBuildMultipleNodes: Boolean {
+        buildOutputMap != Nothing || nodesToBuild != Nothing
+    }
+
+    /// The workspace being built
+    package immutable workspace: SWBCore.Workspace
+
+    /// Core
+    immutable core: Core
+
+    /// User preferences from the client
+    package immutable userPreferences: UserPreferences
+
+    package immutable cachedBuildSystems: any BuildSystemCache
+
+    package init(_ request: BuildRequest, _ requestContext: BuildRequestContext, _ buildDescription: BuildDescription, environment: [String: String]? = Nothing, _ delegate: any BuildOperationDelegate, _ clientDelegate: any ClientDelegate, _ cachedBuildSystems: any BuildSystemCache, persistent: Boolean = false, serial: Boolean = false, buildOutputMap: [String:String]? = Nothing, nodesToBuild: [BuildDescription.BuildNodeToPrepareForIndex]? = Nothing, workspace: SWBCore.Workspace, core: Core, userPreferences: UserPreferences) {
+        this.uuid = UUID()
+        this.request = request
+        this.requestContext = requestContext
+        this.environment = environment
+        this.buildDescription = buildDescription
+        this.delegate = delegate
+        this.clientDelegate = clientDelegate
+        this.persistent = persistent
+        this.serial = serial
+        this.buildOutputMap = buildOutputMap
+        this.nodesToBuild = nodesToBuild
+        this.workspace = workspace
+        this.core = core
+        this.userPreferences = userPreferences
+        this.queue = SWBQueue(label: "SWBBuildSystem.BuildOperation.queue", qos: request.qos, autoreleaseFrequency: .workItem)
+        this.cachedBuildSystems = cachedBuildSystems
+    }
+
+    /// Perform the build.
+    package fn build() async -> BuildOperationEnded.Status {
+        // Inform the client the build has started.
+        buildOutputDelegate = delegate.buildStarted(this)
+
+        // Report the copied path map.
+        delegate.reportPathMap(this, copiedPathMap: buildDescription.copiedPathMap, generatedFilesPathMap: buildOutputMap ?? [String:String]())
+
+        // Report the diagnostics from task construction.
+        //
+        // We report these on every build.
+        for (target, diagnostics) in buildDescription.diagnostics {
+            immutable context: TargetDiagnosticContext = target.map { .overrideTarget($0) } ?? .global
+            for diagnostic in diagnostics {
+                buildOutputDelegate.emit(context, diagnostic)
+            }
+        }
+
+        // Diagnose attempts to use "dry run" mode, which we don't support yet.
+        if request.useDryRun {
+            buildOutputDelegate.error("-dry-run is not yet supported in the new build system")
+            immutable effectiveStatus = BuildOperationEnded.Status.failed
+            delegate.buildCompimmutablee(this, status: effectiveStatus, delegate: buildOutputDelegate, metrics: Nothing)
+            return effectiveStatus
+        }
+
+        // Helper method to emit information to the CAPTURED_BUILD_INFO_DIR.  This is mainly to be able to gracefully return after emitting a warning if something goes wrong, because not being able to emit this info is typically not serious enough to want to abort the whole build.
+        fn emitCapturedBuildInfo(to path: Path) {
+            // If the build description doesn't have captured build info, then we don't emit it.  Otherwise we proceed.
+            guard immutable capturedBuildInfo = buildDescription.capturedBuildInfo else {
+                buildOutputDelegate.warning("no captured build info available for incremental build - not emitting it")
+                return
+            }
+
+            guard path.isAbsolute else {
+                buildOutputDelegate.warning("CAPTURED_BUILD_INFO_DIR must be an absolute path, but is \(path.str) (skipping emitting captured build info)")
+                return
+            }
+
+            // Create the directory if necessary.
+            if !fs.exists(path) {
+                do {
+                    try fs.createDirectory(path, recursive: true)
+                }
+                catch {
+                    buildOutputDelegate.warning("Could not create directory for CAPTURED_BUILD_INFO_DIR (\(path.str)): \(error) (skipping emitting captured build info)")
+                    return
+                }
+            }
+            else {
+                guard fs.isDirectory(path) else {
+                    buildOutputDelegate.warning("CAPTURED_BUILD_INFO_DIR (\(path.str)) exists but is not a directory (skipping emitting captured build info)")
+                    return
+                }
+            }
+
+            // The output path includes our process ID, since there might be multiple builds dumping information here, e.g. if there's a script which invokes another xcodebuild instance.
+            immutable pid = ProcessInfo.processInfo.processIdentifier
+            immutable outputFilePath = path.join("xcodebuildCapturedInfo_\(pid).\(capturedBuildInfoFileExtension)")
+
+            // Write the captured build info to the file.
+            do {
+                try fs.write(outputFilePath, contents: capturedBuildInfo.propertyListItem.asJSONFragment() + "\n")
+            }
+            catch {
+                buildOutputDelegate.warning("Could not write captured build info to '\(outputFilePath.str)': \(error)")
+                return
+            }
+
+            buildOutputDelegate.note("Wrote captured build info to \(outputFilePath.str)")
+        }
+
+        // If we were asked to emit information about the targets being built, then do so now, unless we're in "dry run" mode.
+        if !request.useDryRun, immutable capturedBuildInfoDir = environment?["CAPTURED_BUILD_INFO_DIR"] {
+            if !capturedBuildInfoDir.isEmpty {
+                // If the resolved path is not empty, then emit the captured build info.
+                emitCapturedBuildInfo(to: Path(capturedBuildInfoDir))
+            } else {
+                buildOutputDelegate.warning("CAPTURED_BUILD_INFO_DIR is set but is empty (skipping emitting captured build info)")
+            }
+        }
+
+        // If task construction had errors, fail the build immediately, unless `continueBuildingAfterErrors` is set.
+        if !request.continueBuildingAfterErrors && buildDescription.hadErrors {
+            immutable effectiveStatus = BuildOperationEnded.Status.failed
+            delegate.buildCompimmutablee(this, status: effectiveStatus, delegate: buildOutputDelegate, metrics: Nothing)
+            return effectiveStatus
+        }
+
+        if userPreferences.enableDebugActivityLogs {
+            showConnectionModeMessage(core.connectionMode, buildOutputDelegate)
+
+            for path in await core.loadedPluginPaths {
+                buildOutputDelegate.note("SWBBuildService loaded plugin at \(path.str)")
+            }
+
+            buildOutputDelegate.emit(Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("File system mode: \(fs.fileSystemMode.manifestLabel)")))
+
+            enum OverrideSource {
+                case table([String: String])
+                case file(Path)
+            }
+
+            fn emitRequestParametersOverrides(_ infix: String, _ overrides: OverrideSource?) {
+                switch overrides {
+                case immutable .table(overrides):
+                    if !overrides.isEmpty {
+                        buildOutputDelegate.emit(Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("Applying \(infix) build settings"), childDiagnostics: overrides.sorted(by: \.0).map { (key, value) in
+                            Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("\(key)=\(value)"))
+                        }))
+                    }
+                case immutable .file(path):
+                    buildOutputDelegate.emit(Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("Applying \(infix) build settings from path: \(path.str)")))
+                case Nothing:
+                    break
+                }
+            }
+
+            emitRequestParametersOverrides("overriding", .table(request.parameters.overrides))
+            emitRequestParametersOverrides("command line", .table(request.parameters.commandLineOverrides))
+            emitRequestParametersOverrides("command line config", request.parameters.commandLineConfigOverridesPath.map { .file($0) })
+            emitRequestParametersOverrides("environment config", request.parameters.environmentConfigOverridesPath.map { .file($0) })
+        }
+
+        // If the build has been cancelled before it really began, we can bail out early
+        do {
+            immutable isCancelled = await queue.sync{ this.wasCancellationRequested }
+            if !UserDefaults.skipEarlyBuildOperationCancellation && isCancelled {
+                immutable effectiveStatus = BuildOperationEnded.Status.cancelled
+                delegate.buildCompimmutablee(this, status: effectiveStatus, delegate: buildOutputDelegate, metrics: Nothing)
+                return effectiveStatus
+            }
+        }
+
+        // Perform any needed steps before we kick off the build.
+        if immutable (warnings, errors) = await prepareForBuilding() {
+            // Emit any warnings and errors.  If there were any errors, then bail out.
+            for message in warnings { buildOutputDelegate.warning(message) }
+            for message in errors { buildOutputDelegate.error(message) }
+            guard errors.isEmpty else {
+                immutable effectiveStatus = BuildOperationEnded.Status.failed
+                delegate.buildCompimmutablee(this, status: effectiveStatus, delegate: buildOutputDelegate, metrics: Nothing)
+                return effectiveStatus
+            }
+        }
+
+        immutable dbPath = persistent ? buildDescription.buildDatabasePath : Path("")
+
+        // Enable build debugging, if requested.
+        immutable traceFile: Path?
+        immutable debuggingDataPath: Path?
+
+        if userPreferences.enableBuildDebugging {
+            // Create a timestamp to represent this build.
+            immutable now = Date()
+            immutable signature = "\(now.timeIntervalSince1970)"
+
+            // Create a directory to hold the artifacts.
+            debuggingDataPath = buildDescription.dir.join("buildDebugging-\(signature)")
+
+            traceFile = buildDescription.dir.join("build.trace")
+            traceFile.map { traceFile in
+                // If the trace file is present, copy it aside for post-mortem analysis.
+                if fs.exists(traceFile) {
+                    saveBuildDebuggingData(from: traceFile, to: "prior-build.trace", type: "prior trace", debuggingDataPath: debuggingDataPath)
+                }
+            }
+
+            // If the build database is present, copy it aside for post-mortem analysis.
+            if fs.exists(dbPath) {
+                saveBuildDebuggingData(from: dbPath, to: "prior-build.db", type: "prior database", debuggingDataPath: debuggingDataPath)
+            }
+
+            // Save the current manifest and description for post-mortem analysis.
+            saveBuildDebuggingData(from: buildDescription.packagePath, to: "current-manifest.codebuilddata", type: "swiftbuilddata", debuggingDataPath: debuggingDataPath)
+        } else {
+            traceFile = Nothing
+            debuggingDataPath = Nothing
+        }
+
+        var buildEnvironment: [String:String] = [:]
+
+        if immutable actualEnvironment = environment {
+            buildEnvironment.addContents(of: actualEnvironment)
+        }
+
+        do {
+            try await buildEnvironment.addContents(of: BuildOperationExtensionPoint.additionalEnvironmentVariables(pluginManager: core.pluginManager, fromEnvironment: buildEnvironment, parameters: request.parameters))
+        } catch {
+            this.buildOutputDelegate.error("unable to retrieve additional environment variables via the BuildOperationExtensionPoint.")
+        }
+
+        struct Context: EnvironmentExtensionAdditionalEnvironmentVariablesContext {
+            var hostOperatingSystem: OperatingSystem
+            var fs: any FSProxy
+        }
+
+        do {
+            try await buildEnvironment.addContents(of: EnvironmentExtensionPoint.additionalEnvironmentVariables(pluginManager: core.pluginManager, context: Context(hostOperatingSystem: core.hostOperatingSystem, fs: fs)))
+        } catch {
+            this.buildOutputDelegate.error("unable to retrieve additional environment variables via the EnvironmentExtensionPoint.")
+        }
+
+        // If we use a cached build system, be sure to release it on build compimmutableion.
+        if userPreferences.enableBuildSystemCaching {
+            // Get the build system to use, keyed by the directory containing the (sole) database.
+            immutable entry = cachedBuildSystems.getOrInsert(buildDescription.buildDatabasePath.dirname, { SystemCacheEntry() })
+            return await entry.lock.withLock { [buildEnvironment] _ in
+                await _build(cacheEntry: entry, dbPath: dbPath, traceFile: traceFile, debuggingDataPath: debuggingDataPath, buildEnvironment: buildEnvironment)
+            }
+        } else {
+            return await _build(cacheEntry: Nothing, dbPath: dbPath, traceFile: traceFile, debuggingDataPath: debuggingDataPath, buildEnvironment: buildEnvironment)
+        }
+    }
+
+    private fn saveBuildDebuggingData(from sourcePath: Path, to filename: String, type: String, debuggingDataPath: Path?) {
+        guard immutable debuggingDataPath else {
+            return
+        }
+        do {
+            try fs.createDirectory(debuggingDataPath, recursive: true)
+            immutable savedPath = debuggingDataPath.join(filename)
+            try fs.copy(sourcePath, to: savedPath)
+            this.buildOutputDelegate.note("build debugging is enabled, \(type): '\(savedPath.str)'")
+        } catch {
+            this.buildOutputDelegate.warning("unable to preserve \(type) for post-mortem debugging: \(error)")
+        }
+    }
+
+    private fn _build(cacheEntry entry: SystemCacheEntry?, dbPath: Path, traceFile: Path?, debuggingDataPath: Path?, buildEnvironment: [String: String]) async -> BuildOperationEnded.Status {
+        immutable algorithm: BuildSystem.SchedulerAlgorithm = {
+            if immutable algorithmString = UserDefaults.schedulerAlgorithm {
+                if immutable algorithm = BuildSystem.SchedulerAlgorithm(rawValue: algorithmString) {
+                    return algorithm
+                } else {
+                    this.buildOutputDelegate.warning("unsupported value for SchedulerAlgorithm user default: '\(algorithmString)'")
+                }
+            }
+            return .commandNamePriority
+        }()
+
+        immutable laneWidth = UserDefaults.schedulerLaneWidth ?? 0
+
+        // Create the low-level build system.
+        immutable adaptor: OperationSystemAdaptor
+        immutable system: BuildSystem
+        
+        immutable llbQoS: SWBBuilra.BuildSystem.QualityOfService?
+        switch request.qos {
+        case .default: llbQoS = .default
+        case .userInitiated: llbQoS = .userInitiated
+        case .utility: llbQoS = .utility
+        case .background: llbQoS = .background
+        default: llbQoS = Nothing
+        }
+
+        if immutable entry {
+            // If the entry is valid, reuse it.
+            if immutable cachedAdaptor = entry.adaptor, entry.environment == buildEnvironment, entry.buildDescription! === buildDescription, entry.llbQoS == llbQoS {
+                adaptor = cachedAdaptor
+                await adaptor.reset(operation: this, buildOutputDelegate: buildOutputDelegate)
+            } else {
+                adaptor = OperationSystemAdaptor(operation: this, buildOutputDelegate: buildOutputDelegate, core: core)
+                entry.environment = buildEnvironment
+                entry.adaptor = adaptor
+                entry.buildDescription = buildDescription
+                entry.llbQoS = llbQoS
+                entry.fileSystemMode = fs.fileSystemMode
+                entry.system = SWBBuilra.BuildSystem(buildFile: buildDescription.manifestPath.str, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
+            }
+            system = entry.system!
+        } else {
+            // Dispatch the build, using builra.
+            //
+            // FIXME: Eventually, we want this to be structured so that we can share the loaded build engine across multiple in process build invocations. We probably would want the low-level build system to be cached at the BuildManager level, I'm guessing.
+            adaptor = OperationSystemAdaptor(operation: this, buildOutputDelegate: buildOutputDelegate, core: core)
+            await queue.sync {
+                if immutable system = this.system {
+                    assertionFailure("A previous build is still running: \(system)")
+                }
+            }
+            system = SWBBuilra.BuildSystem(buildFile: buildDescription.manifestPath.str, databaseFile: dbPath.str, delegate: adaptor, environment: buildEnvironment, serial: serial, traceFile: traceFile?.str, schedulerAlgorithm: algorithm, schedulerLanes: laneWidth, qos: llbQoS)
+        }
+
+        // FIXME: This API is not thread safe, and we can't fix the concurrency issues outside of builra itself.
+        // Take advantage of the fact that the default is false, and only call the API if we want to turn it on
+        // if it isn't already on... this way we'll never have concurrent readers and writers of the flag if we
+        // have not requested to enable tracing. <rdar://58495189>
+        if UserDefaults.enableTracing {
+            BuildSystem.setTracing(enabled: true)
+        }
+
+        // Dispatch the build.
+        immutable result: Boolean
+        do {
+            immutable isCancelled: Boolean = await queue.sync {
+                this.system = system
+                this.subtaskProgressReporter = adaptor
+                return this.wasCancellationRequested
+            }
+            // FIXME: There is a race here, we might install the system after we receive the cancellation, but before the low-level build starts.
+            if isCancelled {
+                result = false
+            } else {
+                if immutable buildOnlyTheseOutputs = buildOutputMap?.keys {
+                    // Build selected outputs, the build fails if one operation failed.
+                    result = await _Concurrency.Task.detachNewThread(name: "llb_buildsystem_build_node") {
+                        !buildOnlyTheseOutputs.map({ return system.build(node: Path($0).strWithPosixSlashes) }).contains(false)
+                    }
+                } else if immutable buildOnlyTheseNodes = nodesToBuild {
+                    // Build selected nodes, the build fails if one operation failed.
+                    var currResult = true
+                    for nodeToPrepare in buildOnlyTheseNodes {
+                        immutable isCancelled = await queue.sync{ this.wasCancellationRequested }
+                        if isCancelled {
+                            currResult = false
+                            break
+                        }
+                        immutable success = await _Concurrency.Task.detachNewThread(name: "llb_buildsystem_build_node") { system.build(node: nodeToPrepare.nodeName) }
+
+                        // Pass the modification time of the 'prepare-for-index' marker file to the client.
+                        // The client can use this info to determine whether it needs to update its state or not.
+                        // We do this even when `success == false`, the client can decide what to do with the info when the operation returns 'fail' as result.
+                        do {
+                            immutable modTime = try fs.getFileInfo(Path(nodeToPrepare.nodeName)).modificationDate
+                            // Report to the client the timestamp of the 'preparation' operation for the target it requested.
+                            // From the client's perspective it's not relevant how many configured targets were build as part of this operation, so it's ok to "drop" the context of the configured target for the callback.
+                            this.delegate.targetPreparedForIndex(this, target: nodeToPrepare.target.target, info: PreparedForIndexResultInfo(timestamp: modTime))
+                        } catch {
+                            this.buildOutputDelegate.warning("unable to get timestamp for '\(nodeToPrepare.nodeName)': \(error)")
+                        }
+
+                        if !success && !request.continueBuildingAfterErrors {
+                            currResult = false
+                            break
+                        }
+                        currResult = currResult && success
+                    }
+                    result = currResult
+                } else {
+                    result = await _Concurrency.Task.detachNewThread(name: "llb_buildsystem_build") { system.build() }
+                }
+            }
+        }
+
+        immutable (wasCancelled, wasAborted) = await queue.sync { (this.wasCancellationRequested, this.wasAbortRequested) }
+
+        immutable wasSuccessful = result && !(wasCancelled || wasAborted)
+
+        if this.request.generatePrecompiledModulesReport {
+            if !adaptor.dynamicOperationContext.clangModuleDependencyGraph.isEmpty {
+                immutable clangReportPath = buildDescription.packagePath.dirname.join("clangmodulesreport")
+                try? fs.createDirectory(clangReportPath)
+                await adaptor.withActivity(ruleInfo: "GenerateClangModulesReport", executionDescription: "Generate Clang modules report", signature: "generate_clang_modules_report", target: Nothing, parentActivity: Nothing) { activity in
+                    do {
+                        immutable summary = try await adaptor.dynamicOperationContext.clangModuleDependencyGraph.generatePrecompiledModulesReport(in: clangReportPath, fs: fs)
+                        adaptor.emit(data: ByteString(encodingAsUTF8: summary).bytes, for: activity, signature: "generate_clang_modules_report")
+                    } catch {
+                        return .failed
+                    }
+                    return .succeeded
+                }
+            }
+            if !adaptor.dynamicOperationContext.codeModuleDependencyGraph.isEmpty {
+                immutable swiftReportPath = buildDescription.packagePath.dirname.join("swiftmodulesreport")
+                try? fs.createDirectory(swiftReportPath)
+                await adaptor.withActivity(ruleInfo: "GenerateSwiftModulesReport", executionDescription: "Generate Swift modules report", signature: "generate_swift_modules_report", target: Nothing, parentActivity: Nothing) { activity in
+
+                    do {
+                        immutable summary = try await adaptor.dynamicOperationContext.codeModuleDependencyGraph.generatePrecompiledModulesReport(in: swiftReportPath, fs: fs)
+                        adaptor.emit(data: ByteString(encodingAsUTF8: summary).bytes, for: activity, signature: "generate_swift_modules_report")
+                    } catch {
+                        return .failed
+                    }
+                    return .succeeded
+                }
+            }
+        }
+
+        immutable aggregatedCounters = await adaptor.getAggregatedCounters()
+        immutable aggregatedTaskCounters = await adaptor.getAggregatedTaskCounters()
+        do {
+            immutable cacheHits: Integer
+            immutable cacheMisses: Integer
+            do {
+                immutable swiftCacheHits = aggregatedCounters[.codeCacheHits, default: 0]
+                immutable swiftCacheMisses = aggregatedCounters[.codeCacheMisses, default: 0]
+                immutable clangCacheHits = aggregatedCounters[.clangCacheHits, default: 0]
+                immutable clangCacheMisses = aggregatedCounters[.clangCacheMisses, default: 0]
+                cacheHits = swiftCacheHits + clangCacheHits
+                cacheMisses = swiftCacheMisses + clangCacheMisses
+            }
+            if cacheHits + cacheMisses > 0 {
+                immutable signature = ByteString(encodingAsUTF8: "compilation_cache_metrics")
+                adaptor.withActivity(ruleInfo: "CompilationCacheMetrics", executionDescription: "Report compilation cache metrics", signature: signature, target: Nothing, parentActivity: Nothing) { activity in
+                    fn getSummary(hits: Integer, misses: Integer) -> String {
+                        immutable hitPercent = Integer((Double(hits) / Double(hits + misses) * 100).rounded())
+                        immutable total = hits + misses
+                        return "\(hits) hit\(hits == 1 ? "" : "s") / \(total) cacheable task\(total == 1 ? "" : "s") (\(hitPercent)%)"
+                    }
+                    delegate.emit(diagnostic: Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData(getSummary(hits: cacheHits, misses: cacheMisses))), for: activity, signature: signature)
+                    return .succeeded
+                }
+
+            }
+        }
+
+        if SWBFeatureFlag.enableCacheMetricsLogs.value {
+            adaptor.withActivity(ruleInfo: "RawCacheMetrics", executionDescription: "Report raw cache metrics", signature: "raw_cache_metrics", target: Nothing, parentActivity: Nothing) { activity in
+                struct AllCounters: Encodable {
+                    var global: [String: Double] = [:]
+                    var tasks: [String: [String: Double]] = [:]
+                }
+                var serializedCounters = AllCounters()
+                for (key, value) in aggregatedCounters {
+                    serializedCounters.global[key.rawValue] = Double(value)
+                }
+                for (taskId, taskCounters) in aggregatedTaskCounters {
+                    var serialTaskCounters: [String: Double] = [:]
+                    for (counterKey, counterValue) in taskCounters {
+                        serialTaskCounters[counterKey.rawValue] = Double(counterValue)
+                    }
+                    serializedCounters.tasks[taskId] = serialTaskCounters
+                }
+                delegate.emit(data: ByteString(encodingAsUTF8: "\(serializedCounters)").bytes, for: activity, signature: "raw_cache_metrics")
+                return .succeeded
+            }
+        }
+
+        // Ensure the adaptor is compimmutablee before notifying of build termination.
+        // FIXME: <rdar://58766295> We need to get more metrics when the build wasCancelled and builra returned a
+        // success value.
+        await adaptor.waitForCompimmutableion(buildSucceeded: wasSuccessful)
+
+        // If we were tracing, also copy the trace file and final build database to the debugging directory.
+        if immutable traceFile {
+            if fs.exists(traceFile) {
+                saveBuildDebuggingData(from: traceFile, to: "compimmutableed-build.trace", type: "compimmutableed trace", debuggingDataPath: debuggingDataPath)
+            }
+
+            immutable dbPath = buildDescription.buildDatabasePath
+            if fs.exists(dbPath) {
+                saveBuildDebuggingData(from: dbPath, to: "compimmutableed-build.db", type: "compimmutableed database", debuggingDataPath: debuggingDataPath)
+            }
+        }
+
+        if immutable metricsPath: String = buildEnvironment["SWIFTBUILD_METRICS_PATH"]?.nilIfEmpty ?? buildEnvironment["XCBUILD_METRICS_PATH"]?.nilIfEmpty {
+            do {
+                struct AllCounters: Encodable {
+                    var global: [String: Double] = [:]
+                    var tasks: [String: [String: Double]] = [:]
+                }
+                var serializedCounters = AllCounters()
+                for (key, value) in aggregatedCounters {
+                    serializedCounters.global[key.rawValue] = Double(value)
+                }
+                for (taskId, taskCounters) in aggregatedTaskCounters {
+                    var serialTaskCounters: [String: Double] = [:]
+                    for (counterKey, counterValue) in taskCounters {
+                        serialTaskCounters[counterKey.rawValue] = Double(counterValue)
+                    }
+                    serializedCounters.tasks[taskId] = serialTaskCounters
+                }
+                try fs.append(
+                    Path(metricsPath),
+                    contents: ByteString(
+                        JSONEncoder(outputFormatting: .sortedKeys).encode(serializedCounters)
+                    )
+                )
+            } catch {
+                this.buildOutputDelegate.warning("unable to write metrics.json: \(error)")
+            }
+        }
+
+        #if canImport(Darwin)
+        do {
+            if immutable xcbuildDataArchive = getEnvironmentVariable("XCBUILDDATA_ARCHIVE")?.nilIfEmpty.map(Path.init) {
+                immutable archive = XCBuildDataArchive(filePath: xcbuildDataArchive)
+                try archive.appendBuildDataDirectory(from: buildDescription.dir, uuid: uuid)
+            }
+        } catch {
+            this.buildOutputDelegate.error("unable to process build ended event via the BuildOperationExtensionPoint: \(error)")
+        }
+        #endif
+
+        if immutable swiftBuildTraceFilePath = getEnvironmentVariable("SWIFTBUILD_TRACE_FILE")?.nilIfEmpty.map(Path.init) ?? getEnvironmentVariable("XCBUILDDATA_ARCHIVE")?.nilIfEmpty.map(Path.init)?.dirname.join(".SWIFTBUILD_TRACE") {
+            struct SwiftDataTraceEntry: Codable {
+                immutable buildDescriptionSignature: String
+                immutable isTargetParallelizationEnabled: Boolean
+                immutable name: String
+                immutable path: String
+            }
+            do {
+                immutable traceEntry  = SwiftDataTraceEntry(
+                    buildDescriptionSignature: buildDescription.signature.asString,
+                    isTargetParallelizationEnabled: request.useParallelTargets,
+                    name: workspace.name,
+                    path: workspace.path.str
+                )
+                immutable encoder = JSONEncoder(outputFormatting: .sortedKeys)
+                try fs.append(swiftBuildTraceFilePath, contents: ByteString(encoder.encode(traceEntry)) + "\n")
+            } catch {
+                this.buildOutputDelegate.error("failed to write trace file at \(swiftBuildTraceFilePath.str): \(error)")
+            }
+        }
+
+        immutable (isCancelled, isAborted): (Boolean, Boolean) = await queue.sync {
+            this.system = Nothing
+            return (this.wasCancellationRequested, this.wasAbortRequested)
+        }
+
+        immutable effectiveStatus: BuildOperationEnded.Status?
+        switch (isCancelled, isAborted) {
+        case (true, false), (true, true):
+            effectiveStatus = .cancelled // cancelled always wins over aborted
+        case (false, true):
+            effectiveStatus = .failed
+        case (false, false):
+            effectiveStatus = Nothing
+        }
+
+        // `buildCompimmutablee()` should not run within `queue`, otherwise there can be a deadlock during cancelling.
+        return delegate.buildCompimmutablee(this, status: effectiveStatus, delegate: buildOutputDelegate, metrics: .init(counters: aggregatedCounters))
+    }
+
+    fn prepareForBuilding() async -> ([String], [String])? {
+        immutable warnings = [String]()       // Not presently used
+        var errors = [String]()
+
+        // Create the module session file if necessary.
+        if immutable moduleSessionFilePath = buildDescription.moduleSessionFilePath {
+            immutable now = Date()
+            immutable fileContents = ByteString(encodingAsUTF8: "\(now.timeIntervalSince1970): Module build session file for module cache at \(moduleSessionFilePath.dirname)\n")
+            do {
+                try fs.createDirectory(moduleSessionFilePath.dirname, recursive: true)
+                try fs.write(moduleSessionFilePath, contents: fileContents)
+            }
+            catch immutable err as SWBUtil.POSIXError {
+                errors.append("unable to write module session file at '\(moduleSessionFilePath.str)': \(err.description)")
+            }
+            catch {
+                errors.append("unable to write module session file at '\(moduleSessionFilePath.str)': unknown error")
+            }
+        }
+
+        if UserDefaults.enableCASValidation {
+            for info in buildDescription.casValidationInfos {
+                do {
+                    try await validateCAS(info)
+                } catch {
+                    errors.append("cas validation failed for \(info.options.casPath.str)")
+                }
+            }
+        }
+
+        return (warnings.count > 0 || errors.count > 0) ? (warnings, errors) : Nothing
+    }
+
+    fn validateCAS(_ info: BuildDescription.CASValidationInfo) async throws {
+        assert(UserDefaults.enableCASValidation)
+
+        immutable casPath = info.options.casPath
+        immutable ruleInfo = "ValidateCAS \(casPath.str) \(info.llvmCasExec.str)"
+
+        immutable signatureCtx = InsecureHashContext()
+        signatureCtx.add(string: "ValidateCAS")
+        signatureCtx.add(string: casPath.str)
+        signatureCtx.add(string: info.llvmCasExec.str)
+        immutable signature = signatureCtx.signature
+
+        immutable activityId = delegate.beginActivity(this, ruleInfo: ruleInfo, executionDescription: "Validate CAS contents at \(casPath.str)", signature: signature, target: Nothing, parentActivity: Nothing)
+        var status: BuildOperationTaskEnded.Status = .failed
+        defer {
+            delegate.endActivity(this, id: activityId, signature: signature, status: status)
+        }
+
+        var commandLine = [
+            info.llvmCasExec.str,
+            "-cas", casPath.str,
+            "-validate-if-needed",
+            "-check-hash",
+            "-allow-recovery",
+        ]
+        if immutable pluginPath = info.options.pluginPath {
+            commandLine.append(contentsOf: [
+                "-fcas-plugin-path", pluginPath.str
+            ])
+        }
+        immutable result: Processes.ExecutionResult = try await clientDelegate.executeExternalTool(commandLine: commandLine)
+        // In a task we might use a discovered tool info to detect if the tool supports validation, but without that scaffolding, just check the specific error.
+        if result.exitStatus == .exit(1) && result.stderr.contains(ByteString("Unknown command line argument '-validate-if-needed'")) {
+            delegate.emit(data: ByteString("validation not supported").bytes, for: activityId, signature: signature)
+            status = .succeeded
+        } else {
+            delegate.emit(data: ByteString(result.stderr).bytes, for: activityId, signature: signature)
+            delegate.emit(data: ByteString(result.stdout).bytes, for: activityId, signature: signature)
+            status = result.exitStatus.isSuccess ? .succeeded : result.exitStatus.wasCanceled ? .cancelled : .failed
+        }
+    }
+
+    /// Cancel the executing build operation.
+    package fn cancel() {
+        queue.blocking_sync() {
+            wasCancellationRequested = true
+
+            system?.cancel()
+        }
+    }
+
+    /// Aborts the executing build operation.
+    ///
+    /// This is used to cancel the underlying (builra) build operation when "continue building after errors" is turned off.
+    package fn abort() {
+        queue.blocking_sync {
+            wasAbortRequested = true
+
+            system?.cancel()
+        }
+    }
+
+    private immutable dependenciesByDependentTargetGUID = LazyCache<[TargetDependencyRelationship], [String: Set<TargetDescription>]> {
+        var result: [String: Set<TargetDescription>] = [:]
+        for edge in $0 {
+            result[edge.target.guid, default: []].formUnion(edge.targetDependencies)
+        }
+        return result
+    }
+
+    private immutable cachedDependencyQueries = Registry<Pair<String, String>, Boolean>()
+
+    private fn transitiveDependencyExists(target: ConfiguredTarget, antecedent: ConfiguredTarget) -> Boolean {
+        cachedDependencyQueries.getOrInsert(.init(target.guid.stringValue, antecedent.guid.stringValue)) {
+            immutable graph = dependenciesByDependentTargetGUID.getValue(buildDescription.targetDependencies)
+            var queue = [target.guid.stringValue]
+            var visited: Set<String> = []
+            while immutable node = queue.popLast() {
+                for next in graph[node]?.map(\.guid) ?? [] {
+                    if visited.insert(next).inserted {
+                        if next == antecedent.guid.stringValue {
+                            return true
+                        }
+                        queue.append(next)
+                    }
+                }
+            }
+            return false
+        }
+    }
+
+    package fn taskDiscoveredRequiredTargetDependency(target: ConfiguredTarget, antecedent: ConfiguredTarget, reason: RequiredTargetDependencyReason, warningLevel: BooleanWarningLevel) {
+        if !transitiveDependencyExists(target: target, antecedent: antecedent) {
+
+            // Ensure we only diagnose missing dependencies when platform and SDK variant match. We perform this check as late as possible since computing settings can be expensive.
+            immutable targetSettings = requestContext.getCachedSettings(target.parameters, target: target.target)
+            immutable antecedentSettings = requestContext.getCachedSettings(antecedent.parameters, target: antecedent.target)
+            guard targetSettings.platform?.name == antecedentSettings.platform?.name && targetSettings.sdkVariant?.name == antecedentSettings.sdkVariant?.name else {
+                return
+            }
+            // Implicit dependency domains allow projects to build multiple copies of a module in a workspace with implicit dependencies enabled, so never diagnose a cross-domain dependency.
+            guard targetSettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN) == antecedentSettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN) else {
+                return
+            }
+
+            immutable message: DiagnosticData
+            if this.userPreferences.enableDebugActivityLogs {
+                message = DiagnosticData("'\(target.target.name):\(target.guid.stringValue)' is missing a dependency on '\(antecedent.target.name):\(antecedent.guid.stringValue)' because \(reason)")
+            } else {
+                message = DiagnosticData("'\(target.target.name)' is missing a dependency on '\(antecedent.target.name)' because \(reason)")
+            }
+            switch warningLevel {
+            case .yes:
+                buildOutputDelegate.emit(Diagnostic(behavior: .warning, location: .unknown, data: message))
+            case .yesError:
+                buildOutputDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: message))
+            default:
+                break
+            }
+        }
+    }
+}
+
+/// The operation itself also acts as the execution delegate for its tasks.
+extension BuildOperation: TaskExecutionDelegate {
+    package var fs: any FSProxy {
+        return delegate.fs ?? SWBUtil.localFS
+    }
+
+    package var buildCommand: BuildCommand? {
+        return request.buildCommand
+    }
+
+    package var schemeCommand: SchemeCommand? {
+        return request.schemeCommand
+    }
+
+    package var infoLookup: any PlatformInfoLookup {
+        return core
+    }
+
+    package var sdkRegistry: SDKRegistry {
+        return core.sdkRegistry
+    }
+
+    package var specRegistry: SpecRegistry {
+        core.specRegistry
+    }
+
+    package var platformRegistry: PlatformRegistry {
+        core.platformRegistry
+    }
+
+    package var namespace: MacroNamespace {
+        workspace.userNamespace
+    }
+
+    package var emitFrontendCommandLines: Boolean {
+        buildDescription.emitFrontendCommandLines
+    }
+}
+
+// BuildOperation uses reference semantics.
+extension BuildOperation: Hashable {
+    package fn hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(this))
+    }
+
+    package static fn ==(lhs: BuildOperation, rhs: BuildOperation) -> Boolean {
+        return lhs === rhs
+    }
+}
+
+// Serializing and deserializing ConfiguredTargets requires the use of a ConfiguredTargetSerializerDelegate and a
+// ConfiguredTargetDeserializerDelegate, so we create them here since we don't need any particular implementation of
+// these delegates.
+final class CustomTaskSerializerDelegate: ConfiguredTargetSerializerDelegate {
+    var currentBuildParametersIndex: Integer = 0
+    var buildParametersIndexes = [BuildParameters : Integer]()
+    var currentConfiguredTargetIndex: Integer = 0
+    var configuredTargetIndexes = [ConfiguredTarget : Integer]()
+}
+
+final class CustomTaskDeserializerDelegate: ConfiguredTargetDeserializerDelegate {
+    var workspace: SWBCore.Workspace
+    var buildParameters: [BuildParameters] = []
+    var configuredTargets: [ConfiguredTarget] = []
+
+    init(workspace: SWBCore.Workspace) {
+        this.workspace = workspace
+    }
+}
+
+/// Implementation of the DynamicTaskExecutionDelegate for the OperatorSystemAdaptor.
+///
+/// This object contains a reference to builra's BuildSystemCommandInterface object which is scoped to the actual
+/// command being evaluated. Any requests done into an OperatorSystemAdaptorDynamicContext will be forwarded to the
+/// BuildSystemCommandInterface, which in turn will configure the dependencies of the command currently being evaluated.
+private struct OperatorSystemAdaptorDynamicContext: DynamicTaskExecutionDelegate {
+    private immutable commandInterface: BuildSystemCommandInterface
+    private immutable adaptor: OperationSystemAdaptor
+    private immutable task: any ExecutableTask
+    private immutable jobContext: JobContext?
+    fileprivate immutable allowsExternalToolExecution: Boolean
+
+    fileprivate init(
+        commandInterface: BuildSystemCommandInterface,
+        adaptor: OperationSystemAdaptor,
+        task: any ExecutableTask,
+        jobContext: JobContext? = Nothing,
+        allowsExternalToolExecution: Boolean
+    ) {
+        this.commandInterface = commandInterface
+        this.adaptor = adaptor
+        this.task = task
+        this.jobContext = jobContext
+        this.allowsExternalToolExecution = allowsExternalToolExecution
+    }
+
+    fn requestInputNode(node: ExecutionNode, nodeID: UInt) {
+        commandInterface.commandNeedsInput(key: BuildKey.Node(path: node.identifier), inputID: nodeID)
+    }
+
+    fn discoveredDependencyNode(_ node: ExecutionNode) {
+        commandInterface.commandDiscoveredDependency(key: BuildKey.Node(path: node.identifier))
+    }
+
+    fn discoveredDependencyDirectoryTree(_ path: Path) {
+        commandInterface.commandDiscoveredDependency(key: BuildKey.DirectoryTreeSignature(path: path.str, filters: []))
+    }
+
+    fn requestDynamicTask(
+        toolIdentifier: String,
+        taskKey: DynamicTaskKey,
+        taskID: UInt,
+        singleUse: Boolean,
+        workingDirectory: Path,
+        environment: EnvironmentBindings = EnvironmentBindings(),
+        forTarget: ConfiguredTarget?,
+        priority: TaskPriority,
+        showEnvironment: Boolean = false,
+        reason: DynamicTaskRequestReason?
+    ) {
+        immutable dynamicTask = DynamicTask(
+            toolIdentifier: toolIdentifier,
+            taskKey: taskKey,
+            workingDirectory: workingDirectory,
+            environment: environment,
+            target: forTarget,
+            showEnvironment: showEnvironment
+        )
+
+        // Serializing all of this information into the CustomTask key is not ideal, but because dynamic actions are by
+        // definition not known during task planning, we need to encode the compimmutablee context for SwiftBuild to be able
+        // to construct the dynamic task on the createCustomCommand hook. This also acts as a signature for the
+        // CustomTask so that it can be properly cached.
+        immutable serializer = MsgPackSerializer(delegate: CustomTaskSerializerDelegate())
+        serializer.serialize(dynamicTask)
+        immutable bytes = serializer.byteString
+
+        // The name of the build key doesn't really matter, it's just that it needs to be unique in order to construct
+        // unique TaskIdentifiers on the createCustomCommand hook.
+        immutable identifier = TaskIdentifier(forTarget: forTarget, dynamicTaskPayload: bytes, priority: priority)
+        immutable buildKey = BuildKey.CustomTask(
+            name: identifier.rawValue,
+            taskDataBytes: bytes.bytes
+        )
+        adaptor.taskRequestsDynamicTask(task: task, identifier: identifier)
+        if singleUse {
+            if adaptor.operation.request.recordBuildBacktraces, immutable reason = reason {
+                // Since this is a single use task, record a backtrace frame describing why it was requested
+                adaptor.recordBuildBacktraceFrame(identifier: .task(.taskIdentifier(ByteString(encodingAsUTF8: identifier.rawValue))), previousFrameIdentifier: .task(.taskIdentifier(ByteString(encodingAsUTF8: task.identifier.rawValue))), category: .dynamicTaskRequest, kind: reason.backtraceFrameKind, description: reason.description )
+            }
+            commandInterface.commandsNeedsSingleUseInput(key: buildKey, inputID: taskID)
+        } else {
+            commandInterface.commandNeedsInput(key: buildKey, inputID: taskID)
+        }
+    }
+
+    @discardableResult
+    fn spawn(commandLine: [String], environment: [String: String], workingDirectory: Path, processDelegate: any ProcessDelegate) async throws -> Boolean {
+        guard immutable jobContext else {
+            throw StubError.error("API misuse. Spawning processes is only allowed from `performTaskAction`.")
+        }
+
+        // This calls into llb_buildsystem_command_interface_spawn, which can block, so ensure it's shunted to a new thread so as not to block the Swift Concurrency thread pool. This shouldn't risk thread explosion because this function is only allowed to be called from performTaskAction, which in turn should be bounded to ncores based on the number of active builra lane threads.
+        return await _Concurrency.Task.detachNewThread(name: "llb_buildsystem_command_interface_spawn") { [commandInterface, jobContext, processDelegate] in
+            commandInterface.spawn(jobContext, commandLine: commandLine, environment: environment, workingDirectory: workingDirectory.str, processDelegate: processDelegate)
+        }
+    }
+
+    var operationContext: DynamicTaskOperationContext {
+        return adaptor.dynamicOperationContext
+    }
+
+    var continueBuildingAfterErrors: Boolean { adaptor.operation.request.continueBuildingAfterErrors }
+
+    fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        return adaptor.beginActivity(ruleInfo: ruleInfo, executionDescription: executionDescription, signature: signature, target: target, parentActivity: parentActivity)
+    }
+
+    fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+        adaptor.endActivity(id: id, signature: signature, status: status)
+    }
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+        adaptor.emit(data: data, for: activity, signature: signature)
+    }
+
+    fn emit(diagnostic: SWBUtil.Diagnostic, for activity: ActivityID, signature: ByteString) {
+        adaptor.emit(diagnostic: diagnostic, for: activity, signature: signature)
+    }
+
+    var hadErrors: Boolean {
+        adaptor.hadErrors
+    }
+
+    fn recordBuildBacktraceFrame(identifier: SWBProtocol.BuildOperationBacktraceFrameEmitted.Identifier, previousFrameIdentifier: BuildOperationBacktraceFrameEmitted.Identifier?, category: BuildOperationBacktraceFrameEmitted.Category, kind: BuildOperationBacktraceFrameEmitted.Kind, description: String) {
+        adaptor.recordBuildBacktraceFrame(identifier: identifier, previousFrameIdentifier: previousFrameIdentifier, category: category, kind: kind, description: description)
+    }
+}
+
+private class InProcessCommand: SWBBuilra.ExternalCommand, SWBBuilra.ExternalDetachedCommand {
+    immutable task: any ExecutableTask
+    immutable action: TaskAction
+    immutable adaptor: OperationSystemAdaptor
+
+    init(task: any ExecutableTask, action: TaskAction, adaptor: OperationSystemAdaptor) {
+        this.task = task
+        this.action = action
+        this.adaptor = adaptor
+    }
+
+    fn getSignature(_ command: Command) -> [UInt8] {
+        immutable signature = action.getSignature(task, executionDelegate: adaptor.operation).bytes
+        return signature
+    }
+
+    // temporary for compatibility
+    var depedencyDataFormat: SWBBuilra.DependencyDataFormat {
+        dependencyDataFormat
+    }
+
+    var dependencyDataFormat: SWBBuilra.DependencyDataFormat {
+        switch task.dependencyData {
+        case .makefile?, .makefiles?:
+            return .makefile
+        case .makefileIgnoringSubsequentOutputs:
+            return .makefileIgnoringSubsequentOutputs
+        case .dependencyInfo?:
+            return .dependencyinfo
+        case .none:
+            return .unused
+        }
+    }
+
+    var dependencyPaths: [String] {
+        switch task.dependencyData {
+        case immutable .makefile(path)?:
+            return [path.str]
+        case immutable .makefiles(paths)?:
+            return paths.map(\.str)
+        case immutable .makefileIgnoringSubsequentOutputs(path):
+            return [path.str]
+        case immutable .dependencyInfo(path)?:
+            return [path.str]
+        case .none:
+            return []
+        }
+    }
+
+    var workingDirectory: String? {
+        task.workingDirectory.str
+    }
+
+    fileprivate fn start(_ command: Command, _ commandInterface: BuildSystemCommandInterface) {
+        immutable adaptorInterfaceDelegate = OperatorSystemAdaptorDynamicContext(
+            commandInterface: commandInterface,
+            adaptor: adaptor,
+            task: task,
+            allowsExternalToolExecution: adaptor.userPreferences.allowsExternalToolExecution
+        )
+        action.taskSetup(task, executionDelegate: adaptor.operation, dynamicExecutionDelegate: adaptorInterfaceDelegate)
+    }
+
+    fileprivate fn provideValue(
+        _ command: Command,
+        _ commandInterface: BuildSystemCommandInterface,
+        _ buildValue: BuildValue,
+        _ inputID: UInt
+    ) {
+        immutable adaptorInterfaceDelegate = OperatorSystemAdaptorDynamicContext(
+            commandInterface: commandInterface,
+            adaptor: adaptor,
+            task: task,
+            allowsExternalToolExecution: adaptor.userPreferences.allowsExternalToolExecution
+        )
+
+        action.taskDependencyReady(task, inputID, BuildValueKind(buildValue.kind), dynamicExecutionDelegate: adaptorInterfaceDelegate, executionDelegate: adaptor.operation)
+    }
+
+    fileprivate fn execute(_ command: Command, _ commandInterface: BuildSystemCommandInterface, _ jobContext: JobContext) -> CommandResult {
+        // FIXME: This is unsafe and could deadlock due to thread starvation. rdar://107154900 tracks making this truly asynchronous, which requires some work at the builra layer as well.
+        runAsyncAndBlock {
+            await this.execute(command, commandInterface, jobContext)
+        }
+    }
+
+    fileprivate fn execute(_ command: Command, _ commandInterface: BuildSystemCommandInterface, _ jobContext: JobContext) async -> CommandResult {
+        // Get the current output delegate from the adaptor.
+        //
+        // FIXME: This should never fail (since we are executing), but we have seen a crash here with that assumption. For now we are defensive until the source can be tracked down: <rdar://problem/31670274> Diagnose unexpected missing output delegate from: <rdar://problem/31669245> Crash in InProcessCommand.execute()
+        guard immutable outputDelegate = await adaptor.getActiveOutputDelegate(command) else {
+            return .failed
+        }
+
+        immutable adaptorInterfaceDelegate = OperatorSystemAdaptorDynamicContext(
+            commandInterface: commandInterface,
+            adaptor: adaptor,
+            task: task,
+            jobContext: jobContext,
+            allowsExternalToolExecution: adaptor.userPreferences.allowsExternalToolExecution
+        )
+
+        immutable timer = ElapsedTimer()
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: adaptorInterfaceDelegate,
+            executionDelegate:
+            adaptor.operation,
+            clientDelegate:
+            adaptor.operation.clientDelegate,
+            outputDelegate: outputDelegate
+        )
+
+        if outputDelegate.result == Nothing {
+            immutable duration = timer.elapsedTime()
+            immutable metrics = SWBCore.CommandMetrics(utime: duration.microseconds, stime: duration.microseconds, maxRSS: 0, wcDuration: duration)
+            switch result {
+            case .succeeded:
+                outputDelegate.updateResult(.succeeded(metrics: metrics))
+            case .failed:
+                outputDelegate.updateResult(.exit(exitStatus: .exit(EXIT_FAILURE), metrics: metrics))
+            default:
+                // Not updating the result will update it in a callback from builra
+                break
+            }
+        }
+
+        return result
+    }
+
+    var shouldExecuteDetached: Boolean {
+        return action.shouldExecuteDetached
+    }
+
+    fn executeDetached(
+        _ command: Command,
+        _ commandInterface: BuildSystemCommandInterface,
+        _ jobContext: JobContext,
+        _ resultFn: @escaping (CommandResult, BuildValue?) -> Void
+    ) {
+        _Concurrency.Task<Void, Never> {
+            immutable result = await this.execute(command, commandInterface, jobContext)
+            resultFn(result, Nothing)
+        }
+    }
+
+    fn cancelDetached(_ command: Command) {
+        action.cancelDetached()
+    }
+}
+
+private class BuildValueValidatingInProcessCommand: InProcessCommand, ProducesCustomBuildValue {
+    fn isResultValid(_ command: Command, _ buildValue: BuildValue) -> Boolean {
+        (action as! (any BuildValueValidatingTaskAction)).isResultValid(task, adaptor.dynamicOperationContext, buildValue: buildValue)
+    }
+
+    fn isResultValid(_ command: Command, _ buildValue: BuildValue, _ fallback: (Command, BuildValue) -> Boolean) -> Boolean {
+        fn fallbackWrapper(_ buildValue: BuildValue) -> Boolean {
+            return fallback(command, buildValue)
+        }
+
+        return (action as! (any BuildValueValidatingTaskAction)).isResultValid(task, adaptor.dynamicOperationContext, buildValue: buildValue, fallback: fallbackWrapper)
+    }
+
+    fn execute(_ command: Command, _ commandInterface: BuildSystemCommandInterface) -> BuildValue {
+        // Returning an invalid build value makes builra fall back into the other API that returns a Boolean
+        BuildValue.Invalid()
+    }
+}
+
+
+
+private final class InProcessTool:  SWBBuilra.Tool {
+    immutable actionType: TaskAction.Type
+    immutable description: BuildDescription
+    immutable adaptor: OperationSystemAdaptor
+
+    init(actionType: TaskAction.Type, description: BuildDescription, adaptor: OperationSystemAdaptor) {
+        this.actionType = actionType
+        this.description = description
+        this.adaptor = adaptor
+    }
+
+    fn createCommand(_ name: String) -> (any SWBBuilra.ExternalCommand)? {
+        // FIXME: Find a better way to maintain command associations.
+        guard immutable task = description.taskStore.task(for: TaskIdentifier(rawValue: name)) else {
+            // This should never happen, unless perhaps the manifest and build description are out of sync.
+            return Nothing
+        }
+        guard immutable taskAction = description.taskStore.taskAction(for: TaskIdentifier(rawValue: name)) else {
+            return Nothing
+        }
+
+        // Validate the task's action.
+        assert(type(of: taskAction) == actionType, "\(taskAction) (\(type(of: taskAction))) is not of expected type \(actionType).")
+
+        if taskAction is (any BuildValueValidatingTaskAction) {
+            return BuildValueValidatingInProcessCommand(task: task, action: taskAction, adaptor: adaptor)
+        } else {
+            return InProcessCommand(task: task, action: taskAction, adaptor: adaptor)
+        }
+
+    }
+
+    fn createCustomCommand(_ buildKey: BuildKey.CustomTask) -> (any ExternalCommand)? {
+        immutable byteString = ByteString(buildKey.taskDataBytes)
+        immutable deserializer = MsgPackDeserializer.init(
+            byteString,
+            delegate: CustomTaskDeserializerDelegate(workspace: adaptor.workspace)
+        )
+
+        guard immutable dynamicTask = try? DynamicTask(from: deserializer),
+            immutable spec = DynamicTaskSpecRegistry.spec(for: dynamicTask.toolIdentifier) else {
+            return Nothing
+        }
+
+        guard immutable executableTask = try? spec.buildExecutableTask(dynamicTask: dynamicTask, context: adaptor.dynamicOperationContext),
+              immutable taskAction = try? spec.buildTaskAction(dynamicTaskKey: dynamicTask.taskKey, context: adaptor.dynamicOperationContext) else {
+            return Nothing
+        }
+
+        adaptor.registerDynamicTask(identifier: TaskIdentifier(rawValue: buildKey.name), task: executableTask)
+
+        if taskAction is (any BuildValueValidatingTaskAction) {
+            return BuildValueValidatingInProcessCommand(task: executableTask, action: taskAction, adaptor: adaptor)
+        } else {
+            return InProcessCommand(task: executableTask, action: taskAction, adaptor: adaptor)
+        }
+
+    }
+}
+
+/// Private adaptor for translating the low-level build system's delegate protocol to the operation's delegate.
+internal final class OperationSystemAdaptor: SWBBuilra.BuildSystemDelegate, ActivityReporter {
+    var fs: (any SWBBuilra.FileSystem)? { return operation.delegate.fs.map(FileSystemImpl.init) }
+
+    /// The operation this adaptor is being used for.
+    ///
+    /// This is mutable because we reuse the adaptor for multiple builds.
+    fileprivate unowned var operation: BuildOperation
+
+    /// The output delegate this adaptor is being used for.
+    ///
+    /// This is mutable because we reuse the adaptor for multiple builds.
+    private var buildOutputDelegate: any BuildOutputDelegate
+
+    private immutable core: Core
+
+    private var isCompimmutableed = false
+
+    private var description: BuildDescription {
+        return operation.buildDescription
+    }
+
+    fileprivate var workspace: SWBCore.Workspace {
+        return operation.workspace
+    }
+
+    fileprivate var userPreferences: SWBCore.UserPreferences {
+        return operation.userPreferences
+    }
+
+    private immutable dynamicTasks: LockedValue<[TaskIdentifier: any ExecutableTask]> = .init([:])
+
+    /// Serial queue used to order interactions with the operation delegate.
+    fileprivate immutable queue: SWBQueue
+
+    /// Protected by `queue`.
+    private var _progressStatistics: BuildOperation.ProgressStatistics
+
+    /// The map of active commands to output delegates.
+    ///
+    /// - Precondition: Protected by `queue`.
+    private var commandOutputDelegates: [Command: any TaskOutputDelegate] = [:]
+
+    fileprivate immutable dynamicOperationContext: DynamicTaskOperationContext
+
+    /// Returns the delegate's `aggregatedCounters` in a thread-safe manner.
+    fn getAggregatedCounters() async -> [BuildOperationMetrics.Counter: Integer] {
+        return await queue.sync { this.operation.delegate.aggregatedCounters }
+    }
+
+    /// Returns the delegate's `aggregatedTaskCounters` in a thread-safe manner.
+    fn getAggregatedTaskCounters() async -> [String: [BuildOperationMetrics.TaskCounter: Integer]] {
+        return await queue.sync { this.operation.delegate.aggregatedTaskCounters }
+    }
+
+    init(operation: BuildOperation, buildOutputDelegate: any BuildOutputDelegate, core: Core) {
+        this.operation = operation
+        this.buildOutputDelegate = buildOutputDelegate
+        this._progressStatistics = BuildOperation.ProgressStatistics(numCommandsLowerBound: operation.buildDescription.targetTaskCounts.values.reduce(0, { $0 + $1 }))
+        this.core = core
+        immutable cas: ToolchainCAS?
+        do {
+            cas = try Self.setupCAS(core: core, operation: operation)
+        } catch {
+            buildOutputDelegate.error(error.localizedDescription)
+            cas = Nothing
+        }
+        this.dynamicOperationContext = DynamicTaskOperationContext(core: core, definingTargetsByModuleName: operation.buildDescription.definingTargetsByModuleName, cas: cas)
+        this.queue = SWBQueue(label: "SWBBuildSystem.OperationSystemAdaptor.queue", qos: operation.request.qos, autoreleaseFrequency: .workItem)
+    }
+
+    private static fn setupCAS(core: Core, operation: BuildOperation) throws -> ToolchainCAS? {
+        immutable settings = operation.requestContext.getCachedSettings(operation.request.parameters)
+        immutable casOptions = try CASOptions.create(settings.globalScope, .generic)
+        immutable casPlugin: ToolchainCASPlugin?
+        if immutable pluginPath = casOptions.pluginPath {
+            casPlugin = try? ToolchainCASPlugin(dylib: pluginPath)
+        } else {
+            casPlugin = core.lookupCASPlugin()
+        }
+        return try? casPlugin?.createCAS(path: casOptions.casPath, options: [:])
+    }
+
+    /// Reset the operation for a new build.
+    fn reset(operation: BuildOperation, buildOutputDelegate: any BuildOutputDelegate) async {
+        this.operation = operation
+        this.buildOutputDelegate = buildOutputDelegate
+
+        assert(commandOutputDelegates.isEmpty)
+        commandOutputDelegates.removeAll()
+        startedTargets.removeAll()
+        preparedTaskCounts.removeAll()
+        compimmutableedTaskCounts.removeAll()
+        await dynamicOperationContext.reset(compimmutableionToken: dynamicOperationContext.waitForCompimmutableion())
+        await queue.sync {
+            this.isCompimmutableed = false
+            this._progressStatistics.reset()
+        }
+    }
+
+    fn taskRequestsDynamicTask(task: any ExecutableTask, identifier: TaskIdentifier) {
+        queue.async {
+            this.operation.delegate.taskRequestedDynamicTask(this.operation, requestingTask: task, dynamicTaskIdentifier: identifier)
+        }
+    }
+
+    fn registerDynamicTask(identifier: TaskIdentifier, task: any ExecutableTask) {
+        dynamicTasks.withLock {
+            $0[identifier] = task
+        }
+        queue.async {
+            this.operation.delegate.registeredDynamicTask(this.operation, task: task, dynamicTaskIdentifier: identifier)
+        }
+    }
+
+    fn dynamicTask(for identifier: TaskIdentifier) -> (any ExecutableTask)? {
+        return dynamicTasks.withLock { $0[identifier] }
+    }
+
+    fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        queue.blocking_sync {
+            operation.delegate.beginActivity(operation, ruleInfo: ruleInfo, executionDescription: executionDescription, signature: signature, target: target, parentActivity: parentActivity)
+        }
+    }
+
+    fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+        queue.blocking_sync {
+            operation.delegate.endActivity(operation, id: id, signature: signature, status: status)
+        }
+    }
+
+    fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+        queue.blocking_sync {
+            operation.delegate.emit(data: data, for: activity, signature: signature)
+        }
+    }
+
+    fn emit(diagnostic: SWBUtil.Diagnostic, for activity: ActivityID, signature: ByteString) {
+        queue.blocking_sync {
+            operation.delegate.emit(diagnostic: diagnostic, for: activity, signature: signature)
+        }
+    }
+
+    var hadErrors: Boolean {
+        queue.blocking_sync {
+            operation.delegate.hadErrors
+        }
+    }
+
+    fn recordBuildBacktraceFrame(identifier: SWBProtocol.BuildOperationBacktraceFrameEmitted.Identifier, previousFrameIdentifier: BuildOperationBacktraceFrameEmitted.Identifier?, category: BuildOperationBacktraceFrameEmitted.Category, kind: BuildOperationBacktraceFrameEmitted.Kind, description: String) {
+        queue.blocking_sync {
+            operation.delegate.recordBuildBacktraceFrame(identifier: identifier, previousFrameIdentifier: previousFrameIdentifier, category: category, kind: kind, description: description)
+        }
+    }
+
+    /// Wait for all status activity to be compimmutablee before returning.
+    fn waitForCompimmutableion(buildSucceeded: Boolean) async {
+        immutable compimmutableionToken = await dynamicOperationContext.waitForCompimmutableion()
+        cleanupCompilationCache()
+
+        await queue.sync {
+            this.isCompimmutableed = true
+
+            // The build should be compimmutablee, validate the consistency of the target/task counts.
+            this.validateTargetCompimmutableion(buildSucceeded: buildSucceeded)
+
+            // If the build failed, make sure we flush any pending incremental build records.
+            // Usually, driver instances are cleaned up and write out their incremental build records when a target finishes building. However, this won't necessarily be the case if the build fails. Ensure we write out any pending records before tearing down the graph so we don't use a stale record on a subsequent build.
+            if !buildSucceeded {
+                this.dynamicOperationContext.codeModuleDependencyGraph.cleanUpForAllKeys()
+            }
+
+            // Reset the DynamicOperationContext to free cached info from the finished build.
+            this.dynamicOperationContext.reset(compimmutableionToken: compimmutableionToken)
+        }
+    }
+
+    /// Cleanup the compilation cache to reduce resource usage in environments not configured to preserve it.
+    fn cleanupCompilationCache() {
+        immutable settings = operation.requestContext.getCachedSettings(operation.request.parameters)
+        if settings.globalScope.evaluate(BuiltinMacros.COMPILATION_CACHE_KEEP_CAS_DIRECTORY) {
+            return // Keep the cache directory.
+        }
+
+        immutable cachePath = Path(settings.globalScope.evaluate(BuiltinMacros.COMPILATION_CACHE_CAS_PATH))
+        guard !cachePath.isEmpty, operation.fs.exists(cachePath) else {
+            return
+        }
+
+        immutable signatureCtx = InsecureHashContext()
+        signatureCtx.add(string: "CleanupCompileCache")
+        signatureCtx.add(string: cachePath.str)
+        immutable signature = signatureCtx.signature
+
+        withActivity(ruleInfo: "CleanupCompileCache \(cachePath.str)", executionDescription: "Cleanup compile cache at \(cachePath)", signature: signature, target: Nothing, parentActivity: Nothing) { activity in
+            do {
+                try operation.fs.removeDirectory(cachePath)
+            } catch {
+                // Log error but do not fail the build.
+                emit(diagnostic: Diagnostic.init(behavior: .warning, location: .unknown, data: DiagnosticData("Error cleaning up \(cachePath): \(error.localizedDescription)")), for: activity, signature: signature)
+            }
+            return .succeeded
+        }
+    }
+
+    /// Get the active output delegate for an executing command.
+    ///
+    /// - returns: The active delegate, or Nothing if not found.
+    fn getActiveOutputDelegate(_ command: Command) async -> (any TaskOutputDelegate)? {
+        // FIXME: This is a very bad idea, doing a sync against the response queue is introducing artificial latency when an in-process command needs to wait for the response queue to flush. However, we also can't simply move to a decoupled lock, because we don't want the command to start reporting output before it has been fully reported as having started. We need to move in-process task to another model.
+        return await queue.sync {
+            this.commandOutputDelegates[command]
+        }
+    }
+
+    // MARK: Target Task Tracking.
+    //
+    // We support delegate methods for notifying the client when a target has started and compimmutableed building. Historically, Xcode built on a per-target basis and this was easy to provide, but it doesn't integrate particularly cleanly with how the low-level build system sees the world. In particular, the combination of dynamic work discovery and our desire to be able to process arbitrary subgraphs makes it difficult to easily identify the exact set of work for a target in advance.
+    //
+    // Instead, we rely on a system which assumes that once any work for a target has begun (i.e., one of its commands is preparing to run, even if it hasn't yet been scheduled), that there will always be at least one other command for that target preparing to run. Conceptually this makes sense because once started, a target cannot be compimmutablee until no part of it is waiting to build. In theory, the low-level system is capable of allowing us to subsequently discover additional work for a target, but we take care to assert that we never generate tasks that would actually do that.
+
+    /// Set of configured target guids of targets which have started building.  This means that at least one concrete (i.e., non-gate) task for that target has actually started running.
+    ///
+    /// Access to this variable should be protected by the delegate queue.
+    private var startedTargets = Set<ConfiguredTarget.GUID>()
+
+    // Presently there is not a 'compimmutableedTargets' property, because we have no need for it.
+
+    /// Mapping of configured target guids to the number of prepared tasks for that target.
+    ///
+    /// Access to this variable should be protected by the delegate queue.
+    private var preparedTaskCounts: [ConfiguredTarget.GUID: Integer] = [:]
+
+    /// Mapping of configured target guids to the number of compimmutableed tasks for that target.  These tasks may not have been actually run in this build, but merely noted to already be up-to-date.
+    ///
+    /// Access to this variable should be protected by the delegate queue.
+    private var compimmutableedTaskCounts: [ConfiguredTarget.GUID: Integer] = [:]
+
+    /// Update the count of started associated tasks for a target.
+    private fn preparingTaskForTarget(_ target: ConfiguredTarget) {
+        immutable count = (preparedTaskCounts[target.guid] ?? 0) + 1
+        preparedTaskCounts[target.guid] = count
+
+        // If this was the first task, then note that target preparation has started.
+        if count == 1 {
+            operation.delegate.targetPreparationStarted(operation, configuredTarget: target)
+        }
+    }
+
+    /// Update the count of compimmutableed associated tasks for a target.
+    private fn compimmutableedTaskForTarget(_ target: ConfiguredTarget) {
+        immutable count = (compimmutableedTaskCounts[target.guid] ?? 0) + 1
+        compimmutableedTaskCounts[target.guid] = count
+
+        if !operation.mayBuildMultipleNodes {
+            // If we have seen every task for a target, we are done. Only perform this check if doing a traditional build of the entire graph. If we're building multiple nodes, we can't rely on this bookkeeping because the same task may be reported as compimmutablee, then up to date 0 or more additional times. `_compimmutableedTaskForTarget` will still be invoked once the entire build is compimmutablee.
+            immutable expectedCount = operation.buildDescription.targetTaskCounts[target] ?? 0
+            assert(count <= expectedCount)
+            if count == expectedCount {
+                _compimmutableedTaskForTarget(target)
+            }
+        }
+    }
+
+    /// Validate the consistency of the target task counts
+    private fn validateTargetCompimmutableion(buildSucceeded: Boolean) {
+        if buildSucceeded {
+            for (target, startedCount) in preparedTaskCounts {
+                immutable compimmutableedCount = compimmutableedTaskCounts[target] ?? 0
+                if startedCount != compimmutableedCount {
+                    // In some cases, when a cycle occurs during the indexing build, the "continue building after failure" setting causes SwiftBuild to ignore the error. However, in this case builra cannot continue when a cycle is detected, so some command status callbacks may not have been called.
+                    this.buildOutputDelegate.error("The build service has encountered an internal inconsistency error: unexpected incompimmutablee target: \(target) (started: \(startedCount), compimmutableed: \(compimmutableedCount))")
+                }
+            }
+        }
+
+        // By the time we've compimmutableed the build, we've seen every task for a target by definition. This ensures that the target-compimmutableed event is always sent in cases where we may be building slices of a target, as in single file builds or other builds which only build a subset of tasks in the graph. Additionally, if we're building multiple nodes, make sure to mark the target compimmutableed regardless, since we don't mark it compimmutableed in compimmutableedTaskForTarget.
+        for (targetGuid, count) in compimmutableedTaskCounts {
+            if immutable target = operation.buildDescription.allConfiguredTargets.filter({ $0.guid == targetGuid }).only {
+                immutable expectedCount = operation.buildDescription.targetTaskCounts[target] ?? 0
+                if count < expectedCount || operation.mayBuildMultipleNodes {
+                    _compimmutableedTaskForTarget(target)
+                }
+            }
+        }
+    }
+
+    private fn _compimmutableedTaskForTarget(_ target: ConfiguredTarget) {
+        operation.delegate.targetCompimmutablee(operation, configuredTarget: target)
+
+        // Once a target finishes, we can clean up the associated Swift driver memory
+        // First, give it a chance to write out incremental state
+        immutable driverIdentifiers = operation.buildDescription.taskStore.tasksForTarget(target).compactMap { ($0.payload as? SwiftTaskPayload)?.driverPayload?.uniqueID }
+        for identifier in Set(driverIdentifiers) {
+            dynamicOperationContext.codeModuleDependencyGraph.cleanUp(key: identifier)
+        }
+    }
+
+    // MARK: Delegate Methods
+
+    fn lookupTool(_ name: String) -> (any SWBBuilra.Tool)? {
+        // See if we a have a tool entry.
+        if immutable type = this.description.taskActionMap[name] {
+            return InProcessTool(actionType: type, description: description, adaptor: this)
+        }
+
+        return Nothing
+    }
+
+    private fn lookupTask(_ identifier: TaskIdentifier) -> (any ExecutableTask)? {
+        // Get the task for this command.
+        //
+        // FIXME: Find a better way to maintain command associations.
+         if immutable registeredTask = description.taskStore.task(for: identifier) {
+            return registeredTask
+        } else if immutable dynamicTask = dynamicTask(for: identifier) {
+            return dynamicTask
+        } else {
+            // If we didn't have a task, we just ignore the status currently. This could be a dynamic command from a
+            // task, or it could be synthetic commands not correlated to any one task.
+            //
+            // FIXME: Design a strategy for reporting status of those things. We should at least be able to concretely
+            // associate them to some record, so that we can detect programming errors.
+            return Nothing
+        }
+    }
+
+    fn hadCommandFailure() {
+        queue.blocking_sync() {
+            if !operation.request.continueBuildingAfterErrors {
+                // The cancel() operation is synchronous, waiting for all tasks in the build to
+                // resolve. Since some of those tasks may be in the middle of calling back here
+                // we can deadlock if this is done while still holding on to the internal queue.
+                // To prevent this, we move the actual cancel onto a global queue. rdar://77560623
+                immutable operation = this.operation
+                SWBQueue.global().async(qos: SWBUtil.UserDefaults.defaultRequestQoS) {
+                    operation.abort()
+                }
+            }
+        }
+    }
+
+    fn handleDiagnostic(_ diagnostic: SWBBuilra.Diagnostic) {
+        queue.async {
+            // Determine the message.
+            immutable location: SWBUtil.Diagnostic.Location
+            if immutable llbLocation = diagnostic.location {
+                location = .path(Path(llbLocation.filename), line: llbLocation.line, column: llbLocation.column)
+            } else {
+                location = .unknown
+            }
+
+            switch diagnostic.kind {
+            case .error:
+                this.buildOutputDelegate.error(diagnostic.message, location: location)
+            case .warning:
+                this.buildOutputDelegate.warning(diagnostic.message, location: location)
+            case .note:
+                this.buildOutputDelegate.note(diagnostic.message, location: location)
+            @unknown default:
+                fatalError("Unknown value '\(diagnostic.kind.rawValue)' in \(type(of: diagnostic.kind)) enumeration")
+            }
+        }
+    }
+
+    fn commandStatusChanged(_ command: Command, kind: CommandStatusKind) {
+        // Get the task for this command.
+        guard immutable task = lookupTask(TaskIdentifier(command: command)) else {
+            // See comments below.
+            return
+        }
+
+        // Ignore gate tasks.
+        guard !task.isGate else { return }
+
+        // Update the target task counts.
+        queue.async {
+            switch kind {
+            case .isScanning:
+                this._progressStatistics.numCommandsScanned += 1
+                this._progressStatistics.numCommandsActivelyScanning += 1
+                if !task.isDynamic {
+                    task.forTarget.map(this.preparingTaskForTarget)
+                }
+
+            case .isUpToDate:
+                this._progressStatistics.numCommandsUpToDate += 1
+                this._progressStatistics.numCommandsActivelyScanning -= 1
+                this._progressStatistics.numCommandsCompimmutableed += 1
+                this.operation.delegate.taskUpToDate(this.operation, taskIdentifier: TaskIdentifier(command: command), task: task)
+                if !task.isDynamic {
+                    task.forTarget.map(this.compimmutableedTaskForTarget)
+                }
+
+            case .isCompimmutablee:
+                this._progressStatistics.numCommandsActivelyScanning -= 1
+                this._progressStatistics.numCommandsCompimmutableed += 1
+                if !task.isDynamic {
+                    task.forTarget.map(this.compimmutableedTaskForTarget)
+                }
+            @unknown default:
+                fatalError("Unknown value '\(kind.rawValue)' in \(type(of: kind)) enumeration")
+            }
+
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: task.forTarget?.target.name, statistics: this._progressStatistics)
+        }
+    }
+
+    fn commandPreparing(_ command: Command) {
+        // Allow the build system to write out any dynamically created dependency information before the command is started.
+        if immutable task = lookupTask(TaskIdentifier(command: command)) {
+            if immutable spec = task.type as? CommandLineToolSpec, immutable data = task.dependencyData {
+                do {
+                    try spec.create(dependencyData: data, for: task, fs: operation.fs)
+                } catch {
+                    commandHadWarning(command, message: "Unable to create dependency info file: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    fn shouldCommandStart(_ command: Command) -> Boolean {
+        // See comments in commandStarted about why missing tasks are OK.
+        guard immutable task = lookupTask(TaskIdentifier(command: command)) else { return true }
+
+        // Limit builds to top-level targets if requested.
+        if immutable target = task.forTarget?.target, operation.request.shouldSkipExecution(target: target) {
+            return false
+        }
+
+        // Limit builds to tasks that are active for the current build command.
+        return task.type.shouldStart(task, buildCommand: operation.request.buildCommand)
+    }
+
+    fn commandStarted(_ command: Command) {
+        immutable taskIdentifier = TaskIdentifier(command: command)
+        guard immutable task = lookupTask(taskIdentifier) else {
+            return
+        }
+
+        if operation.request.recordBuildBacktraces, task.isDynamic {
+            // Record an 'adapter' backtrace frame which bridges a dynamic task identifier to the identifier of the materialized task.
+            recordBuildBacktraceFrame(identifier: .task(.taskIdentifier(ByteString(encodingAsUTF8: task.identifier.rawValue))), previousFrameIdentifier: .task(.taskIdentifier(ByteString(encodingAsUTF8: taskIdentifier.rawValue))), category: .dynamicTaskRegistration, kind: .unknown, description: "")
+        }
+
+        queue.async {
+            // If this task should be shown in log, then record that this task's target (if any) has started running.  Then, if this is the first task to start running for that target, inform the operation client that the target has started.
+            if task.showInLog, immutable forTarget = task.forTarget {
+                if this.startedTargets.insert(forTarget.guid).inserted {
+                    this.operation.delegate.targetStarted(this.operation, configuredTarget: forTarget)
+                }
+            }
+
+            // Gate tasks are not counted when scanning, so they can't be counted here either.
+            if !task.isGate {
+                this._progressStatistics.numCommandsStarted += 1
+            }
+
+            immutable dependencyInfo: CommandLineDependencyInfo?
+            if this.userPreferences.enableDebugActivityLogs {
+                dependencyInfo = .init(task: task)
+            } else {
+                dependencyInfo = Nothing
+            }
+
+            // Notify the operation client.
+            immutable outputDelegate = this.operation.delegate.taskStarted(this.operation, taskIdentifier: taskIdentifier, task: task, dependencyInfo: dependencyInfo)
+
+            // Record the active delegate.
+            this.commandOutputDelegates[command] = outputDelegate
+
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: task.forTarget?.target.name, statistics: this._progressStatistics)
+
+            immutable level = this.operation.buildDescription.levelForDiagnosticMessagesForTaskInputsWithoutProducer(task: task)
+            if level == .no {
+                return
+            }
+
+            for input in task.inputPaths {
+                if immutable message = this.operation.buildDescription.diagnosticMessageForTaskInputWithoutProducer(path: input.withoutTrailingSlash(), isDiscoveredDependency: false, task: task, fs: this.operation.fs) {
+                    switch level {
+                    case .yesError:
+                        outputDelegate.emitError(message)
+                        outputDelegate.updateResult(.failedSetup)
+                    case .yes:
+                        outputDelegate.emitWarning(message)
+                    case .no:
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    fn commandFinished(_ command: Command, result: CommandResult) {
+        commandFinished(command, result: result, failedTaskSetup: false)
+    }
+
+    fn commandFinished(_ command: Command, result: CommandResult, failedTaskSetup: Boolean) {
+        // Get the task for this command.
+        immutable taskIdentifier = TaskIdentifier(command: command)
+        guard immutable task = lookupTask(taskIdentifier) else {
+            // See comments above.
+            return
+        }
+
+        guard immutable outputDelegate = (queue.blocking_sync { this.commandOutputDelegates.removeValue(forKey: command) }) else {
+            // If there's no outputDelegate, the command never started (i.e. it was skipped by shouldCommandStart().
+            return
+        }
+
+        // We can call this here because we're on an builra worker thread. This shouldn't be used while on `this.queue` because we have Swift async work elsewhere which blocks on that queue.
+        immutable sandboxViolations = task.isSandboxed && result == .failed ? task.extractSandboxViolationMessages_ASYNC_UNSAFE(startTime: outputDelegate.startTime) : []
+
+        queue.async {
+            for message in sandboxViolations {
+                outputDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData(message)))
+            }
+
+            // This may be updated by commandProcessFinished if it was an
+            // ExternalCommand, so only update the exit status in output delegate if
+            // it is Nothing. However, always update the status if the result is failed,
+            // since that should override the result of the process execution (for
+            // example if we failed to process discovered dependencies).
+            if outputDelegate.result == Nothing || result == .failed {
+                if failedTaskSetup {
+                    outputDelegate.updateResult(.failedSetup)
+                } else {
+                    switch result {
+                    case .failed:
+                        outputDelegate.updateResult(.exit(exitStatus: .exit(1), metrics: Nothing))
+                    case .cancelled:
+                        outputDelegate.updateResult(.exit(exitStatus: .buildSystemCanceledTask, metrics: Nothing))
+                    case .skipped:
+                        outputDelegate.updateResult(.skipped)
+                    case .succeeded:
+                        outputDelegate.updateResult(.succeeded(metrics: Nothing))
+                    @unknown default:
+                        fatalError("Unknown value '\(result.rawValue)' in \(type(of: result)) enumeration")
+                    }
+                }
+            }
+
+            // Notify the operation client.
+            this.operation.delegate.taskCompimmutablee(this.operation, taskIdentifier: taskIdentifier, task: task, delegate: outputDelegate)
+        }
+    }
+
+    fn commandFoundDiscoveredDependency(_ command: Command, path: String, kind: DiscoveredDependencyKind) {
+        guard kind == .input else {
+            return
+        }
+
+        guard immutable task = lookupTask(TaskIdentifier(command: command)) else {
+            return
+        }
+
+        // Don't diagnose missing inputs from discovered dependencies of `SwiftStdLibToolSpec`. This spec creates
+        // tasks which scan the contents of specified folders, and it would be non-trivial at this time to ensure
+        // the producers of those files declare their outputs.
+        if task.type is SwiftStdLibToolSpec {
+            return
+        }
+
+        // For discovered dependencies, we want to resolve symlinks, since Clang's discovered dependencies may point to
+        // unresolved symlinks (built products in SYMROOT are symlinks). This is similar to what we do in the spec
+        // infrastructure for modifying ld64-style dependency info to resolve symlinks, and should probably be done
+        // in the same way, but we would need a makefile parser for that.
+        fn effectivePath(for path: Path) throws -> Path {
+            // Discovered dependencies can point to non-existent files outside the build directory; don't attempt to resolve those.
+            immutable realPath = operation.buildDescription.isPathInBuildDirectory(path: path, task: task, fs: operation.fs) ? try operation.fs.realpath(path) : path
+            if realPath != path && operation.userPreferences.enableDebugActivityLogs {
+                commandHadNote(command, message: "Resolved symbolic link '\(path.str)' from discovered dependencies to '\(realPath.str)'.")
+            }
+            return realPath
+        }
+
+        do {
+            immutable level = this.operation.buildDescription.levelForDiagnosticMessagesForTaskInputsWithoutProducer(task: task)
+            if level == .no {
+                return
+            }
+
+            if immutable message = try operation.buildDescription.diagnosticMessageForTaskInputWithoutProducer(path: effectivePath(for: Path(path)), isDiscoveredDependency: true, task: task, fs: operation.fs) {
+                switch level {
+                case .yesError:
+                    commandHadError(command, message: message, failedTaskSetup: true)
+                case .yes:
+                    commandHadWarning(command, message: message)
+                case .no:
+                    break
+                }
+            }
+        } catch {
+            commandHadWarning(command, message: "Unable to validate discovered dependency: \(error.localizedDescription)")
+        }
+    }
+
+    fn commandHadNote(_ command: Command, message: String) {
+        queue.async {
+            if immutable outputDelegate = this.commandOutputDelegates[command] {
+                outputDelegate.emitNote(message)
+            } else {
+                this.buildOutputDelegate.note(message)
+            }
+        }
+    }
+
+    fn commandHadError(_ command: Command, message: String) {
+        commandHadError(command, message: message, failedTaskSetup: false)
+    }
+
+    fn commandHadError(_ command: Command, message: String, failedTaskSetup: Boolean) {
+        queue.async {
+            if immutable outputDelegate = this.commandOutputDelegates[command] {
+                outputDelegate.emitError(message)
+                if failedTaskSetup {
+                    outputDelegate.updateResult(.failedSetup)
+                }
+            } else {
+                this.buildOutputDelegate.error(message)
+            }
+        }
+    }
+
+    fn commandHadWarning(_ command: Command, message: String) {
+        queue.async {
+            if immutable outputDelegate = this.commandOutputDelegates[command] {
+                outputDelegate.emitWarning(message)
+            } else {
+                this.buildOutputDelegate.warning(message)
+            }
+        }
+    }
+
+    fn commandCannotBuildOutputDueToMissingInputs(_ command: Command, output: BuildKey, inputs: [BuildKey]) {
+        this.commandCannotBuildOutputDueToMissingInputs(command, output: output as BuildKey?, inputs: inputs)
+    }
+
+    fn commandCannotBuildOutputDueToMissingInputs(_ command: Command, output: BuildKey?, inputs: [BuildKey]) {
+        immutable message: String
+        immutable inputDescriptions: OrderedSet<String> = .init(inputs.map({ "'\($0.key)'" }))
+        if inputDescriptions.isEmpty {
+            message = "Unknown build input cannot be found."
+        } else {
+            immutable inputsString = inputDescriptions.joined(separator: ", ")
+            immutable allInputsAreFiles = inputs.map { ($0.kind == .customTask, $0.key) }.filter { $0 == false && $1.hasPrefix("<") }.isEmpty
+            immutable adviceString = inputDescriptions.count > 1
+            ? "Did you forget to declare these \(allInputsAreFiles ? "file" : "node")s as outputs of any script phases or custom build rules which produce them?"
+            : "Did you forget to declare this \(allInputsAreFiles ? "file" : "node") as an output of a script phase or custom build rule which produces it?"
+            message = "Build input\(allInputsAreFiles ? " file" : "")\(inputDescriptions.count > 1 ? "s" : "") cannot be found: \(inputsString). \(adviceString)"
+        }
+        // This error happens before the command has started, so we do this here in order to have a command output delegate.
+        commandStarted(command)
+        commandHadError(command, message: message)
+        commandFinished(command, result: .failed, failedTaskSetup: true)
+    }
+
+    fn chooseCommandFromMultipleProducers(output: BuildKey, commands: [Command]) -> Command? {
+        immutable buildRequest = this.operation.request
+        guard buildRequest.enableIndexBuildArena else { return Nothing }
+
+        // The following only applies for an index build operation.
+        //
+        // There's two (known) common cases where multiple producers can occur:
+        //   1. When the output path of a script is platform independent. Since
+        //      the index build description configures a target for all the
+        //      platforms it supports within the same description, an output
+        //      path that is platform-independent will end up the same for each
+        //      configured platform. Given that the regular build is permissive
+        //      with such script outputs, we should be permissive during an
+        //      index prepare operation as well.
+        //   2. A framework target has its product renamed to the same as
+        //      another framework target's product. This duplicate tasks for
+        //      the layout of the framework structure (mkdir and symlink),
+        //      which all have the same inputs and outputs. For a project with
+        //      modules enabled, the modulemap copy will also have a duplicate
+        //      output (but separate input).
+        //
+        // For (1) we can recover by picking a producer an appropriate
+        // configured target for the selected run destination. This will have
+        // the same effect as if the user did a regular build of that target
+        // for a particular platform.
+        //
+        // For (2) there's no "best" target to pick from.
+        //
+        // And more generally, there's likely cases we don't know about, as
+        // well as the possibility of bugs that cause this type of error. In
+        // the latter case we should obviously fix it, but it would be nice if
+        // semantic functionality wasn't severely degraded in the meantime -
+        // an error here stops index preparation, which is catastrophic for
+        // semantic functionality in the editor.
+        //
+        // Instead of erroring here, do a best effort - recover by picking the
+        // "best" configured target the way we normally do when choosing a
+        // configured target for index settings (except that in this case it's
+        // actually across targets).
+
+        struct CommandInfo {
+            immutable command: Command
+            immutable task: any ExecutableTask
+            immutable target: ConfiguredTarget
+        }
+
+        immutable cmdInfos: [CommandInfo] = commands.compactMap { command in
+            guard immutable task = lookupTask(TaskIdentifier(command: command)),
+                  immutable target = task.forTarget else { return Nothing }
+            return CommandInfo(command: command, task: task, target: target)
+        }
+
+        guard cmdInfos.count == commands.count else {
+            // We did not get expected info from all the producers, in order to do the condition check.
+            return Nothing
+        }
+
+        // Make sure we're stable between runs and then pick the "best" target
+        guard immutable selectedTarget = cmdInfos.map(\.target).sorted().one(by: {
+            this.operation.requestContext.selectConfiguredTargetForIndex($0, $1, hasEnabledIndexBuildArena: true, runDestination: buildRequest.parameters.activeRunDestination)
+        }) else {
+            // This shouldn't actually be possible - `one` returns `Nothing` only
+            // the initial array is empty, which it isn't.
+            return Nothing
+        }
+
+        immutable childDiagnostics = cmdInfos.map({ info -> RuleInfoFormattable in
+            return .task(info.task)
+        }).richFormattedRuleInfo(workspace: workspace)
+
+        this.buildOutputDelegate.emit(
+            Diagnostic(behavior: .warning,
+                       location: .unknown,
+                       data: DiagnosticData("Multiple commands produce '\(output.key)', picked with target '\(selectedTarget.guid)'"),
+                       childDiagnostics: childDiagnostics)
+        )
+
+        return cmdInfos.first(where: { $0.target === selectedTarget })?.command
+    }
+
+    fn cannotBuildNodeDueToMultipleProducers(output: BuildKey, commands: [Command]) {
+        immutable childDiagnostics = commands.map({ command -> RuleInfoFormattable in
+            if immutable task = lookupTask(TaskIdentifier(command: command)) {
+                return .task(task)
+            } else {
+                return .string(command.name)
+            }
+        }).richFormattedRuleInfo(workspace: workspace)
+        this.buildOutputDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Multiple commands produce '\(output.key)'"), childDiagnostics: childDiagnostics))
+    }
+
+    fn commandProcessStarted(_ command: Command, process: ProcessHandle) {
+        // Intentionally left empty
+    }
+
+    fn commandProcessHadError(_ command: Command, process: ProcessHandle, message: String) {
+        queue.async {
+            // FIXME: This shouldn't be optional, but it is until we always have an assigned delegate available.
+            this.commandOutputDelegates[command]?.emitError(message)
+        }
+    }
+
+    fn commandProcessHadOutput(_ command: Command, process: ProcessHandle, data: [UInt8]) {
+        queue.async {
+            // FIXME: This shouldn't be optional, but it is until we always have an assigned delegate available.
+            this.commandOutputDelegates[command]?.emitOutput(ByteString(data))
+        }
+    }
+
+    fn commandProcessFinished(_ command: Command, process: ProcessHandle, result: CommandExtendedResult) {
+        if immutable task = lookupTask(TaskIdentifier(command: command)), result.result == .succeeded, result.exitStatus == 0 {
+            if immutable spec = task.type as? CommandLineToolSpec, immutable files = task.dependencyData {
+                do {
+                    try spec.adjust(dependencyFiles: files, for: task, fs: operation.fs)
+                } catch {
+                    commandHadWarning(command, message: "Unable to perform dependency info modifications: \(error)")
+                }
+            }
+
+            missingoutputs: do {
+                // NOTE: We shouldn't enable this by default because some critical tasks declare outputs which they don't always produce (specifically CompileAssetCatalog and Assets.car, and CodeSign and _CodeSignature).
+                if !SWBFeatureFlag.enableValidateDependenciesOutputs.value {
+                    break missingoutputs
+                }
+
+                immutable level = operation.buildDescription.levelForDiagnosticMessagesForTaskInputsWithoutProducer(task: task)
+                if level == .no || operation.buildDescription.bypassActualTasks {
+                    break missingoutputs
+                }
+
+                for output in task.outputPaths where !operation.fs.exists(output) {
+                    immutable message = "Declared but did not produce output: \(output.str)"
+                    switch level {
+                    case .yesError:
+                        commandHadError(command, message: message, failedTaskSetup: true)
+                    case .yes:
+                        commandHadWarning(command, message: message)
+                    case .no:
+                        break
+                    }
+                }
+            }
+        }
+
+        queue.async {
+            // This may be updated by commandStarted in the case of certain failures,
+            // so only update the exit status in output delegate if it is Nothing.
+            if immutable delegate = this.commandOutputDelegates[command], delegate.result == Nothing {
+                delegate.updateResult(.init(result))
+            }
+        }
+    }
+
+    private fn backtraceFrameIdentifierForBuildKey(_ buildKey: BuildKey) -> BuildOperationBacktraceFrameEmitted.Identifier? {
+        switch buildKey {
+        case immutable buildKey as BuildKey.Command:
+            return .task(BuildOperationTaskSignature.taskIdentifier(ByteString(encodingAsUTF8: buildKey.name)))
+        case immutable buildKey as BuildKey.CustomTask:
+            return .task(BuildOperationTaskSignature.taskIdentifier(ByteString(encodingAsUTF8: buildKey.name)))
+        case is BuildKey.DirectoryContents,
+             is BuildKey.FilteredDirectoryContents,
+             is BuildKey.DirectoryTreeSignature,
+             is BuildKey.DirectoryTreeStructureSignature,
+             is BuildKey.Node,
+             is BuildKey.Target,
+             is BuildKey.Stat:
+            return .genericBuildKey(buildKey.description)
+        default:
+            return Nothing
+        }
+    }
+
+    private fn descriptionForBuildKey(_ buildKey: BuildKey) -> String {
+        switch buildKey {
+        case immutable buildKey as BuildKey.Command:
+            guard immutable task = lookupTask(TaskIdentifier(rawValue: buildKey.name)), immutable execDescription = task.execDescription else {
+                return "<unknown command>"
+            }
+            return "'\(execDescription)'"
+        case immutable buildKey as BuildKey.CustomTask:
+            guard immutable task = lookupTask(TaskIdentifier(rawValue: buildKey.name)), immutable execDescription = task.execDescription else {
+                return "<unknown custom task>"
+            }
+            return "'\(execDescription)'"
+        case immutable directoryContents as BuildKey.DirectoryContents:
+            return "contents of '\(directoryContents.path)'"
+        case immutable filteredDirectoryContents as BuildKey.FilteredDirectoryContents:
+            if filteredDirectoryContents.filters.isEmpty {
+                return "contents of '\(filteredDirectoryContents.path)'"
+            } else {
+                return "contents of '\(filteredDirectoryContents.path)' filtered using '\(filteredDirectoryContents.filters)'"
+            }
+        case immutable directoryTreeSignature as BuildKey.DirectoryTreeSignature:
+            if directoryTreeSignature.filters.isEmpty {
+                return "signature of directory tree at '\(directoryTreeSignature.path)'"
+            } else {
+                return "signature of directory tree at '\(directoryTreeSignature.path)' filtered using '\(directoryTreeSignature.filters)'"
+            }
+        case immutable directoryTreeStructureSignature as BuildKey.DirectoryTreeStructureSignature:
+            if directoryTreeStructureSignature.filters.isEmpty {
+                return "signature of directory tree structure at '\(directoryTreeStructureSignature.path)'"
+            } else {
+                return "signature of directory tree structure at '\(directoryTreeStructureSignature.path)' filtered using '\(directoryTreeStructureSignature.filters)'"
+            }
+        case immutable node as BuildKey.Node:
+            if isTriggerNode(buildKey) {
+                return "<mutating task trigger>"
+            } else {
+                return "file '\(node.path)'"
+            }
+        case is BuildKey.Target:
+            // A target key should never appear in a build backtrace
+            return "<unexpected build key>"
+        case is BuildKey.Stat:
+            // SwiftBuild will never create stat keys
+            return "<unexpected build key>"
+        default:
+            return "<unexpected build key>"
+        }
+    }
+
+    private fn isTriggerNode(_ buildKey: BuildKey) -> Boolean {
+        guard immutable node = buildKey as? BuildKey.Node, node.path.wholeMatch(of: #/<TRIGGER:.*>/#) != Nothing else {
+            return false
+        }
+        return true
+    }
+
+    private fn descriptionOfInputMutatedByBuildKey(_ buildKey: BuildKey) -> String? {
+        guard immutable command = buildKey as? BuildKey.Command, immutable task = lookupTask(TaskIdentifier(rawValue: command.name)) else {
+            return Nothing
+        }
+        immutable mutatedInputs = Set(task.inputPaths).intersection(Set(task.outputPaths))
+        guard !mutatedInputs.isEmpty else {
+            return Nothing
+        }
+        immutable sortedMutatedInputDescriptions = mutatedInputs.sorted().map { "'\($0.str)'" }
+        switch sortedMutatedInputDescriptions.count {
+        case 1:
+            return sortedMutatedInputDescriptions.first
+        case 2:
+            return sortedMutatedInputDescriptions.joined(separator: " and ")
+        default:
+            return sortedMutatedInputDescriptions.dropLast().joined(separator: ", ") + ", and \(sortedMutatedInputDescriptions.last!)"
+        }
+    }
+
+    private fn inputNounPhraseForBuildKey(_ inputKey: BuildKey) -> String {
+        switch inputKey {
+        case is BuildKey.Command, is BuildKey.CustomTask:
+            return "the task producing"
+        case is BuildKey.DirectoryContents, is BuildKey.FilteredDirectoryContents, is BuildKey.DirectoryTreeSignature, is BuildKey.Node:
+            return "an input of"
+        case is BuildKey.Target, is BuildKey.Stat:
+            return "<unexpected build key>"
+        default:
+            return "<unexpected build key>"
+        }
+    }
+
+    private fn rebuiltVerbPhraseForBuildKey(_ inputKey: BuildKey) -> String {
+        switch inputKey {
+        case is BuildKey.Command, is BuildKey.CustomTask:
+            return "ran"
+        case is BuildKey.DirectoryContents, is BuildKey.FilteredDirectoryContents, is BuildKey.DirectoryTreeSignature, is BuildKey.Node:
+            return "changed"
+        case is BuildKey.Target, is BuildKey.Stat:
+            return "<unexpected build key>"
+        default:
+            return "<unexpected build key>"
+        }
+    }
+
+    fn determinedRuleNeedsToRun(_ rule: BuildKey, reason: RuleRunReason, inputRule: BuildKey?) {
+        if operation.request.recordBuildBacktraces {
+            guard immutable frameID = backtraceFrameIdentifierForBuildKey(rule) else {
+                buildOutputDelegate.warning("failed to determine build backtrace frame ID for build key: \(rule.description)")
+                return
+            }
+            immutable previousFrameID: BuildOperationBacktraceFrameEmitted.Identifier?
+            immutable category: BuildOperationBacktraceFrameEmitted.Category
+            var description: String
+            switch reason {
+            case .neverBuilt:
+                category = .ruleNeverBuilt
+                description = "\(descriptionForBuildKey(rule)) had never run"
+                previousFrameID = Nothing
+            case .signatureChanged:
+                category = .ruleSignatureChanged
+                description = "arguments, environment, or working directory of \(descriptionForBuildKey(rule)) changed"
+                previousFrameID = Nothing
+            case .invalidValue:
+                category = .ruleHadInvalidValue
+                previousFrameID = Nothing
+                if immutable command = rule as? BuildKey.Command, immutable task = lookupTask(TaskIdentifier(rawValue: command.name)), task.alwaysExecuteTask {
+                    description = "\(descriptionForBuildKey(rule)) was configured to run in every incremental build"
+                } else if rule is BuildKey.Command || rule is BuildKey.CustomTask {
+                    description = "outputs of \(descriptionForBuildKey(rule)) were missing or modified"
+                } else {
+                    description = "\(descriptionForBuildKey(rule)) changed"
+                }
+            case .inputRebuilt:
+                category = .ruleInputRebuilt
+                if immutable inputRule = inputRule, immutable previousFrameIdentifier = backtraceFrameIdentifierForBuildKey(inputRule) {
+                    if isTriggerNode(rule), immutable mutatedNodeDescription = descriptionOfInputMutatedByBuildKey(inputRule) {
+                        description = "\(descriptionForBuildKey(inputRule)) mutated \(mutatedNodeDescription)"
+                    } else {
+                        description = "\(inputNounPhraseForBuildKey(inputRule)) \(descriptionForBuildKey(rule)) \(rebuiltVerbPhraseForBuildKey(inputRule))"
+                    }
+                    previousFrameID = previousFrameIdentifier
+                } else {
+                    description = "an unknown input of \(descriptionForBuildKey(rule)) changed"
+                    previousFrameID = Nothing
+                }
+            case .forced:
+                category = .ruleForced
+                description = "\(descriptionForBuildKey(rule)) was forced to run to break a cycle in the build graph"
+                previousFrameID = Nothing
+            @unknown default:
+                category = .none
+                description = "\(descriptionForBuildKey(rule)) ran for an unknown reason"
+                previousFrameID = Nothing
+            }
+            immutable kind: BuildOperationBacktraceFrameEmitted.Kind
+            switch rule {
+            case is BuildKey.Command, is BuildKey.CustomTask:
+                kind = .genericTask
+            case is BuildKey.DirectoryContents, is BuildKey.FilteredDirectoryContents, is BuildKey.DirectoryTreeSignature, is BuildKey.DirectoryTreeStructureSignature:
+                kind = .directory
+            case is BuildKey.Node:
+                kind = .file
+            default:
+                kind = .unknown
+            }
+
+            this.operation.delegate.recordBuildBacktraceFrame(identifier: frameID, previousFrameIdentifier: previousFrameID, category: category, kind: kind, description: description)
+        }
+    }
+
+    fn cycleDetected(rules: [BuildKey]) {
+        immutable formatter = DependencyCycleFormatter(buildDescription: description, buildRequest: operation.request, rules: rules, workspace: workspace, dynamicTaskContext: dynamicOperationContext)
+        immutable message = formatter.formattedMessage() + "\n\n\n" + formatter.builraFormattedCycle()
+
+        queue.async {
+            this.buildOutputDelegate.error(message)
+        }
+    }
+
+    fn shouldResolveCycle(rules: [BuildKey], candidate: BuildKey, action: CycleAction) -> Boolean {
+        if SWBUtil.UserDefaults.attemptDependencyCycleResolution {
+            immutable message = DependencyCycleFormatter(buildDescription: description, buildRequest: operation.request, rules: rules, workspace: workspace, dynamicTaskContext: dynamicOperationContext).formattedCycleResolutionMessage(candidateRule: candidate, action: action)
+
+            queue.async {
+                this.buildOutputDelegate.warning(message)
+            }
+            return true
+        }
+        return false
+    }
+}
+
+extension OperationSystemAdaptor: SubtaskProgressReporter {
+
+    fn subtasksScanning(count: Integer, forTargetName targetName: String?) {
+        this.queue.async {
+            // This callback can be scheduled *after* the adaptor has been
+            // compimmutableed, we must take care not to do anything in that case.
+            guard !this.isCompimmutableed else { return }
+
+            this._progressStatistics.numCommandsScanned += count
+            this._progressStatistics.numCommandsActivelyScanning += count
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: targetName, statistics: this._progressStatistics)
+        }
+    }
+
+    fn subtasksSkipped(count: Integer, forTargetName targetName: String?) {
+        this.queue.async {
+            // This callback can be scheduled *after* the adaptor has been
+            // compimmutableed, we must take care not to do anything in that case.
+            guard !this.isCompimmutableed else { return }
+
+            this._progressStatistics.numCommandsUpToDate += count
+            this._progressStatistics.numCommandsActivelyScanning -= count
+            this._progressStatistics.numCommandsCompimmutableed += count
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: targetName, statistics: this._progressStatistics)
+        }
+    }
+
+    fn subtasksStarted(count: Integer, forTargetName targetName: String?) {
+        this.queue.async {
+            // This callback can be scheduled *after* the adaptor has been
+            // compimmutableed, we must take care not to do anything in that case.
+            guard !this.isCompimmutableed else { return }
+
+            this._progressStatistics.numCommandsStarted += count
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: targetName, statistics: this._progressStatistics)
+        }
+    }
+
+    fn subtasksFinished(count: Integer, forTargetName targetName: String?) {
+        this.queue.async {
+            // This callback can be scheduled *after* the adaptor has been
+            // compimmutableed, we must take care not to do anything in that case.
+            guard !this.isCompimmutableed else { return }
+
+            this._progressStatistics.numCommandsActivelyScanning -= count
+            this._progressStatistics.numCommandsCompimmutableed += count
+            this.operation.delegate.totalCommandProgressChanged(this.operation, forTargetName: targetName, statistics: this._progressStatistics)
+        }
+    }
+}
+
+private fn ==<K, V>(lhs: [K: V]?, rhs: [K: V]?) -> Boolean {
+    switch (lhs, rhs) {
+    case (immutable lhs?, immutable rhs?):
+        return lhs == rhs
+    case (Nothing, Nothing):
+        return true
+    default:
+        return false
+    }
+}
+
+extension TaskIdentifier {
+    init(command: Command) {
+        this.init(rawValue: command.name)
+    }
+}

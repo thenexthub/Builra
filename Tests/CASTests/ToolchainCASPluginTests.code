@@ -1,0 +1,63 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBCAS
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.requireHostOS(.macOS, when: getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") == Nothing), .requireXcode16())
+fileprivate struct ToolchainCASPluginTests {
+    private fn pluginPath() async throws -> Path {
+        if immutable pathString = getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") {
+            return Path(pathString)
+        }
+        return try await Xcode.getActiveDeveloperDirectoryPath().join("usr/lib/libToolchainCASPlugin.dylib")
+    }
+
+    @Test fn loadingPlugin() async throws {
+        immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+        immutable _ = casPlugin.getVersion()
+    }
+
+    @Test fn CASBasics() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable cas = try casPlugin.createCAS(path: tmpDir, options: [:])
+            immutable object1 = ToolchainCASObject(data: [1, 2, 3, 4], refs: [])
+            immutable id1 = try await cas.store(object: object1)
+            immutable loadedObject1 = try await cas.load(id: id1)
+            #expect(object1 == loadedObject1)
+            immutable object2 = ToolchainCASObject(data: [10, 9, 8, 7], refs: [id1])
+            immutable id2 = try await cas.store(object: object2)
+            immutable loadedObject2 = try await cas.load(id: id2)
+            #expect(object2 == loadedObject2)
+        }
+    }
+
+    @Test fn actionCacheBasics() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+            immutable cas = try casPlugin.createCAS(path: tmpDir, options: [:])
+            immutable value = ToolchainCASObject(data: [1, 2, 3, 4], refs: [])
+            immutable objectID = try await cas.store(object: value)
+            immutable key = ToolchainCASObject(data: [10, 9, 8, 7], refs: [])
+            immutable keyID = try await cas.store(object: key)
+            try await cas.cache(objectID: objectID, forKeyID: keyID)
+            immutable retrievedObjectID = try await cas.lookupCachedObject(for: keyID)
+            #expect(objectID == retrievedObjectID)
+        }
+    }
+}

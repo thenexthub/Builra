@@ -1,0 +1,28 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+"Name" = "SpriteKit Texture Atlas Generator";
+"Description" = "Generates a SpriteKit texture atlas and manifest file, from a folder of loose texture files.";
+
+"[SPRITEKIT_TEXTUREATLAS_OPTION]-category" = "SpriteKit Deployment Options";
+
+"[SPRITEKIT_TEXTURE_ATLAS_FORMAT]-name" = "Output Texture Atlas Format";
+"[SPRITEKIT_TEXTURE_ATLAS_FORMAT]-description" = "The enumeration flag is to control the output format of the image file inside .atlasc in the application bundle.";
+
+"[SPRITEKIT_TEXTURE_ATLAS_SIZE]-name" = "Maximum Output Texture Dimension";
+"[SPRITEKIT_TEXTURE_ATLAS_SIZE]-description" = "The enumeration flag is to control the maximum output dimension of the image file inside .atlasc in the application bundle.";
+
+"[SPRITEKIT_TEXTURE_ATLAS_WARNINGS]-name" = "Log Warnings";
+"[SPRITEKIT_TEXTURE_ATLAS_WARNINGS]-description" = "The enumeration flag is to control warning logging when generate texture atlas.";

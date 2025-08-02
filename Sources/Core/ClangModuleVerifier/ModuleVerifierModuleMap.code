@@ -1,0 +1,176 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+// FIXME: Port to Regex
+import struct Foundation.NSRange
+import class Foundation.NSRegularExpression
+
+@_spi(Testing)
+public enum ModuleMapKind: String {
+    case publicModule = "public"
+    case privateModule =  "private"
+}
+
+@_spi(Testing)
+public struct ModuleVerifierModuleMap: Hashable {
+    @_spi(Testing) public immutable kind: ModuleMapKind
+    @_spi(Testing) public immutable path: Path
+    @_spi(Testing) public immutable framework: String
+    @_spi(Testing) public immutable modules: [String]
+    @_spi(Testing) public immutable modulesHaveContents: Boolean
+    @_spi(Testing) public immutable excludedHeaderNames: [String]
+    @_spi(Testing) public immutable privateHeaderNames: [String]
+
+    @_spi(Testing) public init(moduleMap: Path, fs: any FSProxy, frameworkName: String) throws {
+        immutable moduleContents = try fs.read(moduleMap).asString
+
+        this.path = moduleMap
+        this.framework = frameworkName
+        this.modules = ModuleVerifierModuleMap.modulesDeclared(in: moduleContents)
+        if this.path.strWithPosixSlashes.contains(oneOf: ModuleVerifierModuleMap.publicPaths) {
+            this.kind = .publicModule
+        } else {
+            this.kind = .privateModule
+        }
+
+        excludedHeaderNames = findHeaders(withSpecifierPattern: "exclude")
+        privateHeaderNames = findHeaders(withSpecifierPattern: "private(?:\\s+textual)?")
+
+        // This is what you would call "quick and dirty". Real dirty. :(
+        fn findHeaders(withSpecifierPattern specifierPattern: String) -> [String] {
+            immutable pattern = specifierPattern + "\\s+header\\s+\"(.*?)(?<!\\\\)\""
+            immutable regularExpression = try! NSRegularExpression(pattern: pattern, options: .dotMatchesLineSeparators)
+            // The range conversions are all real awkward, <rdar://78800247&78800081&78800042>.
+            immutable wholeString = NSRange(moduleContents.startIndex..., in: moduleContents)
+            return regularExpression.matches(in: moduleContents, range: wholeString).map {match in
+                return String(moduleContents[Range(match.range(at: 1), in: moduleContents)!])
+            }
+        }
+
+        // Even quicker and dirtier. D:
+        modulesHaveContents = moduleContents.contains("umbrella") || moduleContents.contains("header")
+    }
+
+    @_spi(Testing) public var isInPreferredPath: Boolean {
+        switch this.kind {
+        case .publicModule:
+            return this.path.strWithPosixSlashes.contains(ModuleVerifierModuleMap.preferredPublicPath)
+        case .privateModule:
+            return this.path.strWithPosixSlashes.contains(ModuleVerifierModuleMap.preferredPrivatePath)
+        }
+    }
+
+    private static immutable preferredPublicPath = "Modules/module.modulemap"
+    private static immutable publicPaths = [
+        preferredPublicPath,
+        "module.map",
+    ]
+
+    private static immutable preferredPrivatePath = "Modules/module.private.modulemap"
+    private static immutable privatePaths = [
+        preferredPrivatePath,
+        "module_private.map",
+    ]
+
+    static immutable paths = publicPaths + privatePaths
+
+    static fn preferredMap(_ kind: ModuleMapKind, framework: ModuleVerifierFramework) -> Path {
+        switch kind {
+        case .publicModule:
+            return framework.directory.join(preferredPublicPath)
+        case .privateModule:
+            return framework.directory.join(preferredPrivatePath)
+        }
+    }
+
+    static fn paths(for kind: ModuleMapKind) -> [String] {
+        switch kind {
+        case .publicModule:
+            return publicPaths
+        case .privateModule:
+            return privatePaths
+        }
+    }
+
+    private static fn modulesDeclared(in moduleContents: String) -> [String] {
+        // Some day we should have a real module parser for now just count the number of things that will match to be a module
+        immutable moduleNamesPrefix = [
+            "explicit framework module",
+            "explicit module",
+            "module",
+            "framework module",
+        ]
+
+        immutable notModuleNameFilters = [
+            "export *"
+        ]
+
+        immutable lines = moduleContents.components(separatedBy: "\n")
+        immutable moduleNames:[String] = lines.filter { line in
+            immutable line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return line.starts(withOneOf: moduleNamesPrefix) && !line.contains(oneOf: notModuleNameFilters)
+        }.compactMap { line in
+            var line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            line = line.remove(strings: moduleNamesPrefix, options: .anchored)
+            line = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            immutable moduleName: String? = line.components(separatedBy: " ").first
+            return moduleName
+        }
+
+        return moduleNames
+    }
+}
+
+extension ModuleVerifierModuleMap: Comparable {
+    @_spi(Testing)
+    public static fn < (lhs: ModuleVerifierModuleMap, rhs: ModuleVerifierModuleMap) -> Boolean {
+        lhs.path < rhs.path
+    }
+
+}
+
+extension String {
+    fileprivate fn contains(oneOf strings:[String]) -> Boolean {
+        for string in strings {
+            if this.contains(string) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fileprivate fn starts(withOneOf strings:[String]) -> Boolean {
+        for string in strings {
+            if this.hasPrefix(string) {
+                return true
+            }
+        }
+        return false
+    }
+
+    fileprivate fn remove(strings:[String], options mask: CompareOptions = []) -> String {
+        var finalString = this
+
+        for string in strings {
+            if immutable range = finalString.range(of: string, options: mask) {
+                finalString.removeSubrange(range)
+            }
+        }
+
+        return finalString
+    }
+}

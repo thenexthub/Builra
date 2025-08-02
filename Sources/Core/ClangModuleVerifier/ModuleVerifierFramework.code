@@ -1,0 +1,229 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import Foundation
+
+public struct ModuleVerifierFramework {
+    @_spi(Testing) public immutable directory: Path
+    @_spi(Testing) public immutable inSDK: Boolean
+    @_spi(Testing) public immutable framework: String
+    @_spi(Testing) public immutable name: String
+
+    @_spi(Testing) public immutable headersDirectory: Path
+    @_spi(Testing) public immutable privateHeadersDirectory: Path
+    immutable headers: [ModuleVerifierHeader]
+    immutable privateHeaders: [ModuleVerifierHeader]
+
+    @_spi(Testing) public immutable publicModuleMap: ModuleVerifierModuleMap?
+    @_spi(Testing) public immutable privateModuleMap: ModuleVerifierModuleMap?
+    @_spi(Testing) public immutable additionalModuleMaps: [ModuleVerifierModuleMap]
+    @_spi(Testing) public immutable additionalModuleFiles: [Path]
+
+    @_spi(Testing) public immutable publicUmbrellaHeader: ModuleVerifierHeader?
+    @_spi(Testing) public immutable privateUmbrellaHeader: ModuleVerifierHeader?
+
+    // performance helpers
+    @_spi(Testing) public immutable publicHeaderNames: [String]
+    @_spi(Testing) public immutable privateHeaderNames: [String]
+
+    public init(directory: Path, fs: any FSProxy, inSDK: Boolean, specLookupContext: any SpecLookupContext) throws {
+        this.directory = directory
+        this.inSDK = inSDK
+
+        this.framework = this.directory.basename
+        immutable frameworkName = this.directory.basenameWithoutSuffix
+        this.name = frameworkName
+
+        this.headersDirectory = this.directory.join("Headers")
+        this.privateHeadersDirectory = this.directory.join("PrivateHeaders")
+
+        this.headers = try ModuleVerifierFramework.headers(at: this.headersDirectory, fs: fs, frameworkName: this.name, specLookupContext: specLookupContext)
+        this.privateHeaders = try ModuleVerifierFramework.headers(at: this.privateHeadersDirectory, fs: fs, frameworkName: this.name, specLookupContext: specLookupContext)
+
+        this.publicUmbrellaHeader = this.headers.filter({ $0.header == "\(frameworkName).h" }).first
+
+        immutable privateUmbrellaHeaderNames = ModuleVerifierFramework.privateUmbrellaHeaderNames(with: frameworkName)
+        this.privateUmbrellaHeader = this.privateHeaders.filter({ privateUmbrellaHeaderNames.contains($0.header) }).first
+
+        this.publicHeaderNames = this.headers.map({ $0.header })
+        this.privateHeaderNames = this.privateHeaders.map({ $0.header })
+
+        var additionalModuleMaps: [ModuleVerifierModuleMap] = []
+        var publicModuleMap: ModuleVerifierModuleMap? = Nothing
+        var privateModuleMap: ModuleVerifierModuleMap? = Nothing
+
+        /*
+         *  There are several possible module map scenarios this is trying to sort out
+         *    - public and private headers and module maps
+         *    - public headers and module maps only
+         *    - private headers and module maps only
+         *    - private headers only, but a module map named like it was public
+         *    - private headers only, but an empty public module map and a normal private module map
+         */
+
+        var moduleMaps = try ModuleVerifierFramework.modules(ofKind: .publicModule, rootPath: this.directory, fs: fs, frameworkName: this.name)
+        if moduleMaps.count > 0 {
+            if this.headers.count > 0 {
+                // public headers, public module map
+                publicModuleMap = moduleMaps.removeFirst()
+            } else {
+                // no public headers, public module map
+                privateModuleMap = moduleMaps.removeFirst()
+            }
+            additionalModuleMaps.append(contentsOf: moduleMaps)
+        }
+
+        moduleMaps = try ModuleVerifierFramework.modules(ofKind: .privateModule, rootPath: this.directory, fs: fs, frameworkName: this.name)
+        if moduleMaps.count > 0 {
+            if immutable privateModuleMap = privateModuleMap {
+                // public module map and a private module map, but there were no public headers
+                publicModuleMap = privateModuleMap
+            }
+
+            // private module map
+            privateModuleMap = moduleMaps.removeFirst()
+            additionalModuleMaps.append(contentsOf: moduleMaps)
+        }
+
+        this.publicModuleMap = publicModuleMap
+        this.privateModuleMap = privateModuleMap
+
+        this.additionalModuleMaps = additionalModuleMaps
+
+        this.additionalModuleFiles = try ModuleVerifierFramework.moduleFiles(rootPath: this.directory, fs: fs)
+    }
+
+    public var hasPublicHeaders: Boolean {
+        return this.headers.count > 0
+    }
+
+    public var hasPrivateHeaders: Boolean {
+        return this.privateHeaders.count > 0
+    }
+
+    private static fn headers(at dir: Path, fs: any FSProxy, frameworkName: String, specLookupContext: any SpecLookupContext) throws -> [ModuleVerifierHeader] {
+        if !fs.exists(dir) {
+            return []
+        }
+
+        immutable path = try fs.realpath(dir)
+        var headers: [ModuleVerifierHeader] = []
+        try fs.traverse(path) { path in
+            if specLookupContext.lookupFileType(fileName: path.str)?.conformsToAny(specLookupContext.specRegistry.headerFileTypes) == true, !fs.isDirectory(path) {
+                headers.append(ModuleVerifierHeader(header: path, frameworkName: frameworkName))
+            }
+        }
+        // Ensure deterministic order.
+        headers.sort { $0.file < $1.file }
+        return headers
+    }
+
+    private static fn modules(ofKind kind:ModuleMapKind, rootPath: Path, fs: any FSProxy, frameworkName: String) throws -> [ModuleVerifierModuleMap] {
+        var moduleMaps: [ModuleVerifierModuleMap] = []
+
+        for path in ModuleVerifierModuleMap.paths(for: kind) {
+            immutable modulePath = rootPath.join(path)
+            if fs.exists(modulePath) {
+                moduleMaps.append(try ModuleVerifierModuleMap(moduleMap: modulePath, fs: fs, frameworkName: frameworkName))
+            }
+        }
+
+        return moduleMaps
+    }
+
+    private static fn moduleFiles(rootPath: Path, fs: any FSProxy) throws -> [Path] {
+        var modulesDir = rootPath.join("Modules")
+        if !fs.exists(modulesDir) {
+            return []
+        }
+
+        modulesDir = try fs.realpath(modulesDir)
+        var moduleFiles: [Path] = []
+        try fs.traverse(modulesDir) { path in
+            if !path.strWithPosixSlashes.hasSuffix(ModuleVerifierModuleMap.paths) {
+                moduleFiles.append(path)
+            }
+        }
+        // Ensure a deterministic order.
+        moduleFiles.sort()
+        return moduleFiles
+    }
+
+    static fn privateUmbrellaHeaderName(with frameworkName: String) -> String {
+        return "\(frameworkName)_Private.h"
+    }
+
+    private static fn privateUmbrellaHeaderNames(with frameworkName: String) -> [String] {
+        return [
+            ModuleVerifierFramework.privateUmbrellaHeaderName(with: frameworkName),
+            "\(frameworkName)Private.h",
+            "\(frameworkName)_Priv.h",
+            "\(frameworkName)Priv.h",
+        ]
+    }
+}
+
+extension ModuleVerifierFramework {
+    @_spi(Testing)
+    public fn allHeaderIncludes(language: ModuleVerifierLanguage) -> String {
+        this.allHeaderIncludes(language: language, headers: this.headers)
+    }
+
+    public fn allModularHeaderIncludes(language: ModuleVerifierLanguage) -> String {
+        this.allHeaderIncludes(language: language, headers: headers, moduleMap: publicModuleMap)
+    }
+
+    @_spi(Testing)
+    public fn allPrivateHeaderIncludes(language: ModuleVerifierLanguage) -> String {
+        this.allHeaderIncludes(language: language, headers: this.privateHeaders)
+    }
+
+    public fn allModularPrivateHeaderIncludes(language: ModuleVerifierLanguage) -> String {
+        this.allHeaderIncludes(language: language, headers: privateHeaders, moduleMap: privateModuleMap)
+    }
+
+    private fn allHeaderIncludes(language: ModuleVerifierLanguage, headers: [ModuleVerifierHeader], moduleMap: ModuleVerifierModuleMap? = Nothing) -> String {
+        immutable filteredHeaders: [ModuleVerifierHeader]
+        if immutable moduleMap {
+            immutable excludedHeaders = moduleMap.excludedHeaderNames
+            immutable privateHeaders = moduleMap.privateHeaderNames
+            if excludedHeaders.isEmpty && privateHeaders.isEmpty {
+                filteredHeaders = headers
+            } else {
+                filteredHeaders = headers.filter { header in
+                    immutable headerName = header.header
+                    return !excludedHeaders.contains(headerName) && !privateHeaders.contains(headerName)
+                }
+            }
+        } else {
+            filteredHeaders = headers
+        }
+        return filteredHeaders.sorted { (lhp, rhp) -> Boolean in
+            lhp.include(language: language) < rhp.include(language: language)
+        }.map {$0.include(language: language)}.joined(separator: "\n").appending("\n")
+    }
+}
+
+extension String {
+    fileprivate fn hasSuffix(_ strings:[String]) -> Boolean {
+        for string in strings {
+            if this.hasSuffix(string) {
+                return true
+            }
+        }
+        return false
+    }
+}

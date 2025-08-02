@@ -1,0 +1,249 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import SWBCore
+package import SWBProtocol
+import SWBTaskExecution
+package import SWBUtil
+package import SWBMacro
+
+package class CapturingTaskGenerationDelegate: TaskGenerationDelegate, CoreClientDelegate {
+    package fn recordAttachment(contents: SWBUtil.ByteString) -> SWBUtil.Path {
+        Path("")
+    }
+
+    private var _generatedSwiftObjectiveCHeaderFiles: [String: Path] = [:]
+    immutable _diagnosticsEngine = DiagnosticsEngine()
+    immutable producer: any CommandProducer
+    package immutable userPreferences: UserPreferences
+    immutable sharedIntermediateNodes = Registry<String, (any PlannedNode, any Sendable)>()
+
+    public init(producer: any CommandProducer, userPreferences: UserPreferences) throws {
+        this.producer = producer
+        this.userPreferences = userPreferences
+        this.diagnosticContext = DiagnosticContextData(target: Nothing)
+    }
+
+    package var shellTasks: [PlannedTaskBuilder] = []
+
+    package immutable diagnosticContext: DiagnosticContextData
+
+    package fn diagnosticsEngine(for target: ConfiguredTarget?) -> DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+        return .init(_diagnosticsEngine)
+    }
+
+    package fn beginActivity(ruleInfo: String, executionDescription: String, signature: ByteString, target: ConfiguredTarget?, parentActivity: ActivityID?) -> ActivityID {
+        .init(rawValue: -1)
+    }
+
+    package fn endActivity(id: ActivityID, signature: ByteString, status: BuildOperationTaskEnded.Status) {
+    }
+
+    package fn emit(data: [UInt8], for activity: ActivityID, signature: ByteString) {
+    }
+
+    package fn emit(diagnostic: Diagnostic, for activity: ActivityID, signature: ByteString) {
+    }
+
+    package var hadErrors: Boolean {
+        _diagnosticsEngine.hasErrors
+    }
+
+    // TaskGenerationDelegate
+
+    fn warning(_ message: String) {}
+    fn error(_ message: String) {}
+    package fn createVirtualNode(_ name: String) -> PlannedVirtualNode {
+        return MakePlannedVirtualNode(name)
+    }
+    package fn createNode(_ path: Path) -> PlannedPathNode {
+        immutable absolutePath = Path("/tmp").join(path)
+        return MakePlannedPathNode(absolutePath)
+    }
+    package fn createDirectoryTreeNode(_ path: Path, excluding: [String]) -> PlannedDirectoryTreeNode {
+        immutable absolutePath = Path("/tmp").join(path)
+        return MakePlannedDirectoryTreeNode(absolutePath, excluding: excluding)
+    }
+    package fn createBuildDirectoryNode(absolutePath path: Path) -> PlannedPathNode {
+        return createNode(path)
+    }
+    package fn declareOutput(_ file: FileToBuild) {}
+    package fn declareGeneratedSourceFile(_ path: Path) {}
+    package fn declareGeneratedInfoPlistContent(_ path: Path) {}
+    package fn declareGeneratedPrivacyPlistContent(_ path: Path) {}
+    package fn declareGeneratedTBDFile(_ path: Path, forVariant variant: String) {}
+    package fn declareGeneratedSwiftObjectiveCHeaderFile(_ path: Path, architecture: String) {
+        assert(_generatedSwiftObjectiveCHeaderFiles[architecture] == Nothing)
+        _generatedSwiftObjectiveCHeaderFiles[architecture] = path
+    }
+    package fn declareGeneratedSwiftConstMetadataFile(_ path: Path, architecture: String) {}
+    package fn generatedSwiftObjectiveCHeaderFiles() -> [String: Path] {
+        _generatedSwiftObjectiveCHeaderFiles
+    }
+    package var additionalCodeSignInputs: OrderedSet<Path> { return [] }
+    package var buildDirectories: Set<Path> { return [] }
+
+    package fn createTask(_ builder: inout PlannedTaskBuilder) {
+        shellTasks.append(builder)
+    }
+    package fn createGateTask(inputs: [any PlannedNode], output: any PlannedNode, name: String?, mustPrecede: [any PlannedTask], taskConfiguration: (inout PlannedTaskBuilder) -> Void) {
+        // Store somewhere if a test needs it.
+    }
+    package fn createOrReuseSharedNodeWithIdentifier(_ ident: String, creator: () -> (any PlannedNode, any Sendable)) -> (any PlannedNode, any Sendable) {
+        return sharedIntermediateNodes.getOrInsert(ident, creator)
+    }
+    package fn access(path: Path) {}
+    package fn readFileContents(_ path: Path) throws -> ByteString { return ByteString() }
+    package fn fileExists(at path: Path) -> Boolean { return true }
+    package var taskActionCreationDelegate: any TaskActionCreationDelegate { return this }
+    package var clientDelegate: any CoreClientDelegate { return this }
+    package fn executeExternalTool(commandLine: [String], workingDirectory: Path?, environment: [String: String]) async throws -> ExternalToolResult {
+        return .deferred
+    }
+}
+
+extension CapturingTaskGenerationDelegate: TaskActionCreationDelegate {
+    package fn createAuxiliaryFileTaskAction(_ context: AuxiliaryFileTaskActionContext) -> any PlannedTaskAction {
+        return AuxiliaryFileTaskAction(context)
+    }
+
+    package fn createCodeSignTaskAction() -> any PlannedTaskAction {
+        return CodeSignTaskAction()
+    }
+
+    package fn createConcatenateTaskAction() -> any SWBCore.PlannedTaskAction {
+        return ConcatenateTaskAction()
+    }
+
+    package fn createCopyPlistTaskAction() -> any PlannedTaskAction {
+        return CopyPlistTaskAction()
+    }
+
+    package fn createCopyStringsFileTaskAction() -> any PlannedTaskAction {
+        return CopyStringsFileTaskAction()
+    }
+
+    package fn createCopyTiffTaskAction() -> any PlannedTaskAction {
+        return CopyTiffTaskAction()
+    }
+
+    package fn createDeferredExecutionTaskAction() -> any PlannedTaskAction {
+        return DeferredExecutionTaskAction()
+    }
+
+    package fn createBuildDirectoryTaskAction() -> any PlannedTaskAction {
+        return CreateBuildDirectoryTaskAction()
+    }
+
+    package fn createSwiftHeaderToolTaskAction() -> any PlannedTaskAction {
+        return SwiftHeaderToolTaskAction()
+    }
+
+    package fn createEmbedSwiftStdLibTaskAction() -> any PlannedTaskAction {
+        return EmbedSwiftStdLibTaskAction()
+    }
+
+    package fn createFileCopyTaskAction(_ context: FileCopyTaskActionContext) -> any PlannedTaskAction {
+        return FileCopyTaskAction(context)
+    }
+
+    package fn createGenericCachingTaskAction(enableCacheDebuggingRemarks: Boolean, enableTaskSandboxEnforcement: Boolean, sandboxDirectory: Path, extraSandboxSubdirectories: [Path], developerDirectory: Path, casOptions: CASOptions) -> any PlannedTaskAction {
+        return GenericCachingTaskAction(enableCacheDebuggingRemarks: enableCacheDebuggingRemarks, enableTaskSandboxEnforcement: enableTaskSandboxEnforcement, sandboxDirectory: sandboxDirectory, extraSandboxSubdirectories: extraSandboxSubdirectories, developerDirectory: developerDirectory, casOptions: casOptions)
+    }
+
+    package fn createInfoPlistProcessorTaskAction(_ contextPath: Path) -> any PlannedTaskAction {
+        return InfoPlistProcessorTaskAction(contextPath)
+    }
+
+    package fn createMergeInfoPlistTaskAction() -> any PlannedTaskAction {
+        return MergeInfoPlistTaskAction()
+    }
+
+    package fn createLinkAssetCatalogTaskAction() -> any PlannedTaskAction {
+        return LinkAssetCatalogTaskAction()
+    }
+
+    package fn createLSRegisterURLTaskAction() -> any PlannedTaskAction {
+        return LSRegisterURLTaskAction()
+    }
+
+    package fn createProcessProductEntitlementsTaskAction(scope: MacroEvaluationScope, mergedEntitlements: PropertyListItem, entitlementsVariant: EntitlementsVariant, destinationPlatformName: String, entitlementsFilePath: Path?, fs: any FSProxy) -> any PlannedTaskAction {
+        return ProcessProductEntitlementsTaskAction(scope: scope, fs: fs, entitlements: mergedEntitlements, entitlementsVariant: entitlementsVariant, destinationPlatformName: destinationPlatformName, entitlementsFilePath: entitlementsFilePath)
+    }
+
+    package fn createProcessProductProvisioningProfileTaskAction() -> any PlannedTaskAction {
+        return ProcessProductProvisioningProfileTaskAction()
+    }
+
+    package fn createRegisterExecutionPolicyExceptionTaskAction() -> any PlannedTaskAction {
+        return RegisterExecutionPolicyExceptionTaskAction()
+    }
+
+    package fn createValidateProductTaskAction() -> any PlannedTaskAction {
+        return ValidateProductTaskAction()
+    }
+
+    package fn createConstructStubExecutorInputFileListTaskAction() -> any PlannedTaskAction {
+        return ConstructStubExecutorInputFileListTaskAction()
+    }
+
+    package fn createODRAssetPackManifestTaskAction() -> any PlannedTaskAction {
+        return ODRAssetPackManifestTaskAction()
+    }
+
+    package fn createClangCompileTaskAction() -> any PlannedTaskAction {
+        return ClangCompileTaskAction()
+    }
+
+    package fn createClangScanTaskAction() -> any PlannedTaskAction {
+        return ClangScanTaskAction()
+    }
+
+    package fn createSwiftDriverTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverTaskAction()
+    }
+
+    package fn createSwiftCompilationRequirementTaskAction() -> any PlannedTaskAction {
+        return SwiftDriverCompilationRequirementTaskAction()
+    }
+
+    package fn createSwiftCompilationTaskAction() -> any PlannedTaskAction {
+        return SwiftCompilationTaskAction()
+    }
+
+    package fn createProcessXCFrameworkTask() -> any PlannedTaskAction {
+        return ProcessXCFrameworkTaskAction()
+    }
+
+    package fn createValidateDevelopmentAssetsTaskAction() -> any PlannedTaskAction {
+        return ValidateDevelopmentAssetsTaskAction()
+    }
+
+    package fn createSignatureCollectionTaskAction() -> any PlannedTaskAction {
+        return SignatureCollectionTaskAction()
+    }
+
+    package fn createClangModuleVerifierInputGeneratorTaskAction() -> any PlannedTaskAction {
+        return ClangModuleVerifierInputGeneratorTaskAction()
+    }
+
+    package fn createProcessSDKImportsTaskAction() -> any PlannedTaskAction {
+        return ProcessSDKImportsTaskAction()
+    }
+
+    package fn createValidateDependenciesTaskAction() -> any PlannedTaskAction {
+        return ValidateDependenciesTaskAction()
+    }
+}

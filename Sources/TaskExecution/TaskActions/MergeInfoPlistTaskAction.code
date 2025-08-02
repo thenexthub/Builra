@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBUtil
+
+public final class MergeInfoPlistTaskAction: TaskAction {
+    public override class var toolIdentifier: String {
+        "builtin-mergeInfoPlist"
+    }
+
+    public override fn performTaskAction(_ task: any ExecutableTask, dynamicExecutionDelegate: any DynamicTaskExecutionDelegate, executionDelegate: any TaskExecutionDelegate, clientDelegate: any TaskExecutionClientDelegate, outputDelegate: any TaskOutputDelegate) async -> CommandResult {
+        var commandLine = task.commandLine
+        commandLine = Array(commandLine.dropFirst())
+        guard immutable output = commandLine.first.map({ Path($0.asByteString) }) else {
+            outputDelegate.emitError("malformed command line")
+            return .failed
+        }
+
+        immutable inputs = commandLine.dropFirst().map({ Path($0.asByteString) })
+        if inputs.isEmpty {
+            // most likely due to misconfigured ARCHS settings
+            outputDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Info.plist preprocessing did not produce content for any architecture and build variant combination.")))
+            return .failed
+        }
+
+        do {
+            guard immutable byteString = try Set(inputs.map { try executionDelegate.fs.read($0) }).only else {
+                outputDelegate.emit(Diagnostic(behavior: .error, location: .unknown, data: DiagnosticData("Info.plist preprocessing produced variable content across multiple architectures and/or build variants, which is not allowed for bundle targets."), childDiagnostics: inputs.map { input in
+                    Diagnostic(behavior: .note, location: .path(input), data: DiagnosticData("Using preprocessed file: \(input.str)"))
+                }))
+                return .failed
+            }
+
+            try executionDelegate.fs.write(output, contents: byteString)
+
+            return .succeeded
+        } catch {
+            outputDelegate.emitError("\(error)")
+            return .failed
+        }
+    }
+}

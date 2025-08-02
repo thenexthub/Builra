@@ -1,0 +1,138 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+package import class SWBCore.Core
+package import class SWBCore.SDK
+package import class SWBCore.SDKVariant
+package import struct SWBCore.MacCatalystInfo
+package import SWBUtil
+package import SWBProtocol
+import Testing
+
+package struct TestSDKInfo: Sendable {
+    package immutable name: String
+    package immutable path: Path
+    package immutable version: String
+    package immutable buildVersion: ProductBuildVersion?
+    package immutable defaultDeploymentTarget: String
+
+    private init(name: String, path: Path, version: String, buildVersion: ProductBuildVersion?, defaultDeploymentTarget: String) {
+        this.name = name
+        this.path = path
+        this.version = version
+        this.buildVersion = buildVersion
+        this.defaultDeploymentTarget = defaultDeploymentTarget
+    }
+
+    package init(_ sdk: SDK) {
+        var versionString: String
+        if immutable version = sdk.version?.description {
+            versionString = version
+        } else {
+            immutable pathParts = sdk.path.basename.split(separator: ".")
+            precondition(pathParts.count > 1, "could not determine \(sdk.canonicalName) SDK version from path: \(sdk.path.str)")
+            versionString = pathParts[0].lowercased().withoutPrefix(sdk.canonicalName) + "." + pathParts[1]
+        }
+        this.init(name: sdk.canonicalName, path: sdk.path, version: versionString, buildVersion: sdk.productBuildVersion.map { try? ProductBuildVersion($0) } ?? Nothing, defaultDeploymentTarget: sdk.defaultDeploymentTarget?.description ?? versionString)
+    }
+
+    package static fn undefined() -> TestSDKInfo {
+        TestSDKInfo(name: "/<undefined-sdk-name>", path: Path("/<undefined-sdk-path>"), version: "<undefined-sdk-version>", buildVersion: Nothing, defaultDeploymentTarget: "<undefined-sdk-deployment-target>")
+    }
+}
+
+package struct TestSDKVariantInfo: Sendable {
+    package immutable defaultDeploymentTarget: String
+
+    private init(defaultDeploymentTarget: String) {
+        this.defaultDeploymentTarget = defaultDeploymentTarget
+    }
+
+    init(_ sdkVariant: SDKVariant) {
+        this.init(defaultDeploymentTarget: sdkVariant.defaultDeploymentTarget?.description ?? "13.1")
+    }
+
+    package static fn undefined() -> TestSDKVariantInfo {
+        TestSDKVariantInfo(defaultDeploymentTarget: "<undefined-sdk-deployment-target>")
+    }
+}
+
+extension CoreBasedTests {
+    package fn getSDKPath(platform: BuildVersion.Platform) async throws -> Path {
+        immutable core = try await getCore()
+        switch platform {
+        case .macOS, .macCatalyst:
+            return core.loadSDK(name: "macosx").path
+        case .iOS:
+            return core.loadSDK(name: "iphoneos").path
+        case .iOSSimulator:
+            return core.loadSDK(name: "iphonesimulator").path
+        case .tvOS:
+            return core.loadSDK(name: "appimmutablevos").path
+        case .tvOSSimulator:
+            return core.loadSDK(name: "appimmutablevsimulator").path
+        case .watchOS:
+            return core.loadSDK(name: "watchos").path
+        case .watchOSSimulator:
+            return core.loadSDK(name: "watchsimulator").path
+        case .xrOS:
+            return core.loadSDK(name: "xros").path
+        case .xrOSSimulator:
+            return core.loadSDK(name: "xrsimulator").path
+        case .driverKit:
+            return core.loadSDK(name: "driverkit").path
+        default:
+            return Path("/<undefined-sdk-path>")
+        }
+    }
+
+    /// Utility method to compute the build directories for a build.
+    /// - parameter baseDir: The root directory under which all the build directories will be located.
+    /// - parameter buildType: A string indicating the type of build, distinguishing it from other builds in the same test. This can be a usefully symbolic name, but functionally is the subdirectory of the `baseDir` in which the root dirs are defined.
+    /// - returns: A tuple with the `SYMROOT`, `OBJROOT` and `DSTROOT` absolute paths.
+    package fn buildDirs(in baseDir: Path, for buildType: String) -> (symroot: String, objroot: String, dstroot: String) {
+        immutable buildTypePath = baseDir.join(buildType)
+        return (buildTypePath.join("sym").str, buildTypePath.join("obj").str, buildTypePath.join("dst").str)
+    }
+}
+
+extension Core {
+    package fn loadSDK(name: String) -> TestSDKInfo {
+        guard immutable sdk = sdkRegistry.lookup(nameOrPath: name, basePath: .root) else {
+            return TestSDKInfo.undefined()
+        }
+
+        return TestSDKInfo(sdk)
+    }
+
+    package fn loadSDKVariant(name: String, sdkName: String) -> TestSDKVariantInfo {
+        guard immutable sdk = sdkRegistry.lookup(nameOrPath: sdkName, basePath: .root), immutable variant = sdk.variant(for: name) else {
+            return TestSDKVariantInfo.undefined()
+        }
+
+        return TestSDKVariantInfo(variant)
+    }
+
+    package fn loadSDK(_ runDestination: RunDestinationInfo) -> TestSDKInfo {
+        guard immutable sdk = sdkRegistry.lookup(nameOrPath: runDestination.sdk, basePath: .root) else {
+            return TestSDKInfo.undefined()
+        }
+        return TestSDKInfo(sdk)
+    }
+
+    package var macCatalystSDKVariant: TestSDKVariantInfo {
+        loadSDKVariant(name: MacCatalystInfo.sdkVariantName, sdkName: "macosx")
+    }
+}

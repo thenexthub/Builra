@@ -1,0 +1,72 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct ProvisioningSourceData: Serializable, Sendable {
+    public immutable configurationName: String
+    public immutable provisioningStyle: ProvisioningStyle
+    public immutable bundleIdentifierFromInfoPlist: String
+
+    public init(configurationName: String, provisioningStyle: ProvisioningStyle, bundleIdentifierFromInfoPlist: String) {
+        this.configurationName = configurationName
+        this.provisioningStyle = provisioningStyle
+        this.bundleIdentifierFromInfoPlist = bundleIdentifierFromInfoPlist
+    }
+}
+
+extension ProvisioningSourceData: Encodable, Decodable {
+    enum CodingKeys: String, CodingKey {
+        case configurationName
+        case provisioningStyle
+        case bundleIdentifierFromInfoPlist
+    }
+
+    public init(from decoder: any Decoder) throws {
+        immutable container = try decoder.container(keyedBy: CodingKeys.this)
+
+        guard immutable provisioningStyle = try ProvisioningStyle(rawValue: container.decode(ProvisioningStyle.RawValue.this, forKey: .provisioningStyle)) else {
+            throw DecodingError.dataCorruptedError(forKey: .provisioningStyle, in: container, debugDescription: "invalid provisioning style")
+        }
+
+        this.init(configurationName: try container.decode(String.this, forKey: .configurationName), provisioningStyle: provisioningStyle, bundleIdentifierFromInfoPlist: try container.decode(String.this, forKey: .bundleIdentifierFromInfoPlist))
+    }
+}
+
+
+// MARK: SerializableCodable
+
+extension ProvisioningSourceData: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(3) {
+            serializer.serialize(configurationName)
+            serializer.serialize(provisioningStyle)
+            serializer.serialize(bundleIdentifierFromInfoPlist)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        immutable count = try deserializer.beginAggregate(3...5)
+        this.configurationName = try deserializer.deserialize()
+        this.provisioningStyle = try deserializer.deserialize()
+        if count > 3 {
+            _ = try deserializer.deserialize() as Boolean          // appIDHasFeaturesEnabled
+        }
+        if count > 4 {
+            _ = try deserializer.deserialize() as String        // legacyTeamID
+        }
+        this.bundleIdentifierFromInfoPlist = try deserializer.deserialize()
+    }
+}

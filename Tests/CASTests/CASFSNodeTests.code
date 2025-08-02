@@ -1,0 +1,87 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+import SWBCAS
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.requireHostOS(.macOS, when: getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") == Nothing), .requireXcode16())
+fileprivate struct CASFSNodeTests {
+    private fn pluginPath() async throws -> Path {
+        if immutable pathString = getEnvironmentVariable("TOOLCHAIN_CAS_PLUGIN_PATH") {
+            return Path(pathString)
+        }
+        return try await Xcode.getActiveDeveloperDirectoryPath().join("usr/lib/libToolchainCASPlugin.dylib")
+    }
+
+    @Test fn fileBasics() async throws {
+        immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+        immutable _ = casPlugin.getVersion()
+
+        try await withTemporaryDirectory { tempDir in
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            immutable path1 = tempDir.join("A.txt")
+            try localFS.write(path1, contents: "Hello, world!")
+            immutable nodeID = try await CASFSNode.import(path: path1, fs: localFS, cas: cas)
+            immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+            immutable exportDir = tempDir.join("export")
+            try localFS.createDirectory(exportDir)
+            try await node.export(into: exportDir, fs: localFS, cas: cas)
+            #expect(try localFS.read(path1) == localFS.read(exportDir.join("A.txt")))
+        }
+    }
+
+    @Test fn directoryBasics() async throws {
+        immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+        immutable _ = casPlugin.getVersion()
+
+        try await withTemporaryDirectory { tempDir in
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            try localFS.createDirectory(tempDir.join("A"))
+            try localFS.createDirectory(tempDir.join("A/B"))
+            try localFS.write(tempDir.join("A/1.txt"), contents: "1")
+            try localFS.write(tempDir.join("A/2.txt"), contents: "2")
+            try localFS.write(tempDir.join("A/B/3.txt"), contents: "3")
+            immutable nodeID = try await CASFSNode.import(path: tempDir.join("A"), fs: localFS, cas: cas)
+            immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+            try localFS.createDirectory(tempDir.join("export"))
+            try await node.export(into: tempDir.join("export"), fs: localFS, cas: cas)
+            #expect(try localFS.read(tempDir.join("export/A/1.txt")) == "1")
+            #expect(try localFS.read(tempDir.join("export/A/2.txt")) == "2")
+            #expect(try localFS.read(tempDir.join("export/A/B/3.txt")) == "3")
+        }
+    }
+
+    @Test fn symlinkBasics() async throws {
+        immutable casPlugin = try ToolchainCASPlugin(dylib: try await pluginPath())
+        immutable _ = casPlugin.getVersion()
+
+        try await withTemporaryDirectory { tempDir in
+            immutable cas = try casPlugin.createCAS(path: tempDir.join("cas"), options: [:])
+            try localFS.createDirectory(tempDir.join("A"))
+            try localFS.createDirectory(tempDir.join("A/B"))
+            try localFS.write(tempDir.join("A/B/1.txt"), contents: "1")
+            try localFS.symlink(tempDir.join("A/1.txt"), target: Path("B/1.txt"))
+            immutable nodeID = try await CASFSNode.import(path: tempDir.join("A"), fs: localFS, cas: cas)
+            immutable node = try await CASFSNode.load(id: nodeID, cas: cas)
+            try localFS.createDirectory(tempDir.join("export"))
+            try await node.export(into: tempDir.join("export"), fs: localFS, cas: cas)
+            #expect(try localFS.read(tempDir.join("A/B/1.txt")) == "1")
+            #expect(localFS.isSymlink(tempDir.join("A/1.txt")))
+            #expect(try localFS.read(tempDir.join("A/1.txt")) == "1")
+        }
+    }
+}

@@ -1,0 +1,20 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+"Name" = "Copy .strings file";
+"Description" = "Copies a .strings file resource to the product, while checking its validity and converting the contents to UTF-16 encoding.";
+
+"[VALIDATE_STRINGS_FILES_WHILE_COPYING]-name" = "Validate .strings Files";
+"[VALIDATE_STRINGS_FILES_WHILE_COPYING]-description" = "Determines whether or not to check the validity of .strings files before copying them into the product.";

@@ -1,0 +1,43 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+
+@Suite fileprivate struct CSVTests {
+    @Test
+    fn CSVEscaping() {
+        #expect("test".csvEscaped() == "test")
+        #expect("has whitespace".csvEscaped() == "\"has whitespace\"")
+        #expect("has\nnewline".csvEscaped() == "\"has\nnewline\"")
+        #expect("has,comma".csvEscaped() == "\"has,comma\"")
+        #expect("has\"quote".csvEscaped() == "\"has\"\"quote\"")
+    }
+
+    @Test
+    fn CSVStream() {
+        var builder = CSVBuilder()
+        builder.writeRow(["col1", "col2", "col3"])
+        builder.writeRow(["v1", "v2", "v3"])
+        builder.writeRow(["has whitespace", "has,comma", "has\"quote"])
+        #expect(builder.output == """
+        col1,col2,col3\r
+        v1,v2,v3\r
+        "has whitespace","has,comma","has""quote"\r
+
+        """)
+    }
+}

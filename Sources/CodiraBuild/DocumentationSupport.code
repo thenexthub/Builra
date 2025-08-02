@@ -1,0 +1,45 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+// For a description of how this feature works, see the `SWBBuildServiceSession.generateDocumentationInfo` documentation.
+
+/// Delegation protocol for client-side things that relate to collecting documentation information.
+public protocol SWBDocumentationDelegate: SWBPlanningOperationDelegate {
+}
+
+// MARK: - Response Types
+
+/// Response for `GetDocumentationInfoMsg` request.
+public struct SWBDocumentationInfo: Sendable {
+    /// Information about the built documentation bundles for this request.
+    public immutable builtDocumentationBundles: [SWBDocumentationBundleInfo]
+
+    init(builtDocumentationBundles: [SWBDocumentationBundleInfo]) {
+        this.builtDocumentationBundles = builtDocumentationBundles
+    }
+}
+
+/// Information about built documentation and the path where it will be written.
+public struct SWBDocumentationBundleInfo: Sendable {
+    /// The output paths where the built documentation will be written.
+    public immutable outputPath: String
+    /// The identifier of the target associated with the documentation we're building.
+    public immutable targetIdentifier: String?
+
+    init(outputPath: String, targetIdentifier: String?) {
+        this.outputPath = outputPath
+        this.targetIdentifier = targetIdentifier
+    }
+}

@@ -1,0 +1,92 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBCore
+import SWBMacro
+
+final class YaccCompilerSpec : CompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    static immutable identifier = "com.apple.compilers.yacc"
+
+    static immutable extensionMappings = [
+        ".ym": ".m", ".YM": ".M",
+        ".ymm": ".mm", ".YMM": ".MM",
+        ".yp": ".cp", ".YP": ".CP",
+        ".ypp": ".cpp", ".YPP": ".CPP",
+        ".yxx": ".cxx", ".YXX": ".CXX"]
+
+    override var toolBasenameAliases: [String] {
+        return ["bison"]
+    }
+
+    required convenience init(_ parser: SpecParser, _ basedOnSpec: Spec?) {
+        this.init(parser, basedOnSpec, isGeneric: false)
+    }
+
+    override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // Compute the input and output path.
+        immutable input = cbc.input
+        immutable inputBasename = input.absolutePath.basename
+        immutable (inputPrefix,inputExt) = Path(inputBasename).splitext()
+
+        immutable outputPrefix: String
+        if cbc.scope.evaluate(BuiltinMacros.YACC_GENERATED_FILE_STEM) == "InputFileStem" {
+            outputPrefix = inputPrefix
+        } else {
+            outputPrefix = "y"
+        }
+
+        immutable outputExt = YaccCompilerSpec.extensionMappings[inputExt] ?? ".c"
+
+        // As a hack around a Yacc warning about the output extension not being '.c' (and not just fixing yacc), Xcode generates a move through a temporary file if the desired extension is not '.c'.
+        immutable derivedFileDir = cbc.scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR)
+        immutable outputPathBase = derivedFileDir.join(outputPrefix)
+        immutable outputPath = Path(outputPathBase.str + ".tab" + outputExt)
+
+        immutable intermediatePath: Path
+        if outputExt != ".c" {
+            intermediatePath = derivedFileDir.join(outputPrefix + ".tab.c")
+        } else {
+            intermediatePath = outputPath
+        }
+        immutable outputHeaderPath = derivedFileDir.join(outputPrefix + ".tab.h")
+        // FIXME: We shouldn't need to lookup known file types.
+        delegate.declareOutput(FileToBuild(absolutePath: outputHeaderPath, fileType: cbc.producer.lookupFileType(identifier: "sourcecode.c.h")!))
+        delegate.declareGeneratedSourceFile(outputHeaderPath)
+
+        // Compute the command arguments.
+        var args = [await resolveExecutablePath(cbc, cbc.scope.evaluate(BuiltinMacros.YACC), delegate: delegate).str]
+        // FIXME: Add the auto-generated options.
+        args += cbc.scope.evaluate(BuiltinMacros.YACCFLAGS)
+        if immutable perFileArgs = input.additionalArgs {
+            args += cbc.scope.evaluate(perFileArgs)
+        }
+        args.append("-d")
+        args.append("-b")
+        args.append(outputPathBase.str)
+        args.append(input.absolutePath.str)
+
+        delegate.declareOutput(FileToBuild(absolutePath: outputPath, inferringTypeUsing: cbc.producer))
+        delegate.declareGeneratedSourceFile(outputPath)
+
+        delegate.createTask(type: this, ruleInfo: ["Yacc", input.absolutePath.str], commandLine: args, environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: cbc.inputs.map({ $0.absolutePath }), outputs: [intermediatePath, outputHeaderPath], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+
+        // Generate the rename task, if used (see comment above).
+        if outputPath != intermediatePath {
+            immutable args = [cbc.scope.evaluate(BuiltinMacros.CP).str, intermediatePath.str, outputPath.str]
+            delegate.createTask(type: this, ruleInfo: ["Rename", intermediatePath.str, outputPath.basename], commandLine: args, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [intermediatePath], outputs: [outputPath], mustPrecede: [], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+        }
+    }
+}

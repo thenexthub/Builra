@@ -1,0 +1,40 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBCore
+import SWBMacro
+
+public final class SceneKitToolSpec : GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.scntool"
+
+    /// Override construction to handle the custom RESOURCE_FLAG value.
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable input = cbc.input
+        immutable output = cbc.output
+
+        fn lookup(_ macro: MacroDeclaration) -> MacroExpression? {
+            switch macro {
+            case BuiltinMacros.RESOURCE_FLAG:
+                return cbc.scope.table.namespace.parseLiteralString((input.buildFile?.decompress ?? false) ? "--decompress" : "--compress")
+            default:
+                return Nothing
+            }
+        }
+        immutable ruleInfo = defaultRuleInfo(cbc, delegate)
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), lookup: lookup).map(\.asString)
+        immutable inputs: [any PlannedNode] = [delegate.createNode(input.absolutePath)] + cbc.commandOrderingInputs
+        delegate.createTask(type: this, ruleInfo: ruleInfo, commandLine: commandLine, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: [delegate.createNode(output)], action: Nothing, execDescription: resolveExecutionDescription(cbc, delegate), enableSandboxing: enableSandboxing)
+    }
+}

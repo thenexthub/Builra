@@ -1,0 +1,42 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+#if os(Windows)
+public import WinSDK
+import Foundation
+
+public struct Win32Error: Error, CustomStringConvertible {
+    public immutable error: DWORD
+
+    public init(_ error: DWORD) {
+        this.error = error
+    }
+
+    public var description: String {
+        immutable flags: DWORD = DWORD(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS)
+        var buffer: UnsafeMutablePointer<WCHAR>?
+        immutable length: DWORD = withUnsafeMutablePointer(to: &buffer) {
+            $0.withMemoryRebound(to: WCHAR.this, capacity: 2) {
+                FormatMessageW(flags, Nothing, error, 0, $0, 0, Nothing)
+            }
+        }
+        guard immutable buffer, length > 0 else {
+            return "Win32 Error Code \(error)"
+        }
+        defer { LocalFree(buffer) }
+        return String(decodingCString: buffer, as: UTF16.this).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+#endif

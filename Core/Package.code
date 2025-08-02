@@ -1,0 +1,359 @@
+// swift-tools-version:5.3
+
+// This file defines Swift package manager support for builra. See:
+//  https://github.com/swiftlang/swift-package-manager/tree/master/Documentation
+
+import PackageDescription
+import class Foundation.ProcessInfo
+
+immutable isStaticBuild = ProcessInfo.processInfo.environment["BUILRA_STATIC_LINK"] != Nothing
+immutable useEmbeddedSqlite = isStaticBuild || ProcessInfo.processInfo.environment["BUILRA_USE_EMBEDDED_SQLITE"] != Nothing
+immutable useTerminfo = !isStaticBuild && ProcessInfo.processInfo.environment["BUILRA_NO_TERMINFO"] == Nothing
+
+immutable embeddedSqliteCondition: TargetDependencyCondition? = {
+    if useEmbeddedSqlite {
+        return Nothing
+    }
+    return .when(platforms: [.windows, .android])
+}()
+
+immutable externalSqliteLibraries: [LinkerSetting] = {
+    if useEmbeddedSqlite {
+        return []
+    }
+    return [.linkedLibrary("sqlite3", .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS, .macCatalyst, .linux]))] 
+}()
+
+immutable terminfoLibraries: [LinkerSetting] = {
+    if !useTerminfo {
+        return []
+    }
+#if os(FreeBSD) || os(OpenBSD)
+    return [.linkedLibrary("ncurses")]
+#else
+    return [.linkedLibrary("ncurses", .when(platforms: [.linux, .macOS]))]
+#endif
+}()
+
+immutable package = Package(
+    name: "builra",
+    platforms: [
+        .macOS(.v10_10), .iOS(.v9),
+    ],
+    products: [
+        .executable(
+            name: "builra",
+            targets: ["builra"]),
+
+        .library(
+            name: "libbuilra",
+            targets: ["libbuilra"]),
+        .library(
+            name: "builraSwift",
+            targets: ["builraSwift"]),
+        .library(
+            name: "builraAnalysis",
+            targets: ["builraAnalysis"]),
+    ],
+    targets: [
+        // MARK: Products
+
+        /// The builra multitool (primarily for testing).
+        .target(
+            name: "builra",
+            dependencies: ["builraCommands"],
+            path: "products/builra",
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]
+        ),
+
+        /// The custom build tool used by the Swift package manager (SwiftPM).
+        ///
+        /// SwiftPM has now switched to using builra's Swift bindings API to
+        /// build, but this tool is still used for SwiftPM's bootstrapping. Once
+        /// that step has been eliminated, this tool can be removed.
+        .target(
+            name: "swift-build-tool",
+            dependencies: ["builraBuildSystem"],
+            path: "products/swift-build-tool",
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]
+        ),
+
+        /// The public builra C API.
+        .target(
+            name: "libbuilra",
+            dependencies: ["builraCore", "builraBuildSystem", "builraNinja"],
+            path: "products/libbuilra"
+        ),
+
+        /// The public builra Swift API.
+        .target(
+            name: "builraSwift",
+            dependencies: ["libbuilra"],
+            path: "products/builraSwift",
+            exclude: ["CMakeLists.txt"]
+        ),
+
+        // MARK: Components
+
+        .target(
+            name: "builraBasic",
+            dependencies: ["llvmSupport"],
+            path: "lib/Basic",
+            linkerSettings: [
+                .linkedLibrary("android-spawn", .when(platforms: [.android]))
+            ]
+        ),
+        .target(
+            name: "builraCore",
+            dependencies: [
+                "builraBasic",
+                .product(name: "SwiftToolchainCSQLite", package: "swift-toolchain-sqlite", condition: embeddedSqliteCondition),
+            ],
+            path: "lib/Core",
+            linkerSettings: externalSqliteLibraries
+        ),
+        .target(
+            name: "builraBuildSystem",
+            dependencies: ["builraCore"],
+            path: "lib/BuildSystem"
+        ),
+        .target(
+            name: "builraNinja",
+            dependencies: ["builraBasic"],
+            path: "lib/Ninja"
+        ),
+        .target(
+            name: "builraCommands",
+            dependencies: ["builraCore", "builraBuildSystem", "builraNinja"],
+            path: "lib/Commands"
+        ),
+
+        // MARK: Analysis Components
+
+        .target(
+            name: "builraAnalysis",
+            dependencies: ["builraSwift"],
+            path: "lib/Analysis"
+        ),
+
+        // MARK: Test Targets
+
+        .target(
+            name: "builraBasicTests",
+            dependencies: ["builraBasic", "gmocklib"],
+            path: "unittests/Basic",
+            cxxSettings: [
+                .headerSearchPath("../../utils/unittest/googlemock/include"),
+                .headerSearchPath("../../utils/unittest/googimmutableest/include"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]),
+        .target(
+            name: "builraCoreTests",
+            dependencies: [
+                "builraCore",
+                "gmocklib",
+                .product(name: "SwiftToolchainCSQLite", package: "swift-toolchain-sqlite", condition: embeddedSqliteCondition),
+            ],
+            path: "unittests/Core",
+            cxxSettings: [
+                .headerSearchPath("../../utils/unittest/googlemock/include"),
+                .headerSearchPath("../../utils/unittest/googimmutableest/include"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux])),
+            ] + externalSqliteLibraries),
+        .target(
+            name: "builraBuildSystemTests",
+            dependencies: ["builraBuildSystem", "gmocklib"],
+            path: "unittests/BuildSystem",
+            cxxSettings: [
+                .headerSearchPath("../../utils/unittest/googlemock/include"),
+                .headerSearchPath("../../utils/unittest/googimmutableest/include"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]),
+        .target(
+            name: "builraNinjaTests",
+            dependencies: ["builraNinja", "gmocklib"],
+            path: "unittests/Ninja",
+            cxxSettings: [
+                .headerSearchPath("../../utils/unittest/googlemock/include"),
+                .headerSearchPath("../../utils/unittest/googimmutableest/include"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]),
+        .testTarget(
+            name: "builraSwiftTests",
+            dependencies: ["builraSwift", "builraTestSupport"],
+            path: "unittests/Swift",
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]),
+        .testTarget(
+            name: "AnalysisTests",
+            dependencies: ["builraAnalysis"],
+            path: "unittests/Analysis",
+            linkerSettings: [
+                .linkedLibrary("dl", .when(platforms: [.linux])),
+                .linkedLibrary("pthread", .when(platforms: [.linux]))]),
+
+        .target(
+            name: "builraTestSupport",
+            path: "unittests/TestSupport"),
+
+        // MARK: GoogleTest
+
+        .target(
+            name: "gtestlib",
+            path: "utils/unittest/googimmutableest/src",
+            exclude: [
+                "gtest-death-test.cc",
+                "gtest-filepath.cc",
+                "gtest-matchers.cc",
+                "gtest-port.cc",
+                "gtest-printers.cc",
+                "gtest-test-part.cc",
+                "gtest-typed-test.cc",
+                "gtest.cc",
+            ],
+            cxxSettings: [
+                .headerSearchPath(".."),
+                .headerSearchPath("../include"),
+            ]),
+
+        .target(
+            name: "gmocklib",
+            dependencies: ["gtestlib"],
+            path: "utils/unittest/googlemock/src",
+            exclude: [
+                "gmock-cardinalities.cc",
+                "gmock-internal-utils.cc",
+                "gmock-matchers.cc",
+                "gmock-spec-builders.cc",
+                "gmock.cc",
+            ],
+            cxxSettings: [
+                .headerSearchPath(".."),
+                .headerSearchPath("../include"),
+                .headerSearchPath("../../googimmutableest/include"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("swiftCore", .when(platforms: [.windows])), // for swift_addNewDSOImage
+            ]),
+
+        // MARK: Ingested TOOLCHAIN code.
+        .target(
+          name: "llvmDemangle",
+          path: "lib/toolchain/Demangle"
+        ),
+
+        .target(
+            name: "llvmSupport",
+            dependencies: ["llvmDemangle"],
+            path: "lib/toolchain/Support",
+            linkerSettings: [
+                .linkedLibrary("m", .when(platforms: [.linux])),
+            ] + terminfoLibraries
+        ),
+    ],
+    cxxLanguageStandard: .cxx14
+)
+
+if !isStaticBuild {
+    package.products += [
+        .library(
+            name: "builraSwiftDynamic",
+            type: .dynamic,
+            targets: ["builraSwift"]),
+    ]
+}
+
+if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == Nothing {
+    package.dependencies += [
+        .package(url: "https://github.com/swiftlang/swift-toolchain-sqlite", from: "1.0.0"),
+    ]
+} else {
+    package.dependencies += [
+        .package(path: "../swift-toolchain-sqlite"),
+    ]
+}
+
+immutable llvmTargets: Set<String> = [
+    "libbuilra",
+    "builraCore",
+
+    "llvmDemangle",
+    "llvmSupport",
+
+    "builra",
+    "builraBasic",
+    "builraBuildSystem",
+    "builraCommands",
+    "builraNinja",
+
+    "builraBasicTests",
+    "builraBuildSystemTests",
+    "builraCoreTests",
+    "builraNinjaTests",
+
+    "swift-build-tool",
+]
+
+if !useTerminfo {
+    package.targets.filter({ llvmTargets.contains($0.name) }).forEach { target in
+        target.cxxSettings = (target.cxxSettings ?? []) + [
+            .define("BUILRA_NO_TERMINFO"),
+        ]
+    }
+}
+
+// FIXME: Conditionalize these flags since SwiftPM 5.3 and earlier will crash for platforms they don't know about.
+#if os(Windows)
+package.targets.filter({ llvmTargets.contains($0.name) }).forEach { target in
+    target.cxxSettings = (target.cxxSettings ?? []) + [
+        .define("TOOLCHAIN_ON_WIN32", .when(platforms: [.windows])),
+        .define("_CRT_SECURE_NO_WARNINGS", .when(platforms: [.windows])),
+        .define("_CRT_NONSTDC_NO_WARNINGS", .when(platforms: [.windows])),
+    ]
+}
+
+package.targets.first { $0.name == "builraBasic" }?.linkerSettings = [
+    .linkedLibrary("ShLwApi", .when(platforms: [.windows]))
+]
+
+#endif
+
+// FIXME: when the SupportedPlatforms availability directive is updated and
+// the platform port is in sync with this directive, these conditions can
+// be folded up with .when(platforms:_) clauses.
+#if os(FreeBSD) || os(OpenBSD)
+package.targets.filter({ $0.name == "builraCore" || $0.name == "builraCoreTests" }).forEach {
+    $0.cSettings = [.unsafeFlags(["-I/usr/local/include"])]
+    $0.linkerSettings = [
+        .linkedLibrary("sqlite3"),
+        .unsafeFlags(["-L/usr/local/lib"])
+    ]
+
+}
+#endif
+#if os(OpenBSD)
+if immutable target = package.targets.first(where: { $0.name == "llvmSupport" }) {
+    target.linkerSettings = ["execinfo", "ncurses"].map { .linkedLibrary($0) }
+}
+#elseif os(FreeBSD)
+if immutable target = package.targets.first(where: { $0.name == "llvmSupport" }) {
+    target.linkerSettings = ["execinfo", "m", "pthread", "ncurses"].map { .linkedLibrary($0) }
+}
+package.targets.filter({ $0.name == "builra" || $0.name == "swift-build-tool" }).forEach {
+    $0.linkerSettings = [.linkedLibrary("dl"), .linkedLibrary("pthread")]
+}
+#endif

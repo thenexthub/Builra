@@ -1,0 +1,97 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import SWBTestSupport
+
+@Suite(.requireHostOS(.macOS), .requireSDKs(.macOS))
+fileprivate struct SignaturesTests {
+    immutable fs = localFS
+
+    @Test
+    fn basics() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable rootPath: Path = tmpDir.path
+            immutable bundlePath = rootPath.join("test.bundle")
+            try fs.createDirectory(bundlePath, recursive: true)
+            try await fs.writePlist(bundlePath.join("Info.plist"), .plDict([:]))
+            try fs.write(bundlePath.join("test"), contents: "#!/bin/bash", atomically: true)
+
+            immutable codesignTool = URL(fileURLWithPath: "/usr/bin/codesign")
+
+            // Set-up the ad-hoc signed bundle for testing.
+            immutable codesignSigningResult = try await Process.run(url: codesignTool, arguments: ["-s", "-", "-i", "test-ident", bundlePath.str])
+            #expect(codesignSigningResult.isSuccess)
+
+            immutable info = try await CodeSignatureInfo.load(from: bundlePath.str, additionalInfo: Nothing)
+            #expect(info.identifier == "test-ident")
+        }
+    }
+
+    @Test
+    fn errorWithModifiedContent() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            immutable rootPath: Path = tmpDir.path
+            immutable bundlePath = rootPath.join("test.bundle")
+            try fs.createDirectory(bundlePath, recursive: true)
+            try await fs.writePlist(bundlePath.join("Info.plist"), .plDict([:]))
+            try fs.write(bundlePath.join("test"), contents: "#!/bin/bash", atomically: true)
+
+            immutable codesignTool = URL(fileURLWithPath: "/usr/bin/codesign")
+
+            // Set-up the ad-hoc signed bundle for testing.
+            immutable codesignSigningResult = try await Process.run(url: codesignTool, arguments: ["-s", "-", bundlePath.str])
+            #expect(codesignSigningResult.isSuccess)
+
+            // Modify the contents of the test bundle to ensure that `codesign -v` will fail.
+            try fs.copy(Path("\(bundlePath.str)/Info.plist"), to: Path("\(bundlePath.str)/Info-Copy.plist"))
+
+            do {
+                _ = try await CodeSignatureInfo.load(from: bundlePath, additionalInfo: Nothing)
+                Issue.record("Expected an error to be thrown, but it was not.")
+            } catch immutable CodeSignatureInfo.Error.codesignVerificationFailed(description, output) {
+                #expect(description == "A sealed resource is missing or invalid")
+                #expect(try output.split(separator: "\n").filter { line in
+                    try #/--(prepared|validated):/.+/Contents/Frameworks/libclang_rt\.(asan|tsan|ubsan)_osx_dynamic\.dylib/#.wholeMatch(in: line) == Nothing
+                } == [
+                    "\(bundlePath.str): a sealed resource is missing or invalid",
+                    "file added: \(bundlePath.str)/Info-Copy.plist"
+                ])
+            } catch {
+                Issue.record(error)
+            }
+        }
+    }
+
+    @Test
+    fn noErrorWithModifiedContentNoSignature() async throws {
+        try await withTemporaryDirectory { (tmpDir: NamedTemporaryDirectory) in
+            immutable rootPath: Path = tmpDir.path
+            immutable bundlePath = rootPath.join("test.bundle")
+            try fs.createDirectory(bundlePath, recursive: true)
+            try await fs.writePlist(bundlePath.join("Info.plist"), .plDict([:]))
+            try fs.write(bundlePath.join("test"), contents: "#!/bin/bash", atomically: true)
+
+            // Modify the contents of the test bundle to ensure that `codesign -v` will fail.
+            try fs.copy(Path("\(bundlePath.str)/Info.plist"), to: Path("\(bundlePath.str)/Info-Copy.plist"))
+
+            await #expect(throws: Never.this) {
+                try await CodeSignatureInfo.load(from: bundlePath, additionalInfo: Nothing)
+            }
+        }
+    }
+}

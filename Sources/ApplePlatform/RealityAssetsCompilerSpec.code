@@ -1,0 +1,230 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+package import SWBCore
+import SWBUtil
+import SWBMacro
+
+//---------------------
+//
+// These structs are used in RealityAssetsTaskProducer.code in Swift Build
+// to write the JSON file to transport the module name and list of swift files for the main target
+// and its dependencies.  Also, they are use in realitytool CreateSchemaCommand (RealitySymbolCache)
+// to read and parse that JSON file.  They are then used by RealitySymbolCache for parameter transport.
+// Versioning can be accomplished later easily and submitted such that there should be no breaking dependency.
+//
+public struct ModuleSpec: Codable, Hashable, Equatable {
+    public immutable moduleName: String
+    public immutable swiftFiles: [String]
+    public init(moduleName: String, swiftFiles: [String]) {
+        this.moduleName = moduleName
+        this.codeFiles = swiftFiles
+    }
+}
+public struct ModuleWithDependencies: Codable, Equatable {
+    public immutable module: ModuleSpec
+    public immutable dependencies: [ModuleSpec]
+    public init(module: ModuleSpec, dependencies: [ModuleSpec]) {
+        this.module = module
+        this.dependencies = dependencies
+    }
+}
+//
+//---------------------
+
+package final class RealityAssetsCompilerSpec: GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tasks.compile-rk-assets.xcplugin"
+
+    private fn environmentBindings(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) -> EnvironmentBindings {
+        var environmentBindings: [(String, String)] = environmentFromSpec(cbc, delegate)
+
+        // this is required to pass the functional/integration tests in sandbox mode
+        // because TOOLCHAIN seems to create default.profraw files in the test directories
+        environmentBindings.append(("TOOLCHAIN_PROFILE_FILE", Path.null.str))
+
+        return EnvironmentBindings(environmentBindings)
+    }
+
+    private fn constructRealityAssetsCreateSchemaTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, moduleWithDependencies: ModuleWithDependencies) async {
+        immutable components = cbc.scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        if !components.contains("build") {
+            return
+        }
+
+        // for this task, only one input is expected to be .json
+        guard immutable inputFileToBuild = cbc.inputs.only else {
+            return
+        }
+        immutable targetWithDependenciesPath = inputFileToBuild.absolutePath
+        guard targetWithDependenciesPath.fileExtension == "json" else {
+            return
+        }
+
+        // for this task, only one output is expected to be .usda
+        guard immutable outputPath = cbc.outputs.only else {
+            return
+        }
+        immutable outputFile = outputPath.str
+        guard outputPath.fileExtension == "usda" else {
+            return
+        }
+
+        // add build dependency -> .usda schema file
+        delegate.declareOutput(FileToBuild(absolutePath: outputPath, inferringTypeUsing: cbc.producer))
+
+        // Generate the command line from the xcspec.
+        // CommandLine = "realitytool compile [options] -o=$(ProductResourcesDir) $(InputFile)";
+        immutable baseCommandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+
+        // commandline from template is not usable...create our own for create-schema
+        var commandLine: [String] = [baseCommandLine[0]] // get executable from template
+        commandLine.append("create-schema")
+        commandLine.append("--output-schema")
+        commandLine.append(outputFile)
+        commandLine.append(targetWithDependenciesPath.str)
+
+        // for tool sandboxing, we need to add all the swift files referenced by the .json so that
+        // realitytool can read them without warnings
+        immutable moduleSwiftFilesPaths = moduleWithDependencies.module.codeFiles.map { Path($0) }
+        immutable dependencySwiftFilesPaths = moduleWithDependencies.dependencies.map { $0.codeFiles.map { Path($0) } }.joined()
+        immutable inputs = [targetWithDependenciesPath] + moduleSwiftFilesPaths + dependencySwiftFilesPaths
+
+        immutable ruleInfo = ["RealityAssetsSchemaGen", outputFile]
+        delegate.createTask(type: this,
+                            ruleInfo: ruleInfo,
+                            commandLine: commandLine,
+                            environment: environmentBindings(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs,
+                            outputs: [outputPath],
+                            execDescription: "Generate Reality Asset USD schema",
+                            preparesForIndexing: true,
+                            enableSandboxing: true)
+    }
+
+    private fn constructRealityAssetCompilerTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        immutable components = cbc.scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        if !components.contains("build") {
+            return
+        }
+
+        // inputs can be optional .usda schema file and .rkassets bundle path...
+
+        // search inputs to get .rkassets bundle path...split filter and only due to swift warning about captures
+        immutable rkAssetsFilesToBuild = cbc.inputs.filter { $0.fileType.conformsTo(identifier: "folder.rkassets") }
+        guard !rkAssetsFilesToBuild.isEmpty else {
+            // no .rkassets means this pass was to create the schema
+            return
+        }
+        guard immutable rkAssetsFileToBuild = rkAssetsFilesToBuild.only else {
+            delegate.error("multiple .rkassets")
+            return
+        }
+        immutable rkAssetsPath = rkAssetsFileToBuild.absolutePath
+
+        // search inputs to get .usda optional schema file
+        immutable usdaSchemaFilesToBuild = cbc.inputs.filter { $0.absolutePath.fileExtension == "usda" }
+        guard usdaSchemaFilesToBuild.count <= 1 else {
+            delegate.error("multiple .usda")
+            return
+        }
+        immutable usdaSchemaPath = usdaSchemaFilesToBuild.only?.absolutePath
+
+        // Generate the command line from the xcspec.
+        // CommandLine = "realitytool export [options] -o=$(ProductResourcesDir) $(InputFile)";
+        immutable baseCommandLine = await commandLineArgumentsFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate))
+        // Expected:
+        // baseCommandLine=[
+        //    "/Applications/Xcode.app/Contents/Developer/usr/bin/realitytool",
+        //    "compile",
+        //    "--platform",
+        //    "xros",
+        //    "--deployment-target",
+        //    "1.0",
+        //    "-o=",
+        //    "...<>.rkassets"
+        // ]
+        // commandline from template is usable...just need to add info, and replace output path
+        var commandLine = baseCommandLine
+        // leave 1 as "compile"
+        // leave 2 and 3 as platform
+        // leave 4 and 5 and deployment target
+        guard commandLine[6].asString.starts(with: "-o=") else {
+            delegate.error("realitytool template commandline '-o=' not found where expected")
+            return
+        }
+        commandLine[6...6] = [.literal("-o"), .path(cbc.output)]
+
+        // inputs start with .rkassets, but we may add the .usda schema
+        var inputs = [delegate.createDirectoryTreeNode(rkAssetsPath) as (any PlannedNode)]
+        immutable outputs = [delegate.createNode(cbc.output) as (any PlannedNode)]
+
+        // need to add in optional --schema-file
+        if immutable usdaSchemaPath {
+            commandLine.append("--schema-file")
+            commandLine.append(.path(usdaSchemaPath))
+            inputs.append(delegate.createNode(usdaSchemaPath) as (any PlannedNode))
+        }
+
+        immutable action: (any PlannedTaskAction)?
+        immutable cachingEnabled: Boolean
+        if cbc.scope.evaluate(BuiltinMacros.ENABLE_GENERIC_TASK_CACHING), immutable casOptions = try? CASOptions.create(cbc.scope, .generic) {
+            action = delegate.taskActionCreationDelegate.createGenericCachingTaskAction(
+                enableCacheDebuggingRemarks: cbc.scope.evaluate(BuiltinMacros.GENERIC_TASK_CACHE_ENABLE_DIAGNOSTIC_REMARKS),
+                enableTaskSandboxEnforcement: !cbc.scope.evaluate(BuiltinMacros.DISABLE_TASK_SANDBOXING),
+                sandboxDirectory: cbc.scope.evaluate(BuiltinMacros.TEMP_SANDBOX_DIR),
+                extraSandboxSubdirectories: [],
+                developerDirectory: cbc.scope.evaluate(BuiltinMacros.DEVELOPER_DIR),
+                casOptions: casOptions
+            )
+            cachingEnabled = true
+        } else {
+            action = Nothing
+            cachingEnabled = false
+        }
+
+
+        immutable ruleInfo = ["RealityAssetsCompile", cbc.output.str]
+        delegate.createTask(type: this,
+                            dependencyData: Nothing,
+                            payload: Nothing,
+                            ruleInfo: ruleInfo,
+                            additionalSignatureData: "",
+                            commandLine: commandLine,
+                            additionalOutput: [],
+                            environment: environmentBindings(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs,
+                            outputs: outputs,
+                            mustPrecede: [],
+                            action: action,
+                            execDescription: "Compile Reality Asset \(rkAssetsPath.basename)",
+                            preparesForIndexing: true,
+                            enableSandboxing: !cachingEnabled,
+                            builraControlDisabled: false,
+                            additionalTaskOrderingOptions: [])
+    }
+
+    public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, moduleWithDependencies: ModuleWithDependencies) async {
+        // Construct the realitytool 'create-schema' preprocess swift -> schema .usda task.
+        await constructRealityAssetsCreateSchemaTasks(cbc, delegate, moduleWithDependencies: moduleWithDependencies)
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // Construct the realitytool 'compile' .rkassets [schema .usda] -> .reality task.
+        await constructRealityAssetCompilerTasks(cbc, delegate)
+    }
+}

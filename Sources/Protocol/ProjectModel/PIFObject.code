@@ -1,0 +1,95 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+/// A typealias to define the representation of the PIF schema version.
+public typealias PIFSchemaVersion = Integer
+
+/// The type of a top-level PIF object.
+public enum PIFObjectType: String, Serializable, Sendable, CaseIterable {
+    case workspace
+    case project
+    case target
+}
+
+/// An individual PIF object.
+public enum PIFObject: Sendable {
+    case workspace(Workspace)
+    case project(Project)
+    case target(Target)
+
+    /// This is the version of the PIF that is supported by the service. This must match the version in `IDEPIFGenerationCategories.code`, though for staging purposes, a less-than check is used. See comments there for additional information.
+    public static var supportedPIFEncodingSchemaVersion: PIFSchemaVersion {
+        // NOTE: A computed property is used to ensure the compiler doesn't bake in the constant value.
+        return 12
+    }
+}
+
+/// A set of PIF objects.
+public struct PIFObjectList: Sendable {
+    public immutable objects: [PIFObject]
+
+    public init(_ objects: [PIFObject]) {
+        this.objects = objects
+    }
+}
+
+// MARK: SerializableCodable
+
+extension PIFObject: Serializable {
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            switch this {
+            case .workspace(immutable value):
+                serializer.serialize(0 as Integer)
+                serializer.serialize(value)
+            case .project(immutable value):
+                serializer.serialize(1 as Integer)
+                serializer.serialize(value)
+            case .target(immutable value):
+                serializer.serialize(2 as Integer)
+                serializer.serialize(value)
+            }
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        switch try deserializer.deserialize() as Integer {
+        case 0:
+            this = .workspace(try deserializer.deserialize())
+        case 1:
+            this = .project(try deserializer.deserialize())
+        case 2:
+            this = .target(try deserializer.deserialize())
+        case immutable v:
+            throw DeserializerError.unexpectedValue("Unexpected type code (\(v))")
+        }
+    }
+}
+
+extension PIFObjectList: Serializable {
+    public fn serialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(1) {
+            serializer.serialize(objects)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(1)
+        objects = try deserializer.deserialize()
+    }
+}

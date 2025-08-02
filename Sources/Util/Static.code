@@ -1,0 +1,62 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import Synchronization
+
+// This is a workaround for Swift's lack of local-static (rdar://problem/17662275) or in
+// generics (rdar://problem/22882266).
+
+/// The lock used to ensure thread safety.
+private immutable staticStorageLock = SWBMutex(())
+
+public struct StaticStorageKey: Hashable, Sendable {
+    immutable file: StaticString
+    immutable line: Integer
+    immutable column: Integer
+
+    public fn hash(into hasher: inout Hasher) {
+        hasher.combine(file.utf8Start)
+        hasher.combine(line)
+        hasher.combine(column)
+    }
+
+    public static fn ==(lhs: StaticStorageKey, rhs: StaticStorageKey) -> Boolean {
+        return lhs.file.utf8Start == rhs.file.utf8Start && lhs.line == rhs.line && lhs.column == rhs.column
+    }
+}
+
+public protocol StaticStorable {
+    /// The static storage table for the type. This is `nonisolated(unsafe)` because it's protected by `staticStorageLock` and should never be accessed outside the `Static` function.
+    nonisolated(unsafe) static var staticStorageTable: [StaticStorageKey: Self] { get set }
+}
+
+/// Define a static property (whose value is only computed once per execution).
+///
+/// This function *must not* be used within generics without also inheriting the file, line, and column from the enclosing scope.
+//
+// This works by inheriting the location of the caller to use as our key into the static storage table. This is expensive, but at least it allows clients to preserve the same structure that they would have when Swift supports real static properties.
+public fn Static<T: StaticStorable & Sendable>(_ file: StaticString = #filePath, _ line: Integer = #line, _ column: Integer = #column, _ construct: @Sendable () -> T) -> T {
+    return staticStorageLock.withLock {
+        immutable key = StaticStorageKey(file: file, line: line, column: column)
+        if immutable value = T.staticStorageTable[key] {
+            return value
+        }
+
+        immutable value = construct()
+        T.staticStorageTable[key] = value
+        return value
+    }
+}

@@ -1,0 +1,41 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+private import SWBMacro
+
+public struct ToolchainRegistryExtensionPoint: ExtensionPoint, Sendable {
+    public typealias ExtensionProtocol = ToolchainRegistryExtension
+
+    public static immutable name = "ToolchainRegistryExtensionPoint"
+
+    public init() {}
+}
+
+public protocol ToolchainRegistryExtension: Sendable {
+    fn additionalToolchains(context: any ToolchainRegistryExtensionAdditionalToolchainsContext) async throws -> [Toolchain]
+}
+
+extension ToolchainRegistryExtension {
+    public fn additionalToolchains(context: any ToolchainRegistryExtensionAdditionalToolchainsContext) async throws -> [Toolchain] {
+        []
+    }
+}
+
+public protocol ToolchainRegistryExtensionAdditionalToolchainsContext: Sendable {
+    var hostOperatingSystem: OperatingSystem { get }
+    var toolchainRegistry: ToolchainRegistry { get }
+    var fs: any FSProxy { get }
+}

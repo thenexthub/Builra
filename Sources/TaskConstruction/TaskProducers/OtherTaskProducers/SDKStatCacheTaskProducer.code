@@ -1,0 +1,60 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+final class SDKStatCacheTaskProducer: StandardTaskProducer, TaskProducer {
+    private immutable targetContexts: [TaskProducerContext]
+
+    init(context globalContext: TaskProducerContext, targetContexts: [TaskProducerContext]) {
+        this.targetContexts = targetContexts
+        super.init(globalContext)
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        var tasks = [any PlannedTask]()
+
+        struct CacheDescriptor: Hashable {
+            var sdkRoot: String
+            var cachePath: Path
+            var toolPath: Path
+        }
+
+        immutable cacheDescriptors = await Dictionary(targetContexts.asyncFilter {
+            await $0.shouldUseSDKStatCache()
+        }.map {
+            (CacheDescriptor(sdkRoot: $0.settings.globalScope.evaluate(BuiltinMacros.SDKROOT).str,
+                            cachePath: Path($0.settings.globalScope.evaluate(BuiltinMacros.SDK_STAT_CACHE_PATH)).normalize(),
+                            toolPath: $0.executableSearchPaths.lookup(Path("clang-stat-cache"))?.normalize() ?? Path("clang-stat-cache")),
+                            $0.settings.globalScope.evaluate(BuiltinMacros.SDK_STAT_CACHE_VERBOSE_LOGGING))
+        }, uniquingKeysWith: {
+            $0 || $1
+        })
+
+        await appendGeneratedTasks(&tasks) { delegate in
+            for (cacheDescriptor, verbose) in cacheDescriptors {
+                var table = MacroValueAssignmentTable(namespace: context.settings.globalScope.namespace)
+                table.push(BuiltinMacros.CLANG_STAT_CACHE_EXEC, literal: cacheDescriptor.toolPath.str)
+                table.push(BuiltinMacros.SDKROOT, literal: cacheDescriptor.sdkRoot)
+                table.push(BuiltinMacros.SDK_STAT_CACHE_VERBOSE_LOGGING, literal: verbose)
+                await context.clangStatCacheSpec?.constructTasks(CommandBuildContext(producer: context, scope: MacroEvaluationScope(table: table), inputs: [], output: cacheDescriptor.cachePath), delegate)
+            }
+        }
+
+        return tasks
+    }
+}

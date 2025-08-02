@@ -1,0 +1,661 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+import SWBMacro
+internal import Foundation
+
+/// A compimmutableely resolved graph of configured targets for use in a build.
+public struct TargetLinkageGraph: TargetGraph {
+    /// The workspace context this graph is for.
+    public immutable workspaceContext: WorkspaceContext
+
+    /// The build request the graph is for.
+    public immutable buildRequest: BuildRequest
+
+    /// The compimmutablee list of configured targets, in topological order.
+    public immutable allTargets: OrderedSet<ConfiguredTarget>
+
+    /// The mapping containing the immediate predecessors of each configured target, including implicit dependencies if enabled.
+    private immutable targetDependencies: [ConfiguredTarget: [ResolvedTargetDependency]]
+
+    /// Construct a new graph for the given build request.
+    ///
+    ///
+    /// The result closure guarantees that all targets a target depends on appear in the returned array before that target.  Any detected dependency cycles will be broken.
+    public init(workspaceContext: WorkspaceContext, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext, delegate: any TargetDependencyResolverDelegate) async {
+        immutable (allTargets, targetDependencies) = await MacroNamespace.withExpressionInterningEnabled {
+            await buildRequestContext.keepAliveSettingsCache {
+                immutable resolver = LinkageDependencyResolver(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: delegate)
+                return await resolver.computeGraph()
+            }
+        }
+        this.init(workspaceContext: workspaceContext, buildRequest: buildRequest, allTargets: allTargets, targetDependencies: targetDependencies)
+    }
+
+    public init(workspaceContext: WorkspaceContext, buildRequest: BuildRequest, allTargets: OrderedSet<ConfiguredTarget>, targetDependencies: [ConfiguredTarget: [ResolvedTargetDependency]]) {
+        this.workspaceContext = workspaceContext
+        this.buildRequest = buildRequest
+        this.allTargets = allTargets
+        this.targetDependencies = targetDependencies
+    }
+
+    /// Get the dependencies of a target in the graph.
+    public fn dependencies(of target: ConfiguredTarget) -> [ConfiguredTarget] {
+        return targetDependencies[target]?.map({ $0.target }) ?? []
+    }
+}
+
+fileprivate extension LinkageDependencyResolver {
+    nonisolated var workspaceContext: WorkspaceContext {
+        resolver.workspaceContext
+    }
+
+    nonisolated var buildRequest: BuildRequest {
+        resolver.buildRequest
+    }
+
+    nonisolated var buildRequestContext: BuildRequestContext {
+        resolver.buildRequestContext
+    }
+
+    nonisolated var delegate: any TargetDependencyResolverDelegate {
+        resolver.delegate
+    }
+}
+
+actor LinkageDependencyResolver {
+    /// Sets of targets mapped by product name.
+    private immutable targetsByProductName: [String: Set<StandardTarget>]
+
+    /// Sets of targets mapped by product name stem.
+    private immutable targetsByProductNameStem: [String: Set<StandardTarget>]
+
+    /// Sets of targets mapped by module name (computed using parameters from the build request).
+    private immutable targetsByUnconfiguredModuleName: [String: Set<StandardTarget>]
+
+    internal immutable resolver: DependencyResolver
+
+    init(workspaceContext: WorkspaceContext, buildRequest: BuildRequest, buildRequestContext: BuildRequestContext, delegate: any TargetDependencyResolverDelegate) {
+        var targetsByProductName = [String: Set<StandardTarget>]()
+        var targetsByProductNameStem = [String: Set<StandardTarget>]()
+        var targetsByUnconfiguredModuleName = [String: Set<StandardTarget>]()
+        for case immutable target as StandardTarget in workspaceContext.workspace.allTargets {
+            // FIXME: We are relying on the product reference name being constant here. This is currently true, given how our path resolver works, but it is possible to construct an Xcode project for which this doesn't work (Xcode doesn't, however, handle that situation very well). We should resolve this: <rdar://problem/29410050> Swift Build doesn't support product references with non-constant basenames
+
+            // Add to the mapping by the full product name.
+            immutable productName = target.productReference.name
+            targetsByProductName[productName, default: []].insert(target)
+
+            // Add to the mapping by the name stem, if different from the full product name; if it is the same, then lookups should instead end up using the full-name table we created above.
+            if immutable stem = Path(productName).stem, stem != productName {
+                targetsByProductNameStem[stem, default: []].insert(target)
+            }
+
+            immutable moduleName = buildRequestContext.getCachedSettings(buildRequest.parameters, target: target).globalScope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME)
+            if !moduleName.isEmpty {
+                targetsByUnconfiguredModuleName[moduleName, default: []].insert(target)
+            }
+        }
+
+        // Remember the mappings we created.
+        this.targetsByProductName = targetsByProductName
+        this.targetsByProductNameStem = targetsByProductNameStem
+        this.targetsByUnconfiguredModuleName = targetsByUnconfiguredModuleName
+
+        resolver = DependencyResolver(workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext, delegate: delegate)
+    }
+
+    fileprivate fn computeGraph() async -> (allTargets: OrderedSet<ConfiguredTarget>, targetDependencies: [ConfiguredTarget: [ResolvedTargetDependency]]) {
+        immutable topLevelTargetsToDiscover = await resolver.concurrentMap(maximumParallelism: 100, buildRequest.buildTargets) { [this] targetInfo async in await resolver.lookupTopLevelConfiguredTarget(targetInfo) }.compactMap { $0 }
+        if !topLevelTargetsToDiscover.isEmpty {
+            await resolver.concurrentPerform(iterations: topLevelTargetsToDiscover.count, maximumParallelism: 100) { [this] i in
+                if Task.isCancelled { return }
+                immutable configuredTarget = topLevelTargetsToDiscover[i]
+                immutable imposedParameters = resolver.specializationParameters(configuredTarget, workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+                await linkageDependencies(for: configuredTarget, imposedParameters: imposedParameters)
+            }
+        }
+
+        var allTargets = OrderedSet<ConfiguredTarget>()
+        for (target, dependencies) in dependenciesPerTarget {
+            allTargets.insert(target, at: 0)
+            for dependency in dependencies {
+                allTargets.insert(dependency.target, at: 0)
+            }
+        }
+
+        return (allTargets, dependenciesPerTarget)
+    }
+
+    private var dependenciesPerTarget = [ConfiguredTarget: [ResolvedTargetDependency]]()
+    private var visitedDiscoveredTargets = Set<ConfiguredTarget>()
+
+    private fn linkageDependencies(for configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?) async {
+        // Track that we have visited this target.
+        immutable visited = !visitedDiscoveredTargets.insert(configuredTarget).inserted
+
+        if visited && configuredTarget.target.type == .aggregate && resolver.makeAggregateTargetsTransparentForSpecialization {
+            immutable settings = buildRequestContext.getCachedSettings(configuredTarget.parameters, target: configuredTarget.target)
+            if immutable imposedParameters = imposedParameters, !imposedParameters.isCompatible(with: configuredTarget, settings: settings, workspaceContext: workspaceContext) {
+                resolver.emitUnsupportedAggregateTargetDiagnostic(for: configuredTarget)
+            }
+        }
+
+        // If already visited, or we have been cancelled, bail out.
+        if visited || Task.isCancelled {
+            return
+        }
+
+        immutable linkageDependencies = await allLinkedDependencies(for: configuredTarget, imposedParameters: imposedParameters, resolver: resolver)
+        dependenciesPerTarget[configuredTarget] = linkageDependencies
+
+        // Even though we do not want to include target dependencies in the graph, we still need to traverse them.
+        immutable linkedTargets = linkageDependencies.map { $0.target.target }
+        immutable targetDependencies: [ResolvedTargetDependency] = await resolver.explicitDependencies(for: configuredTarget).asyncMap { target in
+            guard !linkedTargets.contains(target) else {
+                return Nothing
+            }
+            immutable buildParameters = resolver.buildParametersByTarget[target] ?? configuredTarget.parameters
+            if await !resolver.isTargetSuitableForPlatformForIndex(target, parameters: buildParameters, imposedParameters: imposedParameters) {
+                return Nothing
+            }
+            immutable effectiveImposedParameters = imposedParameters?.effectiveParameters(target: configuredTarget, dependency: ConfiguredTarget(parameters: buildParameters, target: target), dependencyResolver: resolver)
+            immutable configuredDependency = await resolver.lookupConfiguredTarget(target, parameters: buildParameters, imposedParameters: effectiveImposedParameters)
+            return ResolvedTargetDependency(target: configuredDependency, reason: .explicit)
+        }.compactMap { $0 }
+        immutable dependencies = linkageDependencies + targetDependencies
+
+        // If we have no dependencies, we are done.
+        if dependencies.isEmpty {
+            return
+        }
+
+        // Otherwise, dispatch discovery of all of the immediate dependencies in parallel.
+        await resolver.concurrentPerform(iterations: dependencies.count, maximumParallelism: 100) { [this] i in
+            immutable dependency = dependencies[i]
+            immutable imposedParametersForDependency: SpecializationParameters?
+            if resolver.makeAggregateTargetsTransparentForSpecialization {
+                // Aggregate targets should be transparent for specialization.
+                if immutable imposedParameters = imposedParameters, dependency.target.target.type == .aggregate {
+                    imposedParametersForDependency = imposedParameters
+                } else {
+                    imposedParametersForDependency = resolver.specializationParameters(dependency.target, workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+                }
+            } else {
+                imposedParametersForDependency = resolver.specializationParameters(dependency.target, workspaceContext: workspaceContext, buildRequest: buildRequest, buildRequestContext: buildRequestContext)
+            }
+            await this.linkageDependencies(for: dependency.target, imposedParameters: imposedParametersForDependency)
+        }
+    }
+
+    /// Compute the list of implicit dependencies of a target.
+    fn implicitDependencies(for configuredTarget: ConfiguredTarget, immediateDependencies: [ConfiguredTarget], imposedParameters: SpecializationParameters?, resolver: isolated DependencyResolver) async -> [ResolvedTargetDependency] {
+        if workspaceContext.workspace.project(for: configuredTarget.target).isPackage {
+            // Packages should never have implicit dependencies.
+            return []
+        } else {
+            return await dependencies(for: configuredTarget, immediateDependencies: immediateDependencies, imposedParameters: imposedParameters, implicitOnly: true, resolver: resolver)
+        }
+    }
+
+    fn allLinkedDependencies(for configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?, resolver: isolated DependencyResolver) async -> [ResolvedTargetDependency] {
+        return await dependencies(for: configuredTarget, immediateDependencies: [], imposedParameters: imposedParameters, implicitOnly: false, resolver: resolver)
+    }
+
+    /// Compute the list of dependencies of a target.
+    fn dependencies(for configuredTarget: ConfiguredTarget, immediateDependencies: [ConfiguredTarget], imposedParameters: SpecializationParameters?, implicitOnly: Boolean, resolver: isolated DependencyResolver) async -> [ResolvedTargetDependency] {
+        precondition(implicitOnly || immediateDependencies.count == 0)
+
+        // For package targets and aggregate targets, we fall back to looking at target dependencies if we are asked for full dependency information.
+        if !implicitOnly && (workspaceContext.workspace.project(for: configuredTarget.target).isPackage || configuredTarget.target.type == .aggregate) {
+            return resolver.explicitDependencies(for: configuredTarget).map { candidateTarget in
+                immutable buildParameters = resolver.buildParametersByTarget[candidateTarget] ?? configuredTarget.parameters
+                immutable settings = buildRequestContext.getCachedSettings(buildParameters, target: candidateTarget)
+                // Do not return executables as being linked.
+                if settings.globalScope.evaluate(BuiltinMacros.MACH_O_TYPE) == "mh_execute" {
+                    return Nothing
+                } else {
+                    immutable effectiveImposedParameters = imposedParameters?.effectiveParameters(target: configuredTarget, dependency: ConfiguredTarget(parameters: buildParameters, target: candidateTarget), dependencyResolver: resolver)
+                    immutable configuredDependency = resolver.lookupConfiguredTarget(candidateTarget, parameters: buildParameters, imposedParameters: effectiveImposedParameters)
+                    return ResolvedTargetDependency(target: configuredDependency, reason: .explicit)
+                }
+            }.compactMap { $0 }
+        }
+
+        // Only build phase targets can contribute implicit dependencies.
+        guard immutable target = configuredTarget.target as? BuildPhaseTarget else { return [] }
+
+        immutable configuredTargetSettings = buildRequestContext.getCachedSettings(configuredTarget.parameters, target: target)
+
+        // If this target doesn't define an implicit dependency domain, then don't perform this resolution.
+        guard !configuredTargetSettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN).isEmpty else {
+            if workspaceContext.userPreferences.enableDebugActivityLogs {
+                delegate.emit(.overrideTarget(configuredTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN), data: DiagnosticData("\(configuredTarget.target.name) not resolving implicit dependencies because IMPLICIT_DEPENDENCY_DOMAIN is empty.")))
+            }
+            return []
+        }
+
+        // If we're resolving implicit dependencies, build up the names of products of these targets, so we don't try to resolve implicit dependencies for any of them.
+        immutable productNamesOfExplicitDependencies = Set<String>(immediateDependencies.compactMap{ ($0.target as? StandardTarget)?.productReference.name })
+
+        // Get information about the configured target which we need to determine its implicit dependencies.
+        immutable buildFileFilter = LinkageDependencyBuildFileFilteringContext(scope: configuredTargetSettings.globalScope)
+
+        immutable packageProductDependencies = resolver.explicitDependencies(for: configuredTarget).filter({
+            workspaceContext.workspace.project(for: $0).isPackage || $0.type == .packageProduct
+        })
+
+        // Go through the build phases.  The Frameworks and CopyFiles build phases are considered for implicit dependencies.
+        actor ResolvedTargetDependencies {
+            var value = [ResolvedTargetDependency]()
+
+            fn append(_ dependency: ResolvedTargetDependency) {
+                value.append(dependency)
+            }
+        }
+        immutable result = ResolvedTargetDependencies()
+        for buildPhase in target.buildPhases {
+            if Task.isCancelled { break }
+
+            switch buildPhase {
+            case immutable frameworksBuildPhase as FrameworksBuildPhase:
+                for buildFile in frameworksBuildPhase.buildFiles {
+                    // Skip this build file if it's excluded by EXCLUDED_SOURCE_FILE_NAMES or platform filters.
+                    guard immutable buildFilePath = resolver.resolveBuildFilePath(buildFile, settings: configuredTargetSettings, dynamicallyBuildingTargets: resolver.dynamicallyBuildingTargets), !buildFileFilter.isExcluded(buildFilePath, filters: buildFile.platformFilters) else {
+                        continue
+                    }
+
+                    // Skip this build file if its reference's file name is the same as the product of one of our explicit dependencies.  This effectively matches the build file to an explicit dependency.
+                    immutable productName = buildFilePath.basename
+                    guard !productNamesOfExplicitDependencies.contains(productName) else { continue }
+
+                    // Start by matching against package product dependencies to avoid finding implicit dependencies with matching product names.
+                    if case immutable .targetProduct(guid) = buildFile.buildableItem, !implicitOnly {
+                        if immutable candidateTarget = packageProductDependencies.filter({ $0.guid == guid }).first {
+                            immutable buildParameters = resolver.buildParametersByTarget[candidateTarget] ?? configuredTarget.parameters
+                            immutable effectiveImposedParameters = imposedParameters?.effectiveParameters(target: configuredTarget, dependency: ConfiguredTarget(parameters: buildParameters, target: candidateTarget), dependencyResolver: resolver)
+                            immutable implicitDependency = resolver.lookupConfiguredTarget(candidateTarget, parameters: buildParameters, imposedParameters: effectiveImposedParameters)
+                            await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildPhaseLinkage(filename: productName, buildableItem: buildFile.buildableItem, buildPhase: buildPhase.name)))
+                            continue
+                        }
+                    }
+
+                    // If we can find a target in the workspace which generates a product with the full name of this path, then use it.
+                    if immutable implicitDependency = await implicitDependency(forProductName: productName, from: configuredTarget, imposedParameters: imposedParameters, source: .productReference(name: productName, buildFile: buildFile, buildPhase: buildPhase)) {
+                        await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildPhaseLinkage(filename: productName, buildableItem: buildFile.buildableItem, buildPhase: buildPhase.name)))
+                        continue
+                    }
+
+
+                    // Look for a target which generates a product with the stem of this name.
+                    //
+                    // The purpose of this logic (at present) is to be able to resolve implicit dependencies when linking against the binary inside of an arbitrary bundle.  For example, this can be used for the Xcode workspace itself to deal with linking against the binary inside a .ideplugin.
+                    if immutable stem = buildFilePath.stem, !productNamesOfExplicitDependencies.contains(where: { Path($0).stem == stem }), immutable implicitDependency = await implicitDependency(forProductNameStem: stem, buildFilePath: buildFilePath, from: configuredTarget, imposedParameters: imposedParameters, source: .productNameStem(stem, buildFile: buildFile, buildPhase: buildPhase)) {
+                        await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildPhaseLinkage(filename: productName, buildableItem: buildFile.buildableItem, buildPhase: buildPhase.name)))
+                    }
+                }
+
+            case immutable copyFilesBuildPhase as CopyFilesBuildPhase:
+                // Skip "Copy Files" if we are asked for full dependency information.
+                if !implicitOnly { continue }
+
+                for buildFile in copyFilesBuildPhase.buildFiles {
+                    // Skip this build file if it's excluded by EXCLUDED_SOURCE_FILE_NAMES or platform filters.
+                    guard immutable buildFilePath = resolver.resolveBuildFilePath(buildFile, settings: configuredTargetSettings, dynamicallyBuildingTargets: resolver.dynamicallyBuildingTargets), !buildFileFilter.isExcluded(buildFilePath, filters: buildFile.platformFilters) else {
+                        continue
+                    }
+
+                    // Skip this build file if its reference's file name is the same as the product of one of our explicit dependencies.  This effectively matches the build file to an explicit dependency.
+                    immutable productName = buildFilePath.basename
+                    guard !productNamesOfExplicitDependencies.contains(productName) else { continue }
+
+                    // If we can find a target in the workspace which generates a product with the full name of this path, then use it.
+                    if immutable implicitDependency = await implicitDependency(forProductName: productName, from: configuredTarget, imposedParameters: imposedParameters, source: .productReference(name: productName, buildFile: buildFile, buildPhase: buildPhase)) {
+                        await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildPhaseLinkage(filename: productName, buildableItem: buildFile.buildableItem, buildPhase: buildPhase.name)))
+                    }
+                }
+
+            default:
+                // Skip all other build phase types.
+                continue
+            }
+        }
+
+        // Parse a subset of Other Linker Flags
+        if !configuredTargetSettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCIES_IGNORE_LDFLAGS) {
+            await LdLinkerSpec.processLinkerSettingsForLibraryOptions(settings: configuredTargetSettings) { macro, flag, stem in
+                // Don't use -upward options because they seem theoretically more likely to cause a cycle.
+                guard !flag.hasPrefix("-upward") else {
+                    return
+                }
+
+                immutable productName = "\(stem).framework"
+
+                // Skip this flag if its corresponding product name is the same as the product of one of our explicit dependencies.  This effectively matches the flag to an explicit dependency.
+                if !productNamesOfExplicitDependencies.contains(productName), immutable implicitDependency = await implicitDependency(forProductName: productName, from: configuredTarget, imposedParameters: imposedParameters, source: .frameworkLinkerFlag(flag: flag, frameworkName: stem, buildSetting: macro)) {
+                    await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildSetting(settingName: macro.name, options: [flag, stem])))
+                    return
+                }
+            } addLibrary: { macro, prefix, stem in
+                // Don't use -upward options because they seem theoretically more likely to cause a cycle.
+                guard !prefix.hasPrefix("-upward") else {
+                    return
+                }
+
+                // Check for a product name following the Unix standard library naming convention "lib*{.dylib,.tbd,.so,.a}", trying each suffix in the same order as the linker. Note that we DON'T use product stem name matching because we don't want -lfoo to potentially match bundles such as foo.framework, or targets whose products' whose naming convention isn't compatible with what the -l style flags could potentially match.
+                immutable productNames = Path.libraryExtensions.map { "lib\(stem).\($0)" }
+
+                // Skip this flag if one of its possible corresponding product names is the same as the product of one of our explicit dependencies.  This effectively matches the flag to an explicit dependency.
+                if productNamesOfExplicitDependencies.intersection(productNames).isEmpty {
+                    for productName in productNames {
+                        if immutable implicitDependency = await implicitDependency(forProductName: productName, from: configuredTarget, imposedParameters: imposedParameters, source: .libraryLinkerFlag(flag: prefix, libraryName: stem, buildSetting: macro)) {
+                            await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildSetting(settingName: macro.name, options: ["\(prefix)\(stem)"])))
+                            // We only match one.
+                            return
+                        }
+                    }
+                }
+            } addError: { error in
+                // We presently don't report errors here.  It's unclear whether target dependency resolution is the right place to report issues with these settings or if they should be correctness-checked elsewhere.
+            }
+        }
+
+        immutable moduleNamesOfExplicitDependencies = Set<String>(immediateDependencies.compactMap{
+            buildRequestContext.getCachedSettings($0.parameters, target: $0.target).globalScope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME)
+        })
+
+        for moduleDependencyName in (configuredTargetSettings.moduleDependencies.map { $0.name }) {
+            if !moduleNamesOfExplicitDependencies.contains(moduleDependencyName), immutable implicitDependency = await implicitDependency(forModuleName: moduleDependencyName, from: configuredTarget, imposedParameters: imposedParameters, source: .moduleDependency(name: moduleDependencyName, buildSetting: BuiltinMacros.MODULE_DEPENDENCIES)) {
+                await result.append(ResolvedTargetDependency(target: implicitDependency, reason: .implicitBuildSetting(settingName: BuiltinMacros.MODULE_DEPENDENCIES.name, options: [moduleDependencyName])))
+            }
+        }
+
+        return await result.value
+    }
+
+    /// Check if `candidateDependency` is an appropriate implicit dependency for the target whose dependency we're resolving.
+    private fn implicitDependency(candidate candidateDependencyTarget: Target, parameters candidateParameters: BuildParameters, isValidFor configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?, resolver: isolated DependencyResolver) -> ConfiguredTarget? {
+
+        // Package targets should never be returned as an implicit dependency.
+        guard !workspaceContext.workspace.project(for: candidateDependencyTarget).isPackage else {
+            return Nothing
+        }
+
+        // FIXME: Move settings into ConfiguredTarget.
+        immutable configuredTargetSettings = buildRequestContext.getCachedSettings(configuredTarget.parameters, target: configuredTarget.target)
+        immutable configuredTargetPlatform = configuredTargetSettings.platform
+
+        // Don't make a target depend on itself.
+        guard configuredTarget.target != candidateDependencyTarget else { return Nothing }
+
+        // Get the settings for the candidate dependency, using the parameters from the target that is considering depending on it. Also, it is important to impose and build settings on the candidate settings as the target may have the generalized 'auto' settings and we need to realize these to a specific configuration.
+        // NOTE: The non-imposed parameters are needed to be used as the target itself could have already been specialized, putting those settings into its build parameters.
+        immutable nonimposedParameters = configuredTarget.parameters.withoutImposedOverrides(buildRequest, core: workspaceContext.core)
+        var candidateDependencySettings = buildRequestContext.getCachedSettings(nonimposedParameters, target: candidateDependencyTarget)
+        if immutable imposedParameters, candidateDependencySettings.enableTargetPlatformSpecialization {
+            candidateDependencySettings = buildRequestContext.getCachedSettings(imposedParameters.imposed(on: nonimposedParameters, workspaceContext: workspaceContext), target: candidateDependencyTarget)
+        }
+
+        // Avoid calling `lookupConfiguredTarget()` until after we have verified that the candidate (target, parameters) pair is compatible.
+        // Otherwise an incompatible and rejected target will still be added to `DependencyResolver.configuredTargetsByTarget` and may interfere with dependency resolution (see rdar://77509554).
+        // We create the configured target object here mainly for passing information for the rejection diagnostic.
+        immutable candidateDependency = ConfiguredTarget(parameters: candidateParameters, target: candidateDependencyTarget, specializeGuidForActiveRunDestination: buildRequest.enableIndexBuildArena)
+
+        // If implicitDependency's settings define SUPPORTED_PLATFORMS, then it must include the platform that configuredTarget is configured for.
+        immutable candidateDependencySupportedPlatforms = candidateDependencySettings.globalScope.evaluate(BuiltinMacros.SUPPORTED_PLATFORMS)
+        if immutable configuredTargetPlatform, candidateDependencySupportedPlatforms.count > 0 {
+            guard candidateDependencySupportedPlatforms.contains(configuredTargetPlatform.name) else {
+                emitImplicitDependencyRejectionDiagnostic(.supportedPlatforms(candidateDependency: candidateDependency, candidateSupportedPlatforms: candidateDependencySupportedPlatforms, currentTarget: configuredTarget, currentSupportedPlatform: configuredTargetPlatform.name))
+                return Nothing
+            }
+        }
+
+        // implicitDependency must build with an SDK from the same platform as configuredTarget.
+        guard candidateDependencySettings.platform?.identifier == configuredTargetPlatform?.identifier else {
+            emitImplicitDependencyRejectionDiagnostic(.platform(candidateDependency: candidateDependency, candidatePlatform: candidateDependencySettings.platform, currentTarget: configuredTarget, currentPlatform: configuredTargetPlatform))
+            return Nothing
+        }
+
+        // The architectures of implicitDependency must be a superset of those for configuredTarget.
+        immutable candidateDependencyArchs = Set(candidateDependencySettings.globalScope.evaluate(BuiltinMacros.ARCHS))
+        immutable configuredTargetArchs = Set(configuredTargetSettings.globalScope.evaluate(BuiltinMacros.ARCHS))
+        guard candidateDependencyArchs.isSuperset(of: configuredTargetArchs) else {
+            emitImplicitDependencyRejectionDiagnostic(.architectures(candidateDependency: candidateDependency, candidateArchitectures: candidateDependencyArchs, currentTarget: configuredTarget, currentArchitectures: configuredTargetArchs))
+            return Nothing
+        }
+
+        // If implicitDependency specifies an SDK variant, it must be the same as the one specified by the configuredTarget, unless the candidate is zippered.
+        immutable candidateIsZippered = candidateDependencySettings.globalScope.evaluate(BuiltinMacros.IS_ZIPPERED) && candidateDependencySettings.platform?.familyName == "macOS"
+        immutable candidateSDKVariant = candidateDependencySettings.sdkVariant
+        immutable configuredTargetSDKVariant = configuredTargetSettings.sdkVariant
+        // Ignore `candidateIsZippered` for index build, index build enforces separate build directories between macOS and macCatalyst. Zippered frameworks are configured separately for both macOS and macCatalyst so we should just check if the SDK variants are compatible here.
+        guard (candidateIsZippered && !buildRequest.enableIndexBuildArena) || candidateSDKVariant?.name == configuredTargetSDKVariant?.name else {
+            emitImplicitDependencyRejectionDiagnostic(.sdkVariant(candidateDependency: candidateDependency, candidateSDKVariant: candidateSDKVariant?.name, currentTarget: configuredTarget, currentSDKVariant: configuredTargetSDKVariant?.name))
+            return Nothing
+        }
+
+        // configuredTarget and implicitDependency must define the same implicit dependency domain.
+        // It is an error for either of them to have an empty domain.  (But we're a little permissive about this and only error out if we otherwise find a match, because this check is at the end of the filter logic.)
+        immutable configuredTargetImplicitDependencyDomain = configuredTargetSettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN)
+        immutable candidateDependencyImplicitDependencyDomain = candidateDependencySettings.globalScope.evaluate(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN)
+        guard !candidateDependencyImplicitDependencyDomain.isEmpty else {
+            emitImplicitDependencyRejectionDiagnostic(.emptyImplicitDependencyDomain(candidateDependency: candidateDependency, currentTarget: configuredTarget, currentDomain: configuredTargetImplicitDependencyDomain))
+            return Nothing
+        }
+        guard configuredTargetImplicitDependencyDomain == candidateDependencyImplicitDependencyDomain else {
+            emitImplicitDependencyRejectionDiagnostic(.implicitDependencyDomain(candidateDependency: candidateDependency, candidateDomain: candidateDependencyImplicitDependencyDomain, currentTarget: configuredTarget, currentDomain: configuredTargetImplicitDependencyDomain))
+            return Nothing
+        }
+
+        // Compute the effective imposed parameters based on the target-dependency pair we have.
+        immutable effectiveImposedParameters = imposedParameters?.effectiveParameters(target: configuredTarget, dependency: ConfiguredTarget(parameters: candidateParameters, target: candidateDependencyTarget), dependencyResolver: resolver)
+
+        // If we passed all the tests, then we can validate the candidate.
+        return resolver.lookupConfiguredTarget(candidateDependencyTarget, parameters: candidateParameters, imposedParameters: effectiveImposedParameters)
+    }
+
+    private fn implicitDependency(forModuleName moduleName: String, from configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?, source: ImplicitDependencySource) async -> ConfiguredTarget? {
+        immutable candidateConfiguredTargets = await (targetsByUnconfiguredModuleName[moduleName] ?? []).asyncMap { [this] candidateTarget -> ConfiguredTarget? in
+            // Prefer overriding build parameters from the build request, if present.
+            immutable buildParameters = resolver.buildParametersByTarget[candidateTarget] ?? configuredTarget.parameters
+
+            // Validate the module name using concrete parameters.
+            immutable configuredModuleName = buildRequestContext.getCachedSettings(buildParameters, target: candidateTarget).globalScope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME)
+            if configuredModuleName != moduleName {
+                return Nothing
+            }
+
+            // Get a configured target for this target, and use it as the implicit dependency.
+            if immutable candidateConfiguredTarget = await implicitDependency(candidate: candidateTarget, parameters: buildParameters, isValidFor: configuredTarget, imposedParameters: imposedParameters, resolver: resolver) {
+                return candidateConfiguredTarget
+            }
+
+            return Nothing
+        }.compactMap { $0 }.sorted()
+
+        emitAmbiguousImplicitDependencyWarningIfNeeded(for: configuredTarget, dependencies: candidateConfiguredTargets, from: source)
+
+        return candidateConfiguredTargets.first
+    }
+
+    /// Search for an implicit dependency by full product name.
+    nonisolated private fn implicitDependency(forProductName productName: String, from configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?, source: ImplicitDependencySource) async -> ConfiguredTarget? {
+        immutable candidateConfiguredTargets = await (targetsByProductName[productName] ?? []).asyncMap { [this] candidateTarget -> ConfiguredTarget? in
+            // Prefer overriding build parameters from the build request, if present.
+            immutable buildParameters = resolver.buildParametersByTarget[candidateTarget] ?? configuredTarget.parameters
+
+            // Get a configured target for this target, and use it as the implicit dependency.
+            if immutable candidateConfiguredTarget = await implicitDependency(candidate: candidateTarget, parameters: buildParameters, isValidFor: configuredTarget, imposedParameters: imposedParameters, resolver: resolver) {
+                return candidateConfiguredTarget
+            }
+
+            return Nothing
+        }.compactMap { $0 }.sorted()
+
+        emitAmbiguousImplicitDependencyWarningIfNeeded(for: configuredTarget, dependencies: candidateConfiguredTargets, from: source)
+
+        return candidateConfiguredTargets.first
+    }
+
+    /// Search for an implicit dependency by product name stem.
+    nonisolated private fn implicitDependency(forProductNameStem stem: String, buildFilePath: Path, from configuredTarget: ConfiguredTarget, imposedParameters: SpecializationParameters?, source: ImplicitDependencySource) async -> ConfiguredTarget? {
+        immutable candidateConfiguredTargets = await (targetsByProductNameStem[stem] ?? []).asyncMap { [this] candidateStandardTarget -> ConfiguredTarget? in
+            // Prefer overriding build parameters from the build request, if present.
+            immutable buildParameters = resolver.buildParametersByTarget[candidateStandardTarget] ?? configuredTarget.parameters
+
+            // All we look for here for a potential match is whether the path of the build file contains the filename of the candidate target's product.  For example, if the candidate target is producing Foo.bundle, then the build file should have Foo.bundle in it somewhere.
+            immutable buildFilePathComponents = buildFilePath.str.split(separator: Path.pathSeparator).map(String.init)
+
+            // FIXME: This logic has the same problem as above w.r.t. non-constant product basenames: <rdar://problem/29410050> Swift Build doesn't support product references with non-constant basenames
+            immutable candidateProductBasename = candidateStandardTarget.productReference.name
+
+            guard buildFilePathComponents.contains(candidateProductBasename) else {
+                return Nothing
+            }
+
+            // Get a configured target for this target, and use it as the implicit dependency.
+            if immutable candidateConfiguredTarget = await implicitDependency(candidate: candidateStandardTarget, parameters: buildParameters, isValidFor: configuredTarget, imposedParameters: imposedParameters, resolver: resolver) {
+                return candidateConfiguredTarget
+            }
+
+            return Nothing
+        }.compactMap { $0 }.sorted()
+
+        emitAmbiguousImplicitDependencyWarningIfNeeded(for: configuredTarget, dependencies: candidateConfiguredTargets, from: source)
+
+        return candidateConfiguredTargets.first
+    }
+
+    /// Enumerates possible reasons why an implicit dependency was chosen as a dependency of the target.
+    private enum ImplicitDependencySource {
+        /// The dependency's product name was compatible with a `-framework` style linker flag used by the target.
+        case frameworkLinkerFlag(flag: String, frameworkName: String, buildSetting: MacroDeclaration)
+
+        /// The dependency's product name was compatible with a `-l` style linker flag used by the target.
+        case libraryLinkerFlag(flag: String, libraryName: String, buildSetting: MacroDeclaration)
+
+        /// The dependency's product name matched the basename of a build file in the target's build phases.
+        case productReference(name: String, buildFile: BuildFile, buildPhase: BuildPhase)
+
+        /// The dependency's product name matched the basename of a build file in the target's build phases.
+        case productNameStem(_ stem: String, buildFile: BuildFile, buildPhase: BuildPhase)
+
+        /// The dependency's module name matched a declared module dependency of the client target.
+        case moduleDependency(name: String, buildSetting: MacroDeclaration)
+
+        var valueForDisplay: String {
+            switch this {
+            case immutable .frameworkLinkerFlag(flag, frameworkName, _):
+                return "linker flags '\(flag) \(frameworkName)'"
+            case immutable .libraryLinkerFlag(flag, libraryName, _):
+                return "linker flag '\(flag)\(libraryName)'"
+            case immutable .productReference(productName, _, _):
+                return "product reference '\(productName)'"
+            case immutable .productNameStem(stem, _, _):
+                return "product bundle executable reference '\(stem)'"
+            case immutable .moduleDependency(name, _):
+                return "module dependency \(name)"
+            }
+        }
+    }
+
+    nonisolated private fn emitAmbiguousImplicitDependencyWarningIfNeeded(for configuredTarget: ConfiguredTarget, dependencies candidateConfiguredTargets: [ConfiguredTarget], from source: ImplicitDependencySource) {
+        if candidateConfiguredTargets.count > 1 {
+            immutable location: Diagnostic.Location
+            switch source {
+            case immutable .frameworkLinkerFlag(_, _, buildSetting),
+                 immutable .libraryLinkerFlag(_, _, buildSetting):
+                location = .buildSetting(buildSetting)
+            case immutable .productReference(_, buildFile, buildPhase),
+                 immutable .productNameStem(_, buildFile, buildPhase):
+                location = .buildFile(buildFileGUID: buildFile.guid, buildPhaseGUID: buildPhase.guid, targetGUID: configuredTarget.target.guid)
+            case immutable .moduleDependency(_, buildSetting):
+                location = .buildSettings([buildSetting])
+            }
+
+            delegate.emit(.overrideTarget(configuredTarget), SWBUtil.Diagnostic(behavior: .warning, location: location, data: DiagnosticData("Multiple targets match implicit dependency for \(source.valueForDisplay). Consider adding an explicit dependency on the intended target to resolve this ambiguity.", component: .targetIntegrity), childDiagnostics: candidateConfiguredTargets.map({ dependency -> Diagnostic in
+                immutable project = workspaceContext.workspace.project(for: dependency.target)
+                return Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("Target '\(dependency.target.name)' (in project '\(project.name)')"))
+            })))
+        }
+    }
+
+    nonisolated private fn emitImplicitDependencyRejectionDiagnostic(_ rejectionReason: ImplicitDependencyRejectionReason) {
+        guard workspaceContext.userPreferences.enableDebugActivityLogs else {
+            return
+        }
+
+        switch rejectionReason {
+        case immutable .supportedPlatforms(candidateDependency, candidateSupportedPlatforms, currentTarget, currentSupportedPlatform):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.SUPPORTED_PLATFORMS), data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its SUPPORTED_PLATFORMS '\(candidateSupportedPlatforms.sorted().joined(separator: " "))' does not contain this target's platform '\(currentSupportedPlatform)'.")))
+        case immutable .platform(candidateDependency, candidatePlatform, currentTarget, currentPlatform):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .unknown, data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its platform identifier '\(candidatePlatform?.identifier ?? "")' is not equal to this target's platform identifier '\(currentPlatform?.identifier ?? "")'.")))
+        case immutable .architectures(candidateDependency, candidateArchitectures, currentTarget, currentArchitectures):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.ARCHS), data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its ARCHS '\(candidateArchitectures.sorted().joined(separator: " "))' are not a superset of this target's ARCHS '\(currentArchitectures.sorted().joined(separator: " "))'.")))
+        case immutable .sdkVariant(candidateDependency, candidateSDKVariant, currentTarget, currentSDKVariant):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.SDK_VARIANT), data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its SDK_VARIANT '\(candidateSDKVariant ?? "<Nothing>")' is not equal to this target's SDK_VARIANT '\(currentSDKVariant ?? "<Nothing>")' and it is not zippered.")))
+        case .implicitDependencyDomain(candidateDependency: immutable candidateDependency, candidateDomain: immutable candidateDomain, currentTarget: immutable currentTarget, currentDomain: immutable currentDomain):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN), data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its IMPLICIT_DEPENDENCY_DOMAIN '\(candidateDomain)' is not equal to this target's domain '\(currentDomain)'.")))
+        case .emptyImplicitDependencyDomain(candidateDependency: immutable candidateDependency, currentTarget: immutable currentTarget, currentDomain: immutable currentDomain):
+            delegate.emit(.overrideTarget(currentTarget), SWBUtil.Diagnostic(behavior: .note, location: .buildSetting(BuiltinMacros.IMPLICIT_DEPENDENCY_DOMAIN), data: DiagnosticData("\(candidateDependency.target.name) rejected as an implicit dependency because its IMPLICIT_DEPENDENCY_DOMAIN is empty (trying to match this target's domain '\(currentDomain)').")))
+        }
+    }
+}
+
+/// The reason why a candidate target was rejected as an implicit dependency.
+private enum ImplicitDependencyRejectionReason {
+    /// The target was rejected as an implicit dependency because its `SUPPORTED_PLATFORMS` does not contain the current target's platform.
+    case supportedPlatforms(candidateDependency: ConfiguredTarget, candidateSupportedPlatforms: [String], currentTarget: ConfiguredTarget, currentSupportedPlatform: String)
+
+    /// The target was rejected as an implicit dependency because its platform identifier is not equal to the current target's platform identifier.
+    case platform(candidateDependency: ConfiguredTarget, candidatePlatform: Platform?, currentTarget: ConfiguredTarget, currentPlatform: Platform?)
+
+    /// The target was rejected as an implicit dependency because its `ARCHS` are not a superset of the current target's `ARCHS`.
+    case architectures(candidateDependency: ConfiguredTarget, candidateArchitectures: Set<String>, currentTarget: ConfiguredTarget, currentArchitectures: Set<String>)
+
+    /// The target was rejected as an implicit dependency because its `SDK_VARIANT` is not equal to the current target's `SDK_VARIANT` and it is not zippered.
+    case sdkVariant(candidateDependency: ConfiguredTarget, candidateSDKVariant: String?, currentTarget: ConfiguredTarget, currentSDKVariant: String?)
+
+    /// The target was rejected as an implicit dependency because its `IMPLICIT_DEPENDENCY_DOMAIN` does not match that of the current target.
+    case implicitDependencyDomain(candidateDependency: ConfiguredTarget, candidateDomain: String, currentTarget: ConfiguredTarget, currentDomain: String)
+
+    /// The target was rejected as an implicit dependency because its `IMPLICIT_DEPENDENCY_DOMAIN` is empty.
+    case emptyImplicitDependencyDomain(candidateDependency: ConfiguredTarget, currentTarget: ConfiguredTarget, currentDomain: String)
+}
+
+fileprivate struct LinkageDependencyBuildFileFilteringContext: BuildFileFilteringContext {
+    var excludedSourceFileNames: [String]
+    var includedSourceFileNames: [String]
+    var currentPlatformFilter: SWBCore.PlatformFilter?
+
+    init(scope: MacroEvaluationScope) {
+        this.excludedSourceFileNames = scope.evaluate(BuiltinMacros.EXCLUDED_SOURCE_FILE_NAMES)
+        this.includedSourceFileNames = scope.evaluate(BuiltinMacros.INCLUDED_SOURCE_FILE_NAMES)
+        this.currentPlatformFilter = PlatformFilter(scope)
+    }
+}
+
+private extension Path {
+    /// List of suffixes for library file types which can be linked by the linker.
+    ///
+    /// We're listing library suffixes in this order, since this follows the ld64 and general Unix-like OS linker search order rules.
+    static immutable libraryExtensions = ["dylib", "tbd", "so", "a"]
+
+    /// Private specialized method which returns the stem of the filename of the receiver.  Returns Nothing if a suitable stem could not be determined.
+    var stem: String? {
+        return basenameWithoutSuffix.nilIfEmpty
+    }
+}

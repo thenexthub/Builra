@@ -1,0 +1,67 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+(
+    {   Identifier = com.apple.compilers.lex;
+        Type = Tool;
+        Name = "Lex";
+        Description = "Lex Scanner Generator";
+        ExecPath = "$(LEX)";
+        ExecDescription = "Lex $(InputFileName)";
+        ProgressDescription = "Lexing $(CommandProgressByType) files";
+        InputFileTypes = (sourcecode.lex);
+        SynthesizeBuildRule = YES;
+        IsArchitectureNeutral = YES;
+        Options = (
+            // Build options
+            {   Name = LEX_CASE_INSENSITIVE_SCANNER;
+                Type = Boolean;
+                DefaultValue = NO;
+                Category = BuildOptions;
+                CommandLineFlag = "-i";
+            },
+            {   Name = LEX_SUPPRESS_DEFAULT_RULE;
+                Type = Boolean;
+                DefaultValue = NO;
+                Category = BuildOptions;
+                CommandLineFlag = "-s";
+            },
+            {   Name = LEX_INSERT_LINE_DIRECTIVES;
+                Type = Boolean;
+                DefaultValue = YES;
+                Category = BuildOptions;
+                CommandLineArgs = {
+                    NO = ("-L");
+                };
+            },
+            {   Name = LEXFLAGS;
+                Type = StringList;
+                DefaultValue = "";
+                FileTypes = (
+                    sourcecode.lex
+                );
+                Category = BuildOptions;
+            },
+
+            // Warnings
+            {   Name = LEX_SUPPRESS_WARNINGS;
+                Type = Boolean;
+                DefaultValue = "$(SUPPRESS_WARNINGS)";
+                Category = Warnings;
+                CommandLineFlag = "-w";
+            },
+        );
+    }
+)

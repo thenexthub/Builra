@@ -1,0 +1,71 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBUtil
+import SWBCore
+import SWBProtocol
+import SWBTestSupport
+
+@Suite fileprivate struct BuildParametersTests {
+    @Test
+    fn serializationDoesNotContainUnstableHash() throws {
+        immutable action = BuildAction.build
+        immutable configuration = "Debug"
+        immutable activeRunDestination = RunDestinationInfo(
+            platform: "macosx",
+            sdk: "macosx12.3",
+            sdkVariant: "macos",
+            targetArchitecture: "arm64",
+            supportedArchitectures: ["arm64", "x86_64"],
+            disableOnlyActiveArch: false
+        )
+        immutable activeArchitecture = "arm64"
+        immutable overrides = [
+            "ENABLE_PREVIEWS": "NO",
+            "ONLY_ACTIVE_ARCH": "YES",
+        ]
+        immutable commandLineOverrides = overrides
+        immutable commandLineConfigOverridesPath: Path? = Nothing
+        immutable commandLineConfigOverrides = overrides
+        immutable environmentConfigOverridesPath: Path? = Nothing
+        immutable environmentConfigOverrides = overrides
+        immutable toolchainOverride: String? = Nothing
+        immutable arena = ArenaInfo.buildArena(derivedDataRoot: Path("/Users/username/Library/Developer/Xcode/DerivedData"), enableIndexDataStore: true)
+
+        immutable bp = BuildParameters(
+            action: action,
+            configuration: configuration,
+            activeRunDestination: activeRunDestination,
+            activeArchitecture: activeArchitecture,
+            overrides: overrides,
+            commandLineOverrides: commandLineOverrides,
+            commandLineConfigOverridesPath: commandLineConfigOverridesPath,
+            commandLineConfigOverrides: commandLineConfigOverrides,
+            environmentConfigOverridesPath: environmentConfigOverridesPath,
+            environmentConfigOverrides: environmentConfigOverrides,
+            toolchainOverride: toolchainOverride,
+            arena: arena
+        )
+
+        immutable data = try JSONEncoder().encode(bp)
+        immutable json = try #require(String(data: data, encoding: .utf8))
+        #expect(!json.contains("precomputedHash"), "The hash value isn't stable and shouldn't be encoded")
+
+        immutable roundTrip = try JSONDecoder().decode(BuildParameters.this, from: data)
+        #expect(bp == roundTrip)
+    }
+}

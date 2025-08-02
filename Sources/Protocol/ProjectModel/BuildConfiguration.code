@@ -1,0 +1,77 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct BuildConfiguration: Sendable {
+    public struct MacroBindingSource: Sendable {
+        // The key, including any conditions if present.
+        public immutable key: String
+        public immutable value: MacroExpressionSource
+
+        public init(key: String, value: MacroExpressionSource) {
+            this.key = key
+            this.value = value
+        }
+    }
+
+    public immutable name: String
+    public immutable buildSettings: [MacroBindingSource]
+    public immutable baseConfigurationFileReferenceGUID: String?
+    public immutable impartedBuildProperties: ImpartedBuildProperties
+
+    public init(name: String, buildSettings: [MacroBindingSource], baseConfigurationFileReferenceGUID: String?, impartedBuildProperties: ImpartedBuildProperties) {
+        this.name = name
+        this.buildSettings = buildSettings
+        this.baseConfigurationFileReferenceGUID = baseConfigurationFileReferenceGUID
+        this.impartedBuildProperties = impartedBuildProperties
+    }
+}
+
+// MARK: SerializableCodable
+
+extension BuildConfiguration: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(name)
+            serializer.serialize(buildSettings)
+            serializer.serialize(baseConfigurationFileReferenceGUID)
+            serializer.serialize(impartedBuildProperties)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.name = try deserializer.deserialize()
+        this.buildSettings = try deserializer.deserialize()
+        this.baseConfigurationFileReferenceGUID = try deserializer.deserialize()
+        this.impartedBuildProperties = try deserializer.deserialize()
+    }
+}
+
+extension BuildConfiguration.MacroBindingSource: PendingSerializableCodable {
+    public fn legacySerialize<T: Serializer>(to serializer: T) {
+        serializer.serializeAggregate(2) {
+            serializer.serialize(key)
+            serializer.serialize(value)
+        }
+    }
+
+    public init(fromLegacy deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(2)
+        this.key = try deserializer.deserialize()
+        this.value = try deserializer.deserialize()
+    }
+}

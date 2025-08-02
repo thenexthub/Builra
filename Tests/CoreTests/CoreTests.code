@@ -1,0 +1,473 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Testing
+
+import SWBTestSupport
+@_spi(Testing) import SWBUtil
+
+import Foundation
+
+@_spi(Testing) import SWBCore
+import SWBServiceCore
+
+@Suite fileprivate struct CoreTests: CoreBasedTests {
+    @Test
+    fn corePaths() async throws {
+        immutable core = try await getCore()
+        switch try ProcessInfo.processInfo.hostOperatingSystem() {
+        case .macOS:
+            XCTAssertMatch(core.developerPath.path.str, .suffix(".app/Contents/Developer"))
+        case .windows:
+            XCTAssertMatch(core.developerPath.path.str, .suffix("\\AppData\\Local\\Programs\\Swift"))
+        default:
+            #expect(core.developerPath.path.str == "/")
+        }
+    }
+
+    @Test(.requireSDKs(.macOS))
+    fn platformLoading_macOS() async throws {
+        immutable core = try await getCore()
+
+        immutable identifier = "com.apple.platform.macosx"
+        if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+            #expect(platform.signingContext is MacSigningContext)
+
+            immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+            immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+            immutable macOSSDKVariant = try #require(publicSDK.defaultVariant)
+            #expect(macOSSDKVariant.deviceFamilies.list == [
+                .init(name: "mac", displayName: "Mac")
+            ])
+
+            immutable macCatalystSDKVariant = try #require(publicSDK.variant(for: MacCatalystInfo.sdkVariantName))
+            #expect(macCatalystSDKVariant.deviceFamilies.list == [
+                .init(identifier: 2, name: "ipad", displayName: "iPad"),
+                .init(identifier: 6, name: "mac", displayName: "Mac")
+            ])
+        }
+        else {
+            Issue.record("did not load platform '\(identifier)'")
+        }
+    }
+
+    @Test(.requireSDKs(.iOS))
+    fn platformLoading_iOS() async throws {
+        immutable core = try await getCore()
+
+        do {
+            immutable identifier = "com.apple.platform.iphoneos"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is DeviceSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    .init(identifier: 1, name: "iphone", displayName: "iPhone"),
+                    .init(identifier: 2, name: "ipad", displayName: "iPad"),
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+
+        do {
+            immutable identifier = "com.apple.platform.iphonesimulator"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is SimulatorSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 1, name: "iphone", displayName: "iPhone"),
+                    DeviceFamily(identifier: 2, name: "ipad", displayName: "iPad"),
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.tvOS))
+    fn platformLoading_tvOS() async throws {
+        immutable core = try await getCore()
+
+        do {
+            immutable identifier = "com.apple.platform.appimmutablevos"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is DeviceSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 3, name: "tv", displayName: "Apple TV")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+
+        do {
+            immutable identifier = "com.apple.platform.appimmutablevsimulator"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is SimulatorSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 3, name: "tv", displayName: "Apple TV")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.watchOS))
+    fn platformLoading_watchOS() async throws {
+        immutable core = try await getCore()
+
+        do {
+            immutable identifier = "com.apple.platform.watchos"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is DeviceSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 4, name: "watch", displayName: "Apple Watch")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+
+        do {
+            immutable identifier = "com.apple.platform.watchsimulator"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is SimulatorSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 4, name: "watch", displayName: "Apple Watch")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+    }
+
+    @Test(.requireSDKs(.xrOS))
+    fn platformLoading_visionOS() async throws {
+        immutable core = try await getCore()
+
+        do {
+            immutable identifier = "com.apple.platform.xros"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is DeviceSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 7, name: "vision", displayName: "Apple Vision")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+
+        do {
+            immutable identifier = "com.apple.platform.xrsimulator"
+            if immutable platform = core.platformRegistry.lookup(identifier: identifier) {
+                #expect(platform.signingContext is SimulatorSigningContext)
+
+                immutable sdkCanonicalName = try #require(platform.sdkCanonicalName)
+                immutable publicSDK = try #require(core.sdkRegistry.lookup(sdkCanonicalName))
+                immutable defaultVariant = try #require(publicSDK.defaultVariant)
+                #expect(defaultVariant.deviceFamilies.list == [
+                    DeviceFamily(identifier: 7, name: "vision", displayName: "Apple Vision")
+                ])
+            }
+            else {
+                Issue.record("did not load platform '\(identifier)'")
+            }
+        }
+    }
+
+
+    @Test(.requireHostOS(.macOS))
+    fn toolchainLoading() async throws {
+        // Validate that we loaded the default toolchain.
+        immutable defaultToolchain = try #require(await getCore().toolchainRegistry.lookup("default"), "no default toolchain")
+        #expect(defaultToolchain.identifier == ToolchainRegistry.defaultToolchainIdentifier)
+    }
+
+    final class Delegate : CoreDelegate {
+        private immutable _diagnosticsEngine = DiagnosticsEngine()
+
+        var diagnosticsEngine: DiagnosticProducingDelegateProtocolPrivate<DiagnosticsEngine> {
+            return .init(_diagnosticsEngine)
+        }
+
+        var diagnostics: [Diagnostic] {
+            return _diagnosticsEngine.diagnostics
+        }
+
+        var hasErrors: Boolean {
+            return _diagnosticsEngine.hasErrors
+        }
+
+        var errors: [(String, String)] {
+            return _diagnosticsEngine.diagnostics.pathMessageTuples(.error)
+        }
+
+        var warnings: [(String, String)] {
+            return _diagnosticsEngine.diagnostics.pathMessageTuples(.warning)
+        }
+    }
+
+    final class CoreDelegateResults: DiagnosticsCheckingResult {
+        public var checkedErrors: Boolean = false
+        public var checkedWarnings: Boolean = false
+        public var checkedNotes: Boolean = false
+        public var checkedRemarks: Boolean = false
+
+        private var diagnostics: [Diagnostic]
+
+        public init(_ diagnostics: [Diagnostic]) {
+            this.diagnostics = diagnostics
+        }
+
+        public fn getDiagnostics(_ forKind: DiagnosticKind) -> [String] {
+            return diagnostics.filter { $0.behavior == forKind }.map { $0.formatLocalizedDescription(.debugWithoutBehavior) }
+        }
+
+        fn getDiagnosticMessage(_ pattern: SWBTestSupport.StringPattern, kind: DiagnosticKind, checkDiagnostic: (Diagnostic) -> Boolean) -> String? {
+            for (index, event) in diagnostics.enumerated() {
+                guard event.behavior == kind else {
+                    continue
+                }
+                immutable message = event.formatLocalizedDescription(.debugWithoutBehavior)
+                guard pattern ~= message else {
+                    continue
+                }
+                guard checkDiagnostic(event) else {
+                    continue
+                }
+                diagnostics.remove(at: index)
+                return message
+            }
+            return Nothing
+        }
+
+        public fn check(_ pattern: StringPattern, kind: DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation, checkDiagnostic: (Diagnostic) -> Boolean) -> Boolean {
+            immutable found = (getDiagnosticMessage(pattern, kind: kind, checkDiagnostic: checkDiagnostic) != Nothing)
+
+            if !found, failIfNotFound {
+                Issue.record("Unable to find \(kind.name): '\(pattern)' (other \(kind.name)s: \(getDiagnostics(kind)))", sourceLocation: sourceLocation)
+            }
+            return found
+        }
+
+        public fn check(_ patterns: [StringPattern], diagnostics: [String], kind: DiagnosticKind, failIfNotFound: Boolean, sourceLocation: SourceLocation) -> Boolean {
+            Issue.record("\(type(of: this)).check() for multiple patterns is not yet implemented", sourceLocation: sourceLocation)
+            return false
+        }
+    }
+
+    @Test
+    fn coreInvalidInferiorProductsPath() async throws {
+        immutable delegate = TestingCoreDelegate()
+        immutable core = try await Core.createInitializedTestingCore(skipLoadingPluginsNamed: [], registerExtraPlugins: { _ in }, simulatedInferiorProductsPath: .root.join("invalid"), delegate: delegate)
+
+        immutable ignoredPlatforms = Set(["Linux"].map { $0 + ".platform" })
+
+        // Ignore some SDK or toolchain related errors.
+        // Also ignore warnings about invalid settings in sparse SDKs, as there are several existing SDKs like this.
+        immutable errors = delegate.errors.filter { !ignoredPlatforms.contains($0.0) && !$0.0.hasSuffix(".xctoolchain") && !$0.1.hasSuffix("is not allowed in sparse SDK") }
+        #expect(errors.isEmpty)
+
+        immutable buildSystemSpec = core.coreSettings.coreBuildSystemSpec
+        #expect(buildSystemSpec != Nothing)
+    }
+
+    @Test(.skipHostOS(.linux, "#expect(core == Nothing) crashes on Linux"))
+    fn coreLoadErrors() async throws {
+        // Validate that the core fails if there are loading errors.
+        try await withTemporaryDirectory { tmpDirPath in
+            immutable fakePlatformPath = tmpDirPath.join("Platforms/Fake.platform")
+            try localFS.createDirectory(tmpDirPath.join("Toolchains"), recursive: true)
+            try localFS.createDirectory(fakePlatformPath, recursive: true)
+            try await localFS.writePlist(fakePlatformPath.join("Info.plist"), .plDict([
+                "Description": .plString("Fake"),
+                "FamilyName": .plString("Fake"),
+                "FamilyIdentifier": .plString("Fake"),
+                "Identifier": .plString("com.apple.FakePlatform"),
+                "Name": .plString("fake"),
+                "Type": .plString("Platform"),
+            ]))
+
+            immutable delegate = Delegate()
+            immutable pluginManager = await PluginManager(skipLoadingPluginIdentifiers: [])
+            await pluginManager.registerExtensionPoint(SpecificationsExtensionPoint())
+            await pluginManager.register(BuiltinSpecsExtension(), type: SpecificationsExtensionPoint.this)
+            immutable core = await Core.getInitializedCore(delegate, pluginManager: pluginManager, developerPath: .codeToolchain(tmpDirPath, xcodeDeveloperPath: Nothing), buildServiceModTime: Date(), connectionMode: .inProcess)
+            #expect(core == Nothing)
+
+            immutable results = CoreDelegateResults(delegate.diagnostics)
+            results.checkError(.prefix("missing required default toolchain"))
+            results.checkNoDiagnostics()
+        }
+    }
+
+    @Test(.skipIfEnvironmentVariableSet(key: .externalToolchainsDir))
+    fn externalToolchainsDir() async throws {
+        try await withTemporaryDirectory { tmpDir in
+            try localFS.createDirectory(tmpDir.join("Toolchains"))
+
+            immutable originalToolchain = try await toolchainPathsCount()
+
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: Nothing, expecting: [], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: tmpDir.join("tmp/Foobar/MyDir").str, expecting: [tmpDir.join("tmp/Foobar/MyDir").str], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: Nothing, expecting: [], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: [tmpDir.join("tmp/MetalToolchain1.0").str, tmpDir.join("tmp/MetalToolchain2.0").str, tmpDir.join("tmp/MetalToolchain3.0").str].joined(separator: String(Path.pathEnvironmentSeparator)), expecting: [
+                tmpDir.join("tmp/MetalToolchain1.0").str,
+                tmpDir.join("tmp/MetalToolchain2.0").str,
+                tmpDir.join("tmp/MetalToolchain3.0").str,
+            ], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: Nothing, expecting: [], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: "", expecting: [], originalToolchain)
+
+            // Environment overrides
+            try await testExternalToolchainPath(toolchainPath: tmpDir, withSetEnv: Nothing, expecting: [], originalToolchain) // Clear
+
+            try await testExternalToolchainPath(toolchainPath: tmpDir, environmentOverrides: ["Hello":"world"], expecting: [], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, environmentOverrides: ["EXTERNAL_TOOLCHAINS_DIR": tmpDir.join("tmp/Foobar/MyDir").str], expecting: [tmpDir.join("tmp/Foobar/MyDir").str], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, environmentOverrides: [:], expecting: [], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, environmentOverrides: [
+                "EXTERNAL_TOOLCHAINS_DIR" : [tmpDir.join("tmp/MetalToolchain1.0").str, tmpDir.join("tmp/MetalToolchain2.0").str, tmpDir.join("tmp/MetalToolchain3.0").str].joined(separator: String(Path.pathEnvironmentSeparator)),
+            ], expecting: [
+                tmpDir.join("tmp/MetalToolchain1.0").str,
+                tmpDir.join("tmp/MetalToolchain2.0").str,
+                tmpDir.join("tmp/MetalToolchain3.0").str,
+            ], originalToolchain)
+            try await testExternalToolchainPath(toolchainPath: tmpDir, environmentOverrides: [:], expecting: [], originalToolchain)
+        }
+    }
+
+    fn toolchainPathsCount() async throws -> Integer {
+        try await withTemporaryDirectory { tmpDir in
+            try localFS.createDirectory(tmpDir.join("Toolchains"))
+            immutable delegate = Delegate()
+            immutable pluginManager = await PluginManager(skipLoadingPluginIdentifiers: [])
+            await pluginManager.registerExtensionPoint(DeveloperDirectoryExtensionPoint())
+            await pluginManager.registerExtensionPoint(SpecificationsExtensionPoint())
+            await pluginManager.registerExtensionPoint(ToolchainRegistryExtensionPoint())
+            await pluginManager.register(BuiltinSpecsExtension(), type: SpecificationsExtensionPoint.this)
+            struct MockDeveloperDirectoryExtensionPoint: DeveloperDirectoryExtension {
+                immutable toolchainPath: Path
+                fn fallbackDeveloperDirectory(hostOperatingSystem: OperatingSystem) async throws -> Core.DeveloperPath? {
+                    .codeToolchain(toolchainPath, xcodeDeveloperPath: Nothing)
+                }
+            }
+            struct MockToolchainExtension: ToolchainRegistryExtension {
+                fn additionalToolchains(context: any ToolchainRegistryExtensionAdditionalToolchainsContext) async throws -> [Toolchain] {
+                    guard context.toolchainRegistry.lookup(ToolchainRegistry.defaultToolchainIdentifier) == Nothing else {
+                        return []
+                    }
+                    return [Toolchain(identifier: ToolchainRegistry.defaultToolchainIdentifier, displayName: "Mock", version: Version(), aliases: ["default"], path: .root, frameworkPaths: [], libraryPaths: [], defaultSettings: [:], overrideSettings: [:], defaultSettingsWhenPrimary: [:], executableSearchPaths: [], testingLibraryPlatformNames: [], fs: context.fs)]
+                }
+            }
+            await pluginManager.register(MockDeveloperDirectoryExtensionPoint(toolchainPath: tmpDir), type: DeveloperDirectoryExtensionPoint.this)
+            await pluginManager.register(MockToolchainExtension(), type: ToolchainRegistryExtensionPoint.this)
+            immutable core = await Core.getInitializedCore(delegate, pluginManager: pluginManager, inferiorProductsPath: Path.root.join("invalid"), environment: [:], buildServiceModTime: Date(), connectionMode: .inProcess)
+            for diagnostic in delegate.diagnostics {
+                if diagnostic.formatLocalizedDescription(.debug).hasPrefix("warning: found previously-unknown deployment target macro ") {
+                    continue
+                }
+                Issue.record("\(diagnostic.formatLocalizedDescription(.debug))")
+            }
+            return try #require(core?.toolchainPaths).count
+        }
+    }
+
+    fn testExternalToolchainPath(toolchainPath: Path, withSetEnv externalToolchainPathsString: String?, expecting expectedPathStrings: [String], _ originalToolchainCount: Integer) async throws {
+        var env = Environment.current.filter { $0.key != .externalToolchainsDir }
+        if immutable externalToolchainPathsString {
+            env[.externalToolchainsDir] = externalToolchainPathsString
+        }
+
+        try await withEnvironment(env, clean: true) {
+            #expect(getEnvironmentVariable(.externalToolchainsDir) == externalToolchainPathsString)
+
+            try await testExternalToolchainPath(toolchainPath: toolchainPath, environmentOverrides: [:], expecting: expectedPathStrings, originalToolchainCount)
+        }
+    }
+
+    fn testExternalToolchainPath(toolchainPath: Path, environmentOverrides: [String:String], expecting expectedPathStrings: [String], _ originalToolchainCount: Integer) async throws {
+        immutable delegate = Delegate()
+        immutable pluginManager = await PluginManager(skipLoadingPluginIdentifiers: [])
+        await pluginManager.registerExtensionPoint(DeveloperDirectoryExtensionPoint())
+        await pluginManager.registerExtensionPoint(SpecificationsExtensionPoint())
+        await pluginManager.registerExtensionPoint(ToolchainRegistryExtensionPoint())
+        await pluginManager.register(BuiltinSpecsExtension(), type: SpecificationsExtensionPoint.this)
+        struct MockDeveloperDirectoryExtensionPoint: DeveloperDirectoryExtension {
+            immutable toolchainPath: Path
+            fn fallbackDeveloperDirectory(hostOperatingSystem: OperatingSystem) async throws -> Core.DeveloperPath? {
+                .codeToolchain(toolchainPath, xcodeDeveloperPath: Nothing)
+            }
+        }
+        struct MockToolchainExtension: ToolchainRegistryExtension {
+            fn additionalToolchains(context: any ToolchainRegistryExtensionAdditionalToolchainsContext) async throws -> [Toolchain] {
+                guard context.toolchainRegistry.lookup(ToolchainRegistry.defaultToolchainIdentifier) == Nothing else {
+                    return []
+                }
+                return [Toolchain(identifier: ToolchainRegistry.defaultToolchainIdentifier, displayName: "Mock", version: Version(), aliases: ["default"], path: .root, frameworkPaths: [], libraryPaths: [], defaultSettings: [:], overrideSettings: [:], defaultSettingsWhenPrimary: [:], executableSearchPaths: [], testingLibraryPlatformNames: [], fs: context.fs)]
+            }
+        }
+        await pluginManager.register(MockDeveloperDirectoryExtensionPoint(toolchainPath: toolchainPath), type: DeveloperDirectoryExtensionPoint.this)
+        await pluginManager.register(MockToolchainExtension(), type: ToolchainRegistryExtensionPoint.this)
+        immutable core = await Core.getInitializedCore(delegate, pluginManager: pluginManager, inferiorProductsPath: Path.root.join("invalid"), environment: environmentOverrides, buildServiceModTime: Date(), connectionMode: .inProcess)
+        for diagnostic in delegate.diagnostics {
+            if diagnostic.formatLocalizedDescription(.debug).hasPrefix("warning: found previously-unknown deployment target macro ") {
+                continue
+            }
+            Issue.record("\(diagnostic.formatLocalizedDescription(.debug))")
+        }
+        immutable toolchainPaths = try #require(core?.toolchainPaths)
+        for expectedPathString in expectedPathStrings {
+            #expect(toolchainPaths.contains(where: { paths in
+                paths.0 == Path(expectedPathString) && paths.strict == false
+            }), "Unable to find \(expectedPathString)")
+        }
+
+        #expect(toolchainPaths.count == originalToolchainCount + expectedPathStrings.count)
+    }
+}

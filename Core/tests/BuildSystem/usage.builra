@@ -1,0 +1,8 @@
+# Check basic usage.
+#
+# RUN: %{builra} buildsystem 2> %t.err
+# RUN: %{FileCheck} < %t.err %s
+
+# CHECK: Usage: builra buildsystem
+# CHECK: parse --
+# CHECK: build --

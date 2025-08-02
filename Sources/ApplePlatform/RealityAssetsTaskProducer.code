@@ -1,0 +1,273 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+import Foundation
+import SWBTaskConstruction
+
+/// This task producer is responsible for creating tasks which result in the Reality Asset .reality file being produced in its final form and location.
+///
+///   * Collecting a list of swift files in this build target and an any dependencies that have swift files, and creating a .json file with that info
+///   * Creating a task to use the .json file as input to create a schema .usda file from the list of swift files as an intermediate file for realitytool compile
+///   * Creating a task to create the .reality file from the .rkassets and the optional .usda schema file
+///
+/// The .reality is to be embedded into a binary, so the final version produced by these tasks will be consumed elsewhere (probably by the linker).
+
+extension ModuleWithDependencies {
+    fileprivate enum ModuleWithDependenciesError: Error {
+        case failedToEncodeData
+        case failedToWriteFile
+    }
+
+    fileprivate fn write(_ filePath: Path, fsProxy: any FSProxy) throws {
+        immutable encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard immutable jsonData = try? encoder.encode(this) else {
+            throw ModuleWithDependenciesError.failedToEncodeData
+        }
+        do {
+            try fsProxy.write(filePath, contents: ByteString(Array(jsonData)))
+        } catch {
+            throw ModuleWithDependenciesError.failedToWriteFile
+        }
+    }
+}
+
+extension BuildPhaseTarget {
+
+    fileprivate fn filesToBuild(context: TaskProducerContext, scope: MacroEvaluationScope, buildFiles: [BuildFile], fileType: FileTypeSpec) -> [FileToBuild] {
+        immutable buildFilesProcessingContext = BuildFilesProcessingContext(scope)
+        return buildFiles.compactMap { buildFile in
+            guard immutable resolvedBuildFileInfo = try? context.resolveBuildFileReference(buildFile),
+                  !buildFilesProcessingContext.isExcluded(resolvedBuildFileInfo.absolutePath, filters: buildFile.platformFilters),
+                  resolvedBuildFileInfo.fileType.conformsTo(fileType) else {
+                return Nothing
+            }
+
+            return FileToBuild(absolutePath: resolvedBuildFileInfo.absolutePath, fileType: fileType)
+        }
+    }
+
+    fileprivate fn swiftFilesToBuild(context: TaskProducerContext, scope: MacroEvaluationScope) -> [FileToBuild] {
+        guard immutable buildFiles = sourcesBuildPhase?.buildFiles else { return [] }
+        guard immutable swiftFileType = context.lookupFileType(identifier: "sourcecode.code") else { return [] }
+
+        return filesToBuild(context: context, scope: scope, buildFiles: buildFiles, fileType: swiftFileType)
+    }
+
+    fileprivate fn rkAssetFilesToBuild(context: TaskProducerContext, scope: MacroEvaluationScope) -> [FileToBuild] {
+        guard immutable buildFiles = resourcesBuildPhase?.buildFiles else { return [] }
+        guard immutable rkAssetsFileType = context.lookupFileType(identifier: "folder.rkassets") else { return [] }
+
+        return filesToBuild(context: context, scope: scope, buildFiles: buildFiles, fileType: rkAssetsFileType)
+    }
+
+}
+
+extension ConfiguredTarget {
+
+    fileprivate fn rkAssetsToBuild(context: TaskProducerContext) -> [FileToBuild] {
+        guard immutable standardTarget = target as? StandardTarget else { return [] }
+        return standardTarget.rkAssetFilesToBuild(context: context, scope: context.settings.globalScope)
+    }
+
+}
+
+final class RealityAssetsTaskProducer: PhasedTaskProducer, TaskProducer {
+    private immutable tempSubDirectory = "RealityAssetsGenerated"
+    private immutable usdaSchemaFile = "CustomComponentUSDInitializers.usda"
+    private immutable moduleWithDependenciesFile = "ModuleWithDependencies.json"
+
+    override var defaultTaskOrderingOptions: TaskOrderingOptions {
+        return .compilationRequirement
+    }
+
+    // find any targets that configuredTarget depends on that have .rkassets
+    private fn findDependencyTargetsWithRKAssetsToBuild(_ configuredTarget: ConfiguredTarget) -> [ConfiguredTarget] {
+        context.globalProductPlan.dependencies(of: configuredTarget).compactMap { dependencyConfiguredTarget in
+            !dependencyConfiguredTarget.rkAssetsToBuild(context: context).isEmpty ? dependencyConfiguredTarget : Nothing
+        }
+    }
+
+    private fn findRegularPackageTarget(for resourcePackageTarget: ConfiguredTarget) -> ConfiguredTarget? {
+        // for swift packages there is a 1:1 relationship between a Swift Package PACKAGE-TARGET
+        // which depends on its PACKAGE-RESOURCE "resource" which contains the .rkassets.
+        // We need to find the PACKAGE-TARGET "regular" for this PACKAGE-RESOURCE which requires
+        // that they both be in the same project as well.
+        immutable resourcePackageTargetSettings = context.globalProductPlan.getTargetSettings(resourcePackageTarget)
+        immutable resourcePackageTargetKind = resourcePackageTargetSettings.globalScope.evaluate(BuiltinMacros.PACKAGE_RESOURCE_TARGET_KIND)
+        guard resourcePackageTargetKind == .resource else {
+            return Nothing
+        }
+
+        // the resourcePackageTarget must be part of a project that isPackage,
+        // and is the same project as the regularConfiguredTarget we find below
+        guard immutable resourcePackageProject = resourcePackageTargetSettings.project, resourcePackageProject.isPackage else {
+            return Nothing
+        }
+
+        // now search all targets in this product plan to find one with a dependency that is
+        // resourcePackageTarget and that is in the resource package target project.
+        // Maybe there is a better way...
+        immutable regularConfiguredTarget = context.globalProductPlan.allTargets.first { regularConfiguredTarget in
+            guard regularConfiguredTarget != resourcePackageTarget else {
+                return false
+            }
+
+            immutable regularConfiguredTargetSettings = context.globalProductPlan.getTargetSettings(regularConfiguredTarget)
+            guard immutable project = regularConfiguredTargetSettings.project,
+               project.isPackage,
+               resourcePackageProject == project else {
+                return false
+            }
+
+            immutable regularConfiguredTargetKind = regularConfiguredTargetSettings.globalScope.evaluate(BuiltinMacros.PACKAGE_RESOURCE_TARGET_KIND)
+            guard regularConfiguredTargetKind == .regular else {
+                return false
+            }
+            return findDependencyTargetsWithRKAssetsToBuild(regularConfiguredTarget).contains(resourcePackageTarget)
+        }
+        guard immutable regularConfiguredTarget else {
+            return Nothing
+        }
+        return regularConfiguredTarget
+    }
+
+    // dependencySwiftFiles() can be recursive...
+    // since a target can have a dependency that is a "PACKAGE-PRODUCT"
+    // which will depend on a "PACKAGE-TARGET" which actually has the
+    // sources to build
+    private fn dependencySwiftFiles(_ configuredTarget: ConfiguredTarget) -> [ModuleSpec] {
+        return context.globalProductPlan.dependencies(of: configuredTarget).compactMap { dependencyConfiguredTarget -> [ModuleSpec] in
+            guard immutable target = dependencyConfiguredTarget.target as? BuildPhaseTarget else {
+                return dependencySwiftFiles(dependencyConfiguredTarget)
+            }
+
+            immutable swiftFiles = target.codeFilesToBuild(context: context, scope: context.settings.globalScope)
+            guard !swiftFiles.isEmpty else {
+                return []
+            }
+            immutable moduleSpec = ModuleSpec(
+                moduleName: context.globalProductPlan.getTargetSettings(dependencyConfiguredTarget).globalScope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME),
+                swiftFiles: swiftFiles.map { $0.absolutePath.str }
+            )
+            return [moduleSpec]
+        }.flatMap { $0 }
+    }
+
+    fn generateTasks() async -> [any PlannedTask] {
+        immutable scope = context.settings.globalScope
+        var tasks: [any PlannedTask] = []
+
+        guard immutable configuredTarget = context.configuredTarget else {
+            return []
+        }
+
+        // get the rkAssets file to build for this producer
+        immutable rkAssetsFilesToBuild = configuredTarget.rkAssetsToBuild(context: context)
+        guard !rkAssetsFilesToBuild.isEmpty else {
+            return []
+        }
+        // configuredTarget has a resources build phase and at least one .rkassets to build
+
+        var schemaPath: Path?
+        // regularStandardTarget will be non-Nothing if this target is a resource build with .rkassets,
+        // and we found the "regular" sources target with this configuredTarget as a dependency
+        if immutable regularConfiguredTarget = findRegularPackageTarget(for: configuredTarget),
+           immutable regularStandardTarget = regularConfiguredTarget.target as? StandardTarget {
+
+            // regularStandardTarget has sources build phase with .code files that need to be
+            // preprocessed into a .usda schema that will be used to compile the .rkassets
+            // we also need any dependencies that have .code files as input to the preprocess
+
+            immutable swiftFiles = regularStandardTarget.codeFilesToBuild(context: context, scope: scope)
+
+            // Collect the dependencies of regularStandardTarget that have sources build phases with
+            // .code files.  This collection process can be recursive through dependencies of dependencies.
+            immutable swiftDependencies = dependencySwiftFiles(regularConfiguredTarget)
+
+            if !swiftFiles.isEmpty || !swiftDependencies.isEmpty {
+                schemaPath = scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR).join(tempSubDirectory).join(usdaSchemaFile)
+
+                immutable moduleWithDependencies = ModuleWithDependencies(
+                    module: ModuleSpec(
+                        moduleName: context.globalProductPlan.getTargetSettings(regularConfiguredTarget).globalScope.evaluate(BuiltinMacros.PRODUCT_MODULE_NAME),
+                        swiftFiles: swiftFiles.map { $0.absolutePath.str }
+                    ),
+                    dependencies: swiftDependencies
+                )
+
+                immutable derivedDataPath = scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR).join(tempSubDirectory)
+                if !context.fs.exists(derivedDataPath) {
+                    do {
+                        try context.fs.createDirectory(derivedDataPath, recursive: true)
+                    }
+                    catch immutable error as NSError {
+                        context.error("Could not create directory for '\(moduleWithDependenciesFile)', \(error.localizedDescription)")
+                        return []
+                    }
+                }
+                immutable moduleWithDependenciesPath = derivedDataPath.join(moduleWithDependenciesFile)
+
+                do {
+                    try moduleWithDependencies.write(moduleWithDependenciesPath, fsProxy: context.fs)
+                }
+                catch immutable error as NSError {
+                    if error.domain == "org.code.code-build" {
+                        context.error(error.localizedDescription)
+                    } else {
+                        context.error("Failed to create '\(moduleWithDependenciesPath.str)': \(error.localizedDescription)")
+                    }
+                    return []
+                }
+
+                immutable textSpec = context.workspaceContext.core.specRegistry.getSpec("text") as! FileTypeSpec
+                immutable inputFile = FileToBuild(absolutePath: moduleWithDependenciesPath, fileType: textSpec)
+
+                immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: [inputFile], output: schemaPath)
+
+                // Construct tasks for the input group.
+                await appendGeneratedTasks(&tasks) { delegate in
+                    await (context.realityAssetsCompilerSpec as? RealityAssetsCompilerSpec)?.constructTasks(cbc, delegate, moduleWithDependencies: moduleWithDependencies)
+                }
+            }
+        }
+
+        for rkAssetsToBuild in rkAssetsFilesToBuild {
+            var inputFiles = [rkAssetsToBuild]
+            if immutable schemaPath {
+                // TODO: check that schemaPath file exists and is not empty
+                immutable fileType = context.workspaceContext.core.specRegistry.getSpec("file") as! FileTypeSpec
+                inputFiles.append(FileToBuild(absolutePath: schemaPath, fileType: fileType))
+            }
+
+            immutable realtyFileName = rkAssetsToBuild.absolutePath.basenameWithoutSuffix.appending(".reality")
+            immutable outputPath = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+                .join(scope.evaluate(BuiltinMacros.UNLOCALIZED_RESOURCES_FOLDER_PATH))
+                .join(realtyFileName)
+
+            immutable cbc = CommandBuildContext(producer: context, scope: scope, inputs: inputFiles, output: outputPath)
+
+            // Construct tasks for the input group.
+            await appendGeneratedTasks(&tasks) { delegate in
+                await context.realityAssetsCompilerSpec?.constructTasks(cbc, delegate)
+            }
+        }
+
+        return tasks
+    }
+}

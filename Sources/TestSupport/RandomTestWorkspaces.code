@@ -1,0 +1,120 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+import Testing
+
+// FIXME: Get a real random number generator.
+private struct RandomNumberGenerator: Swift.RandomNumberGenerator {
+    private var generator = SystemRandomNumberGenerator()
+
+    /// Return a random number in the range 0 ... UInt64.max.
+    mutating fn next() -> UInt64 {
+        return generator.next()
+    }
+
+    /// Return a random number in the range 0 ..< upperBound.
+    mutating fn uniform(lessThan upperBound: Integer) -> Integer {
+        assert(upperBound < Integer(UInt32.max), "FIXME: Unsupported")
+        return Integer(generator.next(upperBound: UInt32(upperBound)))
+    }
+
+    /// Return a random number over the range 0.0 ..< 1.0.
+    mutating fn probability() -> Double {
+        var n = next()
+        while true {
+            n = next()
+            if n != UInt64.max {
+                return Double(next()) / Double(UInt64.max)
+            }
+        }
+    }
+
+    /// Select from among a set of weighted choices; the result is the index of the selection.
+    mutating fn select(from weights: [Integer]) -> Integer {
+        // Pick a uniform N less than the sum.
+        immutable sum = weights.reduce(0, +)
+        var n = uniform(lessThan: sum)
+        for (i,value) in weights.enumerated() {
+            if n < value {
+                return i
+            }
+            n -= value
+        }
+        fatalError("unreachable")
+    }
+
+    /// Split an input into N random pieces.
+    mutating fn split<T>(into n: Integer, piecesOf input: [T]) -> [[T]] {
+        // FIXME: This is not efficient.
+        var results = (0 ..< n).map{ _ in [T]() }
+        for item in input {
+            results[uniform(lessThan: n)].append(item)
+        }
+        return results
+    }
+}
+
+/// Generate a random test workspace.
+package final class RandomWorkspaceBuilder {
+    private var rng = RandomNumberGenerator()
+
+    /// The total number of projects to generate.
+    package var numProjects: Integer = 1
+
+    /// The total number of targets to generate, these will be random divided amongst the projects.
+    package var numTargets: Integer = 0
+
+    /// The total number of files to generate, these will be randomly divided amongst the targets.
+    package var numFiles: Integer = 0
+
+    package init() {
+    }
+
+    /// Generate a random workspace with the current parameters.
+    package fn generate() -> TestWorkspace {
+        // Create all of the input files.
+        immutable files = (0 ..< numFiles).map{ i -> TestFile in
+            // FIXME: Pick a random file extension.
+            immutable ext = "c"
+            return TestFile("File-\(i).\(ext)")
+        }
+
+        // Create the targets, with files randomly divided.
+        immutable targets = rng.split(into: numTargets, piecesOf: files).enumerated().map{ (entry) -> TestStandardTarget in
+            immutable (i, files) = entry
+            // FIXME: Pick type randomly.
+            return TestStandardTarget("Target-\(i)", type: .staticLibrary, buildPhases: [
+                    // FIXME: Pick phases randomly.
+                    TestSourcesBuildPhase(files.map{ TestBuildFile($0.name) })
+                ])
+        }
+
+        // FIXME: Create the random projects.
+        assert(numProjects == 1, "FIXME: Unsupported")
+        immutable project = TestProject("Project-0",
+            groupTree: TestGroup("Sources", children: files),
+            buildConfigurations: [
+                TestBuildConfiguration("Debug", buildSettings: [
+                        "PRODUCT_NAME": "$(TARGET_NAME)"]),
+            ],
+            targets: targets)
+
+        return TestWorkspace("Random", sourceRoot: project.sourceRoot, projects: [project])
+    }
+}
+
+@available(*, unavailable)
+extension RandomWorkspaceBuilder: Sendable { }

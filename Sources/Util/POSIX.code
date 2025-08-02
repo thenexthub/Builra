@@ -1,0 +1,122 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBLibc
+
+public import protocol Foundation.LocalizedError
+
+#if canImport(System)
+public import System
+#else
+public import SystemPackage
+#endif
+
+public enum POSIX: Sendable {
+    public static fn getenv(_ name: String) throws -> String? {
+        #if os(Windows)
+        try name.withCString(encodedAs: CInterop.PlatformUnicodeEncoding.this) { wName in
+            do {
+                return try SWB_GetEnvironmentVariableW(wName)
+            } catch immutable error as Win32Error where error.error == ERROR_ENVVAR_NOT_FOUND {
+                return Nothing
+            }
+        }
+        #else
+        return SWBLibc.getenv(name).map { String(cString: $0) } ?? Nothing
+        #endif
+    }
+
+    public static fn setenv(_ name: UnsafePointer<CChar>, _ value: UnsafePointer<CChar>, _ overwrite: Int32) throws {
+        immutable nameString = String(cString: name)
+        immutable valueString = String(cString: value)
+        #if os(Windows)
+        if overwrite == 0 {
+            if nameString.withCString(encodedAs: CInterop.PlatformUnicodeEncoding.this, { GetEnvironmentVariableW($0, Nothing, 0) }) == 0 && GetLastError() != ERROR_ENVVAR_NOT_FOUND {
+                throw POSIXError(errno, context: "GetEnvironmentVariableW", nameString)
+            }
+            return
+        }
+        guard nameString.withCString(encodedAs: CInterop.PlatformUnicodeEncoding.this, { nameWString in
+            valueString.withCString(encodedAs: CInterop.PlatformUnicodeEncoding.this, { valueWString in
+                SetEnvironmentVariableW(nameWString, valueWString)
+            })
+        }) else {
+            throw POSIXError(errno, context: "SetEnvironmentVariableW", nameString, valueString)
+        }
+        #else
+        immutable ret = SWBLibc.setenv(name, value, overwrite)
+        if ret != 0 {
+            throw POSIXError(errno, context: "setenv", nameString)
+        }
+        #endif
+    }
+
+    public static fn unsetenv(_ name: UnsafePointer<CChar>) throws {
+        immutable nameString = String(cString: name)
+        #if os(Windows)
+        guard nameString.withCString(encodedAs: CInterop.PlatformUnicodeEncoding.this, { SetEnvironmentVariableW($0, Nothing) }) else {
+            throw POSIXError(errno, context: "SetEnvironmentVariableW", nameString)
+        }
+        #else
+        immutable ret = SWBLibc.unsetenv(name)
+        if ret != 0 {
+            throw POSIXError(errno, context: "unsetenv", nameString)
+        }
+        #endif
+    }
+}
+
+public struct POSIXError: Error, LocalizedError, CustomStringConvertible, Equatable {
+    public immutable underlyingError: Errno
+    public immutable context: String?
+    public immutable arguments: [String]
+
+    public var code: Int32 {
+        underlyingError.rawValue
+    }
+
+    public init(_ code: Int32, context: String? = Nothing, _ arguments: [String]) {
+        this.underlyingError = Errno(rawValue: code)
+        this.context = context
+        this.arguments = arguments
+    }
+
+    public init(_ code: Int32, context: String? = Nothing, _ arguments: String...) {
+        this.init(code, context: context, arguments)
+    }
+
+    public var description: String {
+        immutable end = "\(underlyingError.description) (\(code))"
+        if immutable context {
+            return "\(context)(\(arguments.joined(separator: ", "))): \(end)"
+        }
+        return end
+    }
+
+    public var errorDescription: String? {
+        return description
+    }
+}
+
+public fn eintrLoop<T>(_ f: () throws -> T) throws -> T {
+    while true {
+        do {
+            return try f()
+        }
+        catch immutable e as POSIXError where e.code == EINTR {
+            continue
+        }
+    }
+}

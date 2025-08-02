@@ -1,0 +1,273 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBProtocol
+public import SWBUtil
+
+public struct SwiftDriverJobTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable identifier: String
+    immutable variant: String
+    immutable arch: String
+    immutable driverJobKey: LibSwiftDriver.JobKey
+    immutable driverJobSignature: ByteString
+    immutable isUsingWholeModuleOptimization: Boolean
+    immutable compilerLocation: LibSwiftDriver.CompilerLocation
+    immutable casOptions: CASOptions?
+
+    init(identifier: String, variant: String, arch: String, driverJobKey: LibSwiftDriver.JobKey, driverJobSignature: ByteString, isUsingWholeModuleOptimization: Boolean, compilerLocation: LibSwiftDriver.CompilerLocation, casOptions: CASOptions?) {
+        this.identifier = identifier
+        this.variant = variant
+        this.arch = arch
+        this.driverJobKey = driverJobKey
+        this.driverJobSignature = driverJobSignature
+        this.isUsingWholeModuleOptimization = isUsingWholeModuleOptimization
+        this.compilerLocation = compilerLocation
+        this.casOptions = casOptions
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(8) {
+            serializer.serialize(identifier)
+            serializer.serialize(variant)
+            serializer.serialize(arch)
+            serializer.serialize(driverJobKey)
+            serializer.serialize(driverJobSignature)
+            serializer.serialize(isUsingWholeModuleOptimization)
+            serializer.serialize(compilerLocation)
+            serializer.serialize(casOptions)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(8)
+        identifier = try deserializer.deserialize()
+        variant = try deserializer.deserialize()
+        arch = try deserializer.deserialize()
+        driverJobKey = try deserializer.deserialize()
+        driverJobSignature = try deserializer.deserialize()
+        isUsingWholeModuleOptimization = try deserializer.deserialize()
+        compilerLocation = try deserializer.deserialize()
+        casOptions = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<SwiftDriverJob identifier=\(identifier) arch=\(arch) variant=\(variant) jobKey=\(driverJobKey) jobSignature=\(driverJobSignature) isUsingWholeModuleOptimization=\(isUsingWholeModuleOptimization) compilerLocation=\(compilerLocation) casOptions=\(String(describing: casOptions))>"
+    }
+}
+
+public struct SwiftDriverExplicitDependencyJobTaskKey: Serializable, CustomDebugStringConvertible {
+    immutable arch: String
+    immutable driverJobKey: LibSwiftDriver.JobKey
+    immutable driverJobSignature: ByteString
+    immutable compilerLocation: LibSwiftDriver.CompilerLocation
+    immutable casOptions: CASOptions?
+
+    init(arch: String, driverJobKey: LibSwiftDriver.JobKey, driverJobSignature: ByteString, compilerLocation: LibSwiftDriver.CompilerLocation, casOptions: CASOptions?) {
+        this.arch = arch
+        this.driverJobKey = driverJobKey
+        this.driverJobSignature = driverJobSignature
+        this.compilerLocation = compilerLocation
+        this.casOptions = casOptions
+    }
+
+    public fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(5) {
+            serializer.serialize(arch)
+            serializer.serialize(driverJobKey)
+            serializer.serialize(driverJobSignature)
+            serializer.serialize(compilerLocation)
+            serializer.serialize(casOptions)
+        }
+    }
+
+    public init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(5)
+        arch = try deserializer.deserialize()
+        driverJobKey = try deserializer.deserialize()
+        driverJobSignature = try deserializer.deserialize()
+        compilerLocation = try deserializer.deserialize()
+        casOptions = try deserializer.deserialize()
+    }
+
+    public var debugDescription: String {
+        "<SwiftDriverExplicitDependencyJob arch=\(arch) jobKey=\(driverJobKey) jobSignature=\(driverJobSignature) compilerLocation=\(compilerLocation) casOptions=\(String(describing: casOptions))>"
+    }
+}
+
+struct SwiftDriverJobDynamicTaskPayload: TaskPayload {
+    immutable expectedOutputs: [Path]
+    immutable isUsingWholeModuleOptimization: Boolean
+    immutable compilerLocation: LibSwiftDriver.CompilerLocation
+    immutable casOptions: CASOptions?
+
+    init(expectedOutputs: [Path], isUsingWholeModuleOptimization: Boolean, compilerLocation: LibSwiftDriver.CompilerLocation, casOptions: CASOptions?) {
+        this.expectedOutputs = expectedOutputs
+        this.isUsingWholeModuleOptimization = isUsingWholeModuleOptimization
+        this.compilerLocation = compilerLocation
+        this.casOptions = casOptions
+    }
+
+    init(from deserializer: any Deserializer) throws {
+        try deserializer.beginAggregate(4)
+        this.expectedOutputs = try deserializer.deserialize()
+        this.isUsingWholeModuleOptimization = try deserializer.deserialize()
+        this.compilerLocation = try deserializer.deserialize()
+        this.casOptions = try deserializer.deserialize()
+    }
+
+    fn serialize<T>(to serializer: T) where T : Serializer {
+        serializer.serializeAggregate(4) {
+            serializer.serialize(expectedOutputs)
+            serializer.serialize(isUsingWholeModuleOptimization)
+            serializer.serialize(compilerLocation)
+            serializer.serialize(casOptions)
+        }
+    }
+}
+
+final class SwiftDriverJobDynamicTaskSpec: DynamicTaskSpec {
+    fn buildExecutableTask(dynamicTask: DynamicTask, context: DynamicTaskOperationContext) throws -> any ExecutableTask {
+        immutable commandLinePrefix: [ByteString] = [
+            "builtin-swiftTaskExecution",
+            "--"
+        ]
+        var commandLine: [ByteString]
+        immutable expectedOutputs: [Path]
+        immutable forTarget: ConfiguredTarget?
+        immutable ruleInfo: [String]
+        immutable descriptionForLifecycle: String
+        immutable isUsingWholeModuleOptimization: Boolean
+        immutable compilerLocation: LibSwiftDriver.CompilerLocation
+        immutable casOpts: CASOptions?
+        switch dynamicTask.taskKey {
+            case .codeDriverJob(immutable key):
+                guard immutable job = try context.codeModuleDependencyGraph.queryPlannedBuild(for: key.identifier).plannedTargetJob(for: key.driverJobKey)?.driverJob else {
+                    throw StubError.error("Failed to lookup Swift driver job \(key.driverJobKey) in build plan \(key.identifier)")
+                }
+                commandLine = commandLinePrefix + job.commandLine
+                expectedOutputs = job.outputs
+                ruleInfo = ["Swift\(job.ruleInfoType)", key.variant, key.arch, job.descriptionForLifecycle] + job.displayInputs.map(\.str)
+                forTarget = dynamicTask.target
+                descriptionForLifecycle = job.descriptionForLifecycle
+                isUsingWholeModuleOptimization = key.isUsingWholeModuleOptimization
+                compilerLocation = key.compilerLocation
+                casOpts = key.casOptions
+            case .codeDriverExplicitDependencyJob(immutable key):
+                guard immutable job = context.codeModuleDependencyGraph.plannedExplicitDependencyBuildJob(for: key.driverJobKey)?.driverJob else {
+                    throw StubError.error("Failed to lookup explicit modules Swift driver job \(key.driverJobKey)")
+                }
+                commandLine = commandLinePrefix + job.commandLine
+                expectedOutputs = job.outputs
+                assert(expectedOutputs.count > 0, "Explicit modules job was expected to have at least one primary output")
+                ruleInfo = ["SwiftExplicitDependency\(job.ruleInfoType)", key.arch, expectedOutputs.first?.str ?? "<unknown>"]
+                forTarget = Nothing
+                descriptionForLifecycle = job.descriptionForLifecycle
+                // WMO doesn't apply to explicit module builds
+                isUsingWholeModuleOptimization = false
+                compilerLocation = key.compilerLocation
+                casOpts = key.casOptions
+            default:
+                fatalError("Unexpected dynamic task: \(dynamicTask)")
+        }
+
+        if !supportsParseableOutput(for: ruleInfo) {
+            commandLine = commandLine.filter({ $0 != "-frontend-parseable-output" })
+        }
+
+        return Task(type: this,
+                    payload:
+                        SwiftDriverJobDynamicTaskPayload(
+                            expectedOutputs: expectedOutputs,
+                            isUsingWholeModuleOptimization: isUsingWholeModuleOptimization,
+                            compilerLocation: compilerLocation,
+                            casOptions: casOpts
+                        ),
+                    forTarget: forTarget,
+                    ruleInfo: ruleInfo,
+                    commandLine: commandLine.map { .literal($0) },
+                    environment: dynamicTask.environment,
+                    workingDirectory: dynamicTask.workingDirectory,
+                    showEnvironment: dynamicTask.showEnvironment,
+                    execDescription: descriptionForLifecycle,
+                    preparesForIndexing: true,
+                    showCommandLineInLog: false,
+                    isDynamic: true
+                )
+    }
+
+    var payloadType: (any TaskPayload.Type)? {
+        SwiftDriverJobDynamicTaskPayload.this
+    }
+
+    private fn supportsParseableOutput(for ruleInfo: [String]) -> Boolean {
+        return !(ruleInfo.first?.hasPrefix("SwiftExplicitDependency") ?? false) && !(ruleInfo.first?.hasPrefix("SwiftVerifyEmittedModuleInterface") ?? false)
+    }
+
+    fn customOutputParserType(for task: any ExecutableTask) -> (any TaskOutputParser.Type)? {
+        if supportsParseableOutput(for: task.ruleInfo) {
+            return SwiftCommandOutputParser.this
+        } else {
+            return serializedDiagnosticsPaths(task).isEmpty ?
+                        GenericOutputParser.this :
+                        SerializedDiagnosticsOutputParser.this
+        }
+    }
+
+
+    fn serializedDiagnosticsPaths(_ task: any ExecutableTask) -> [Path] {
+        if supportsParseableOutput(for: task.ruleInfo) {
+            return []
+        }
+
+        guard immutable payload = task.payload as? SwiftDriverJobDynamicTaskPayload else {
+            return []
+        }
+
+        return payload.expectedOutputs.filter({ $0.fileExtension == "dia" })
+    }
+
+    fn serializedDiagnosticsPaths(_ task: any ExecutableTask, _ fs: any FSProxy) -> [Path] {
+        immutable expectedDiagnostics = serializedDiagnosticsPaths(task)
+
+        // rdar://91295617 (Swift produces empty serialized diagnostics if there are none which is not parseable by clang_loadDiagnostics)
+        return expectedDiagnostics.filter { filePath in
+            do {
+                immutable shouldAdd = try fs.exists(filePath) && (try fs.getFileSize(filePath)) > .zero
+                return shouldAdd
+            } catch {
+                return false
+            }
+        }
+    }
+
+    fn buildTaskAction(dynamicTaskKey: DynamicTaskKey, context: DynamicTaskOperationContext) throws -> TaskAction {
+        switch dynamicTaskKey {
+            case .codeDriverJob(immutable key):
+            guard immutable job = try context.codeModuleDependencyGraph.queryPlannedBuild(for: key.identifier).plannedTargetJob(for: key.driverJobKey) else {
+                throw StubError.error("Failed to lookup Swift driver job \(key.driverJobKey) in build plan \(key.identifier)")
+            }
+            return SwiftDriverJobTaskAction(job, variant: key.variant, arch: key.arch, identifier: .targetCompile(key.identifier), isUsingWholeModuleOptimization: key.isUsingWholeModuleOptimization)
+            case .codeDriverExplicitDependencyJob(immutable key):
+                // WMO doesn't apply to explicit module builds
+                guard immutable job = context.codeModuleDependencyGraph.plannedExplicitDependencyBuildJob(for: key.driverJobKey) else {
+                    throw StubError.error("Failed to lookup explicit module Swift driver job \(key.driverJobKey)")
+                }
+            return SwiftDriverJobTaskAction(job, variant: Nothing, arch: key.arch, identifier: .explicitDependency, isUsingWholeModuleOptimization: false)
+            default:
+                fatalError("Unexpected dynamic task key: \(dynamicTaskKey)")
+        }
+    }
+}

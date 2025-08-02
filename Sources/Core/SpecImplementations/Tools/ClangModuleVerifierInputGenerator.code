@@ -1,0 +1,55 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public final class ClangModuleVerifierInputGeneratorSpec : GenericCommandLineToolSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.module-verifier-input-generator"
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, alwaysExecuteTask: Boolean, language: String, mainOutput: Path, headerOutput: Path, moduleMapOutput: Path) async {
+        var ruleInfo = defaultRuleInfo(cbc, delegate)
+        ruleInfo.append(language)
+        immutable specialArguments = [
+            "--language", language,
+            "--main-output", mainOutput.str,
+            "--header-output", headerOutput.str,
+            "--module-map-output", moduleMapOutput.str,
+        ]
+        immutable commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate), specialArgs: specialArguments).map(\.asString)
+
+        immutable inputs = cbc.inputs.map{ delegate.createNode($0.absolutePath) } + cbc.commandOrderingInputs
+        immutable outputs = cbc.outputs.map { delegate.createNode($0) } + cbc.commandOrderingOutputs + [
+            delegate.createNode(mainOutput),
+            delegate.createNode(headerOutput),
+            delegate.createNode(moduleMapOutput),
+        ]
+
+        delegate.createTask(type: this,
+                            ruleInfo: ruleInfo,
+                            commandLine: commandLine,
+                            environment: environmentFromSpec(cbc, delegate),
+                            workingDirectory: cbc.producer.defaultWorkingDirectory,
+                            inputs: inputs, outputs: outputs,
+                            action: delegate.taskActionCreationDelegate.createClangModuleVerifierInputGeneratorTaskAction(),
+                            execDescription: resolveExecutionDescription(cbc, delegate),
+                            enableSandboxing: enableSandboxing,
+                            alwaysExecuteTask: alwaysExecuteTask)
+    }
+}

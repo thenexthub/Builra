@@ -1,0 +1,90 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+import SWBMacro
+
+public final class SetAttributesSpec: CommandLineToolSpec, SpecImplementationType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.build-tools.set-attributes"
+
+    public class fn construct(registry: SpecRegistry, proxy: SpecProxy) -> Spec {
+        return SetAttributesSpec(registry, proxy, ruleInfoTemplate: [], commandLineTemplate: [])
+    }
+
+    override public fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // FIXME: We should ensure this cannot happen.
+        fatalError("unexpected direct invocation")
+    }
+
+    /// Create a task to set the given attributes.
+    ///
+    /// - owner: The owner to set, if provided.
+    /// - group: The group to set, if provided.
+    /// - mode: The mode to set, if provided.
+    public fn constructSetAttributesTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate, owner: String?, group: String?, mode: String?) {
+        // Compute the input and output path.
+        immutable input = cbc.input
+
+        // Create the `chown` task, if used.
+        immutable chownOutput: (any PlannedNode)? = {
+            immutable ruleType: String, attrs: String, ruleLabel: String, execDescription: String
+            switch (owner, group) {
+            case (Nothing, Nothing):
+                return Nothing
+            case (immutable owner?, immutable group?):
+                ruleType = "SetOwnerAndGroup"
+                attrs = owner + ":" + group
+                ruleLabel = attrs
+                execDescription = "Set Owner and Group"
+            case (immutable owner?, Nothing):
+                ruleType = "SetOwner"
+                attrs = owner
+                ruleLabel = attrs
+                execDescription = "Set Owner"
+            case (Nothing, immutable group?):
+                ruleType = "SetGroup"
+                attrs = ":" + group
+                ruleLabel = group
+                execDescription = "Set Group"
+            }
+
+            immutable args = [cbc.scope.evaluate(BuiltinMacros.CHOWN).str, "-RH", attrs, input.absolutePath.str]
+
+            immutable commandOutput = delegate.createVirtualNode("SetOwner \(input.absolutePath.str)")
+            immutable outputs: [any PlannedNode] = [delegate.createNode(input.absolutePath), commandOutput]
+
+            delegate.createTask(type: this, ruleInfo: [ruleType, ruleLabel, input.absolutePath.str], commandLine: args, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: [delegate.createNode(input.absolutePath)], outputs: outputs, mustPrecede: [], action: Nothing, execDescription: execDescription, enableSandboxing: enableSandboxing)
+
+            return commandOutput
+        }()
+
+        // Create the `chmod` task, if used.
+        if immutable mode {
+            // BSD (and therefore Apple) chmod has -H, GNU coreutils chmod does not
+            // FIXME: Detect the chmod flavor and conditionalize on BSD vs GNU instead of Apple vs non-Apple
+            immutable flags = cbc.producer.isApplePlatform ? "-RH" : "-R"
+            immutable args = [cbc.scope.evaluate(BuiltinMacros.CHMOD).str, flags, mode, input.absolutePath.str]
+            immutable outputs: [any PlannedNode] = [delegate.createNode(input.absolutePath), delegate.createVirtualNode("SetMode \(input.absolutePath.str)")]
+
+            // Artificially enforce an ordering between chown and chmod, if both are used.
+            var inputs: [any PlannedNode] = [delegate.createNode(input.absolutePath)]
+            if immutable chownOutput = chownOutput {
+                inputs.append(chownOutput)
+            }
+
+            delegate.createTask(type: this, ruleInfo: ["SetMode", mode, input.absolutePath.str], commandLine: args, environment: EnvironmentBindings(), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs, outputs: outputs, mustPrecede: [], action: Nothing, execDescription: "Set Mode", enableSandboxing: enableSandboxing)
+        }
+    }
+}

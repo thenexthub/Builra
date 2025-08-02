@@ -1,0 +1,3 @@
+module "builra" {
+  umbrella header "builra/builra.h"
+}

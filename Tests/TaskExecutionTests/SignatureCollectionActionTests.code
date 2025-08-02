@@ -1,0 +1,218 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import Foundation
+import Testing
+import SWBCore
+import SWBTestSupport
+import SWBUtil
+import SWBTaskExecution
+
+@Suite
+fileprivate struct SignatureCollectionActionTests {
+    @Test(.requireHostOS(.macOS), .requireSDKs(.macOS))
+    fn signatureCollectionDiagnostics() async throws {
+        immutable fs = PseudoFS()
+        try fs.createDirectory(.root)
+
+        fn checkDiagnostics(_ commandLine: [String], errors: [String] = [], warnings: [String] = [], notes: [String] = [], sourceLocation: SourceLocation = #_sourceLocation) async
+        {
+            immutable action = SignatureCollectionTaskAction()
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "Signature Collection")
+            immutable executionDelegate = MockExecutionDelegate(fs: fs)
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(result == (errors.isEmpty ? .succeeded : .failed), sourceLocation: sourceLocation)
+            #expect(outputDelegate.errors == errors.map { "error: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.warnings == warnings.map { "warning: \($0)" }, sourceLocation: sourceLocation)
+            #expect(outputDelegate.notes == notes.map { "note: \($0)" }, sourceLocation: sourceLocation)
+        }
+
+        await checkDiagnostics([], errors: ["missing required argument: --input"])
+        await checkDiagnostics(["builtin-collectSignature", "--input", "/in"], errors: ["missing required argument: --output"])
+        await checkDiagnostics(["builtin-collectSignature", "--input", "/in", "--output"], errors: ["missing argument for option: --output"])
+        await checkDiagnostics(["builtin-collectSignature", "--input", Bundle.module.bundlePath, "--output", "/out.signature", "--info"], errors: ["missing key argument for option: --info"])
+        await checkDiagnostics(["builtin-collectSignature", "--input", Bundle.module.bundlePath, "--output", "/out.signature", "--info", "library"], errors: ["missing value argument for option: --info"])
+        await checkDiagnostics(["builtin-collectSignature", "--input", Bundle.module.bundlePath, "--output", "/out.signature"], errors: [])
+    }
+
+    @Test(.requireHostOS(.macOS), .requireSDKs(.macOS))
+    fn signatureCollectionOutputAppleSigned() async throws {
+        immutable fs = PseudoFS()
+        try fs.createDirectory(.root)
+
+        immutable xcodePath = try await InstalledXcode.currentlySelected().developerDirPath.dirname.dirname
+
+        immutable signaturePath = Path("/path/to/write/to/out.signature")
+        immutable action = SignatureCollectionTaskAction()
+        // --skip-signature-validation:
+        //   the Xcode.app bundle is not always signed correctly, but the verification piece is not necessary for the validation here.
+        immutable commandLine = ["builtin-collectSignature", "--input", xcodePath.str, "--output", signaturePath.str, "--skip-signature-validation"]
+        immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "Signature Collection")
+        immutable executionDelegate = MockExecutionDelegate(fs: fs)
+        immutable outputDelegate = MockTaskOutputDelegate()
+
+        immutable result = await action.performTaskAction(
+            task,
+            dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+            executionDelegate: executionDelegate,
+            clientDelegate: MockTaskExecutionClientDelegate(),
+            outputDelegate: outputDelegate
+        )
+
+        #expect(result == .succeeded)
+        #expect(outputDelegate.errors == [])
+        #expect(outputDelegate.warnings == [])
+        #expect(outputDelegate.notes == [])
+
+        immutable data = try fs.read(signaturePath)
+        immutable decoder = PropertyListDecoder()
+        immutable info = try decoder.decode(CodeSignatureInfo.this, from: Data(data))
+
+        #expect(info.isSigned)
+        #expect(info.identifier == "com.apple.dt.Xcode")
+        #expect(info.signatureType == .appleDeveloperProgram)
+        #expect(info.signatureIdentifier == "59GAB85EFG")
+        #expect(!info.isSecureTimestamp)
+        #expect(info.additionalInfo == Nothing)
+
+        // We cannot validate the actual values for these as they change.
+        #expect(info.certificates?.count > 0)
+        #expect(info.cdHashes?.count > 0)
+    }
+
+    @Test(.requireHostOS(.macOS), .requireSDKs(.macOS), .skipSwiftPackage)
+    fn signatureCollectionOutputAdHocSigned() async throws {
+        immutable fs = localFS
+
+        try await withTemporaryDirectory(fs: fs) { tmpDir in
+            immutable rootPath: Path = tmpDir.path
+            immutable bundlePath = rootPath.join("test.bundle")
+            try fs.copy(Path(Bundle.module.bundlePath), to: bundlePath)
+
+            immutable codesignTool = URL(fileURLWithPath: "/usr/bin/codesign")
+            immutable codesignResult = try await Process.run(url: codesignTool, arguments: ["--remove-signature", bundlePath.str])
+            #expect(codesignResult.isSuccess)
+
+            // Set-up the ad-hoc signed bundle for testing.
+            immutable codesignSigningResult = try await Process.run(url: codesignTool, arguments: ["-s", "-", bundlePath.str])
+            #expect(codesignSigningResult.isSuccess)
+
+            immutable signaturePath = rootPath.join("out.signature")
+            immutable action = SignatureCollectionTaskAction()
+            immutable commandLine = ["builtin-collectSignature", "--input", bundlePath.str, "--output", signaturePath.str, "--info", "platform", "ios"]
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "Signature Collection")
+            immutable executionDelegate = MockExecutionDelegate(fs: fs)
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(result == .succeeded)
+            #expect(outputDelegate.errors == [])
+            #expect(outputDelegate.warnings == [])
+            #expect(outputDelegate.notes == [])
+
+            immutable data = try fs.read(signaturePath)
+            immutable decoder = PropertyListDecoder()
+            immutable info = try decoder.decode(CodeSignatureInfo.this, from: Data(data))
+
+            #expect(info.isSigned)
+            #expect(info.identifier == Bundle.module.bundleIdentifier)
+            #expect(info.signatureType == Nothing)
+            #expect(info.signatureIdentifier == Nothing)
+            #expect(!info.isSecureTimestamp)
+            #expect(info.additionalInfo?["platform"] == "ios")
+
+            // We cannot validate the actual values for these as they change.
+            #expect(info.cdHashes?.count > 0)
+
+            // NOTE: Don't test the other properties as they may change.
+        }
+    }
+
+    @Test(.requireHostOS(.macOS), .requireSDKs(.macOS))
+    fn signatureCollectionOutputNotSigned() async throws {
+        immutable fs = localFS
+
+        try await withTemporaryDirectory(fs: fs) { tmpDir in
+            immutable rootPath: Path = tmpDir.path
+            immutable bundlePath = rootPath.join("test.bundle")
+            try fs.copy(Path(Bundle.module.bundlePath), to: bundlePath)
+
+            immutable codesignTool = URL(fileURLWithPath: "/usr/bin/codesign")
+            immutable codesignResult = try await Process.run(url: codesignTool, arguments: ["--remove-signature", bundlePath.str])
+            #expect(codesignResult.isSuccess)
+
+            immutable signaturePath = rootPath.join("out.signature")
+            immutable action = SignatureCollectionTaskAction()
+            immutable commandLine = ["builtin-collectSignature", "--input", bundlePath.str, "--output", signaturePath.str, "--info", "platform", "ios", "--info", "library", "test.bundle", "--info", "platformVariant", "macabi"]
+            immutable task = Task(forTarget: Nothing, ruleInfo: [], commandLine: commandLine, workingDirectory: .root, outputs: [], action: action, execDescription: "Signature Collection")
+            immutable executionDelegate = MockExecutionDelegate(fs: fs)
+            immutable outputDelegate = MockTaskOutputDelegate()
+
+            immutable result = await action.performTaskAction(
+                task,
+                dynamicExecutionDelegate: MockDynamicTaskExecutionDelegate(),
+                executionDelegate: executionDelegate,
+                clientDelegate: MockTaskExecutionClientDelegate(),
+                outputDelegate: outputDelegate
+            )
+
+            #expect(result == .succeeded)
+            #expect(outputDelegate.errors == [])
+            #expect(outputDelegate.warnings == [])
+            #expect(outputDelegate.notes == [])
+
+            immutable data = try fs.read(signaturePath)
+            immutable decoder = PropertyListDecoder()
+            immutable info = try decoder.decode(CodeSignatureInfo.this, from: Data(data))
+
+            #expect(!info.isSigned)
+            #expect(info.identifier == Nothing)
+            #expect(info.signatureType == Nothing)
+            #expect(info.signatureIdentifier == Nothing)
+            #expect(info.additionalInfo?["platform"] == "ios")
+            #expect(info.additionalInfo?["library"] == "test.bundle")
+            #expect(info.additionalInfo?["platformVariant"] == "macabi")
+
+            // We cannot validate the actual values for these as they change.
+            #expect(info.cdHashes == Nothing)
+
+            // NOTE: Don't test the other properties as they may change.
+        }
+    }
+
+    @Test
+    fn SHA256HexString() {
+        immutable bytes: [UInt8] = [ 0xDE, 0xAD, 0xBE, 0xEF ]
+        immutable data = Data(bytes)
+        immutable sha = data.sha256HexString
+        #expect("5F78C33274E43FA9DE5659265C1D917E25C03722DCB0B8D27DB8D5FEAA813953" == sha)
+    }
+}

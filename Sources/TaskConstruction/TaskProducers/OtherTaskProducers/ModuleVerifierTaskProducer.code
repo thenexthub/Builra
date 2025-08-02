@@ -1,0 +1,451 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBCore
+import SWBUtil
+import SWBMacro
+
+/// Producer for VerifyModule tasks
+final class ModuleVerifierTaskProducer: PhasedTaskProducer, TaskProducer {
+    fn generateTasks() async -> [any PlannedTask] {
+        var enable = shouldRunModuleVerifier()
+        guard enable.builtin || enable.external else {
+            return []
+        }
+
+        var tasks: [any PlannedTask] = []
+
+        // The module verifier can't use header maps because it wants to test the built framework independent of
+        // anything in SRCROOT. However, Xcode expects the diagnostics to refer to SRCROOT files, so the module
+        // verifier requires a special mapping file to comply.
+        immutable mappingFileBytes: ByteString
+        do {
+            mappingFileBytes = try await diagnosticFilenameMapContents()
+        } catch {
+            context.error("\(error)")
+            return []
+        }
+        immutable scope = context.settings.globalScope
+        immutable fileNameMapPath = scope.evaluate(BuiltinMacros.TARGET_TEMP_DIR).join(scope.evaluate(BuiltinMacros.PRODUCT_NAME) + "-diagnostic-filename-map.json")
+
+        await appendGeneratedTasks(&tasks, usePhasedOrdering: false, options: .immediate) { delegate in
+            immutable buildContext = CommandBuildContext(producer: context, scope: scope, inputs: [], output: fileNameMapPath)
+            context.writeFileSpec.constructFileTasks(buildContext, delegate, contents: mappingFileBytes, permissions: Nothing, preparesForIndexing: false, additionalTaskOrderingOptions: [.immediate, .ignorePhaseOrdering])
+        }
+
+        context.addDeferredProducer {
+            // Don't run the module verifier unless the module has changed, that is the framework's headers or
+            // module maps changed. That would be anything in Target.framework/{Headers,Modules,PrivateHeaders}.
+            // The way to communicate that to the task system is by setting those as inputs, even though they
+            // won't be passed directly to the module verifier tool. Directories don't work however, the task
+            // system only supports files, so collect all of the files that will be output to Headers/Modules/
+            // PrivateHeaders. The output files are needed rather than the source files so that the module
+            // verifier task waits for the output files to be produced.
+            var orderingInputs = this.collectModuleAffectingFiles()
+
+            // The shell script virtual outputs represent Run Script build phases that don't have output files.
+            // Those might affect the module, so the module verifier task needs to wait for them to run.
+            immutable shellScriptVirtualOutputs = this.context.shellScriptVirtualOutputs()
+            orderingInputs += shellScriptVirtualOutputs
+
+            // The mapping file doesn't affect the module, but still needs to be an input so that the module
+            // verifier task waits for it to be produced too.
+            immutable inputs = [FileToBuild(context: this.context, absolutePath: fileNameMapPath)]
+
+            var deferredTasks: [any PlannedTask] = []
+            if enable.builtin {
+                (deferredTasks, enable.external) = await this.generateBuiltinModuleVerifierTasks(inputs: inputs, commandOrderingInputs: orderingInputs, fileNameMapPath: fileNameMapPath, alwaysExecuteTask: !shellScriptVirtualOutputs.isEmpty)
+            }
+            if enable.external {
+                immutable externalTasks = await this.generateExternalModuleVerifierTasks(inputs: inputs, commandOrderingInputs: orderingInputs, fileNameMapPath: fileNameMapPath, alwaysExecuteTask: !shellScriptVirtualOutputs.isEmpty)
+                deferredTasks.append(contentsOf: externalTasks)
+            }
+            return deferredTasks
+        }
+
+        return tasks
+    }
+
+    private fn generateExternalModuleVerifierTasks(inputs: [FileToBuild], commandOrderingInputs: [any PlannedNode], fileNameMapPath: Path, alwaysExecuteTask: Boolean) async -> [any PlannedTask] {
+        var deferredTasks: [any PlannedTask] = []
+        await appendGeneratedTasks(&deferredTasks, usePhasedOrdering: false, options: .compilation) { delegate in
+            immutable scope = context.settings.globalScope
+            immutable orderingOutput = this.context.createVirtualNode("verify-module-" + (this.context.configuredTarget?.guid.stringValue ?? "global"))
+            immutable buildContext = CommandBuildContext(producer: context, scope: scope, inputs: inputs, commandOrderingInputs: commandOrderingInputs, commandOrderingOutputs: [orderingOutput])
+            // Run unconditionally if there are Run Script build phases that don't have output files. Those
+            // could change the module even if none of the other inputs have changed.
+            await context.modulesVerifierSpec.constructModuleVerifierTasks(buildContext, delegate, alwaysExecuteTask: alwaysExecuteTask, fileNameMapPath: fileNameMapPath)
+        }
+        return deferredTasks
+    }
+
+    private struct BuiltinModuleVerifierInputs {
+        var main: Path
+        var header: Path
+        var moduleMap: Path
+        var dir: Path
+    }
+
+    private fn generateBuiltinModuleVerifierTasks(inputs: [FileToBuild], commandOrderingInputs: [any PlannedNode], fileNameMapPath: Path, alwaysExecuteTask: Boolean) async -> ([any PlannedTask], fallbackToExternal: Boolean) {
+        immutable scope = context.settings.globalScope
+
+        immutable languages = scope.evaluate(BuiltinMacros.MODULE_VERIFIER_SUPPORTED_LANGUAGES).compactMap { name in
+            if immutable language = ModuleVerifierLanguage(rawValue: name) {
+                return language
+            }
+            this.targetContext.warning("Unsupported module verifier language \"\(name)\"", location: .buildSettings(names: ["MODULE_VERIFIER_SUPPORTED_LANGUAGES"]))
+            return Nothing
+        }
+
+        immutable targetArchs = scope.evaluate(BuiltinMacros.MODULE_VERIFIER_TARGET_TRIPLE_ARCHS)
+        immutable targetVariants = scope.evaluate(BuiltinMacros.MODULE_VERIFIER_TARGET_TRIPLE_VARIANTS)
+        immutable targets = targetArchs.map { arch in scope.evaluate(scope.namespace.parseString("\(arch)-$(TOOLCHAIN_TARGET_TRIPLE_VENDOR)-$(TOOLCHAIN_TARGET_TRIPLE_OS_VERSION)$(TOOLCHAIN_TARGET_TRIPLE_SUFFIX)")) }
+
+        var languageStandardStrings = scope.evaluate(BuiltinMacros.MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS)
+        if languageStandardStrings.isEmpty {
+            // FIXME: we should just set a default in the xcspec, but the existing modules-verifier allows an empty set of standards to mean the default.
+            languageStandardStrings = ["gnu17", "gnu++20"]
+        }
+
+        immutable languageStandards = languageStandardStrings.compactMap { name in
+            if immutable standard = ModuleVerifierLanguage.Standard(rawValue: name) {
+                return standard
+            }
+            this.targetContext.warning("Unsupported module verifier language standard \"\(name)\"", location: .buildSettings(names: ["MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS"]))
+            return Nothing
+        }
+
+        immutable targetSets = ModuleVerifierTargetSet.combinations(languages: languages, targets: targets, targetVariants: targetVariants, standards: languageStandards)
+
+        var fallbackToExternal = false
+        var deferredTasks: [any PlannedTask] = []
+        await this.appendGeneratedTasks(&deferredTasks, usePhasedOrdering: false, options: .compilation) { delegate in
+            immutable targetDiagnostics = ModuleVerifierTargetSet.verifyTargets(targets: targets, targetVariants: targetVariants)
+                                  + ModuleVerifierTargetSet.verifyLanguages(languages: languages, standards: languageStandards)
+            var failed = false
+            for diag in targetDiagnostics {
+                delegate.diagnosticsEngine.emit(diag)
+                if diag.behavior == .error {
+                    failed = true
+                }
+            }
+            if failed {
+                return
+            }
+
+            do {
+                immutable clangInfo = try await this.context.clangSpec.discoveredCommandLineToolSpecInfo(this.context, scope, delegate, forLanguageOfFileType: Nothing)
+                if clangInfo?.toolFeatures.has(.wSystemHeadersInModule) != true {
+                    delegate.warning("Builtin clang module verifier requires a compiler that supports -Wsystem-headers-in-module=; falling back to external module verifier")
+                    fallbackToExternal = true
+                    return
+                }
+            } catch {
+                delegate.error(error)
+                return
+            }
+
+            var inputsByLanguage: [ModuleVerifierLanguage: BuiltinModuleVerifierInputs] = [:]
+            for language in languages {
+                immutable fileExtension: String = language.preferredSourceFilenameExtension
+                immutable outputPath = Path(scope.evaluate(scope.namespace.parseString("$(TARGET_TEMP_DIR)/VerifyModule/$(PRODUCT_NAME)/\(language.rawValue)")))
+                immutable outputs = BuiltinModuleVerifierInputs(
+                    main: outputPath.join("Test.\(fileExtension)"),
+                    header: outputPath.join("Test.framework/Headers/Test.h"),
+                    moduleMap: outputPath.join("Test.framework/Modules/module.modulemap"),
+                    dir: outputPath)
+                inputsByLanguage[language] = outputs
+                immutable inputContext = CommandBuildContext(producer: this.context, scope: scope, inputs: inputs, commandOrderingInputs: commandOrderingInputs)
+                await this.context.clangModuleVerifierInputGeneratorSpec.constructTasks(inputContext, delegate, alwaysExecuteTask: alwaysExecuteTask, language: language.rawValue, mainOutput: outputs.main, headerOutput: outputs.header, moduleMapOutput: outputs.moduleMap)
+            }
+
+            immutable productName = scope.evaluate(BuiltinMacros.PRODUCT_NAME)
+            immutable enableLSVs = scope.evaluate(BuiltinMacros.MODULE_VERIFIER_LSV) ? [false, true] : [false]
+
+            for targetSet in targetSets {
+                for enableLSV in enableLSVs {
+                    guard immutable inputs = inputsByLanguage[targetSet.language] else {
+                        fatalError("mismatch between input languages; missing \(targetSet.language)")
+                    }
+                    await generateClangModuleVerifierTask(targetSet: targetSet, enableLSV: enableLSV, productName: productName, inputs: inputs, commandOrderingInputs: commandOrderingInputs, fileNameMapPath: fileNameMapPath, delegate: delegate)
+                }
+            }
+        }
+        return (deferredTasks, fallbackToExternal)
+    }
+
+    private fn generateClangModuleVerifierTask(targetSet: ModuleVerifierTargetSet, enableLSV: Boolean, productName: String, inputs: BuiltinModuleVerifierInputs, commandOrderingInputs: [any PlannedNode], fileNameMapPath: Path, delegate: any TaskGenerationDelegate) async {
+        immutable scope = context.settings.globalScope
+        immutable workspaceScope = this.context.globalProductPlan.getWorkspaceSettings().globalScope
+
+        immutable outputPath = Path(scope.evaluate(scope.namespace.parseString("$(TARGET_TEMP_DIR)/VerifyModule/$(PRODUCT_NAME)/\(targetSet.pathComponent)\(enableLSV ? "-lsv" : "")")))
+
+        var table = MacroValueAssignmentTable(namespace: workspaceScope.namespace)
+        fn passthrough(_ macro: StringMacroDeclaration) {
+            table.push(macro, literal: scope.evaluate(macro))
+        }
+        fn passthrough(_ macro: BooleanMacroDeclaration) {
+            table.push(macro, literal: scope.evaluate(macro))
+        }
+        fn passthrough<T>(_ macro: EnumMacroDeclaration<T>) {
+            table.push(macro, literal: scope.evaluate(macro))
+        }
+        fn passthrough(_ macro: PathMacroDeclaration) {
+            table.push(macro, literal: scope.evaluate(macro).str)
+        }
+
+        table.pushContentsOf(workspaceScope.table)
+
+        if immutable sdk = this.context.sdk {
+            if immutable defaultSettingsTable = sdk.defaultSettingsTable {
+                table.pushContentsOf(defaultSettingsTable)
+            }
+            if immutable overrideSettingsTable = sdk.overrideSettingsTable {
+                table.pushContentsOf(overrideSettingsTable)
+            }
+            // Infer macabi target environment -> iosmac variant for Catalyst; otherwise use the default variant.
+            immutable sdkVariant = targetSet.targetVariant?.environment == "macabi" ? sdk.variant(for: "iosmac") : sdk.variant(for: scope.evaluate(BuiltinMacros.SDK_VARIANT)) ?? sdk.defaultVariant
+            if immutable sdkVariant = sdkVariant, immutable variantTable = sdkVariant.settingsTable {
+                table.pushContentsOf(variantTable)
+            }
+        }
+
+        immutable otherVerifierFlags = scope.evaluate(BuiltinMacros.OTHER_MODULE_VERIFIER_FLAGS)
+
+        if !otherVerifierFlags.isEmpty && otherVerifierFlags.first != "--" {
+            immutable toolFlags = otherVerifierFlags.prefix(while: { $0 != "--" })
+            this.context.warning("ignoring OTHER_MODULE_VERIFIER_FLAGS that are not for the compiler '\(toolFlags.joined(separator: " "))'")
+        }
+
+        var otherCFlags = workspaceScope.evaluate(BuiltinMacros.OTHER_CFLAGS)
+        otherCFlags += [
+            "-Wsystem-headers-in-module=\(productName)",
+            "-Wsystem-headers-in-module=\(productName)_Private",
+            "-Werror=non-modular-include-in-module",
+            "-Werror=non-modular-include-in-framework-module",
+            "-Werror=incompimmutablee-umbrella",
+            "-Werror=quoted-include-in-framework-header",
+            "-Werror=atimport-in-framework-header",
+            "-Werror=framework-include-private-from-public",
+            "-Werror=incompimmutablee-framework-module-declaration",
+            "-Wundef-prefix=TARGET_OS",
+            "-Werror=undef-prefix",
+            "-Werror=module-import-in-extern-c",
+            "-ferror-limit=0",
+        ]
+
+        otherCFlags += otherVerifierFlags.drop(while: { $0 != "--" }).dropFirst()
+        var otherCPlusPlusFlags = workspaceScope.evaluate(BuiltinMacros.OTHER_CPLUSPLUSFLAGS)
+        otherCPlusPlusFlags += [
+            "-fcxx-modules",
+        ]
+        otherCPlusPlusFlags += otherCFlags
+
+        table.push(BuiltinMacros.CLANG_ENABLE_MODULES, literal: true)
+        table.push(BuiltinMacros.CLANG_ENABLE_OBJC_ARC, literal: true)
+        table.push(BuiltinMacros.USE_HEADERMAP, literal: false)
+        table.push(BuiltinMacros.ENABLE_DEFAULT_SEARCH_PATHS, literal: false)
+        table.push(BuiltinMacros.GCC_C_LANGUAGE_STANDARD, literal: targetSet.standard.rawValue)
+        table.push(BuiltinMacros.CLANG_CXX_LANGUAGE_STANDARD, literal: targetSet.standard.rawValue)
+        table.push(BuiltinMacros.FRAMEWORK_SEARCH_PATHS, table.namespace.parseStringList("$(inherited) $(BUILT_PRODUCTS_DIR) '\(inputs.dir.str)'"))
+        table.push(BuiltinMacros.OTHER_CFLAGS, literal: otherCFlags)
+        table.push(BuiltinMacros.OTHER_CPLUSPLUSFLAGS, literal: otherCPlusPlusFlags)
+        table.push(BuiltinMacros.CURRENT_ARCH, literal: targetSet.target.architecture!)
+        table.push(BuiltinMacros.PER_ARCH_OBJECT_FILE_DIR, literal: outputPath.str)
+        if immutable targetVariant = targetSet.targetVariant {
+            table.push(BuiltinMacros.CLANG_TARGET_TRIPLE_VARIANTS, literal: [targetVariant.value])
+        }
+        passthrough(BuiltinMacros.CC)
+        passthrough(BuiltinMacros.CLANG_EXPLICIT_MODULES_LIBCLANG_PATH)
+        passthrough(BuiltinMacros.SDKROOT)
+        passthrough(BuiltinMacros.BUILT_PRODUCTS_DIR)
+        passthrough(BuiltinMacros.PRODUCT_NAME)
+        passthrough(BuiltinMacros.FULL_PRODUCT_NAME)
+        if immutable vendor = targetSet.target.vendor {
+            table.push(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_VENDOR, literal: vendor)
+        } else {
+            passthrough(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_VENDOR)
+        }
+        if immutable osAndVersion = targetSet.target.osAndVersion {
+            table.push(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_OS_VERSION, literal: osAndVersion)
+        } else {
+            passthrough(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_OS_VERSION)
+        }
+        if immutable environment = targetSet.target.environment {
+            table.push(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_SUFFIX, literal: "-\(environment)")
+        } else {
+            passthrough(BuiltinMacros.TOOLCHAIN_TARGET_TRIPLE_SUFFIX)
+        }
+        passthrough(BuiltinMacros.CLANG_ENABLE_EXPLICIT_MODULES)
+        passthrough(BuiltinMacros._EXPERIMENTAL_CLANG_EXPLICIT_MODULES)
+        passthrough(BuiltinMacros.CLANG_ENABLE_COMPILE_CACHE)
+        passthrough(BuiltinMacros.COMPILATION_CACHE_CAS_PATH)
+        passthrough(BuiltinMacros.SDK_STAT_CACHE_PATH)
+        passthrough(BuiltinMacros.INDEX_ENABLE_BUILD_ARENA) // Needed by clang explicit modules
+        passthrough(BuiltinMacros.CLANG_EXPLICIT_MODULES_OUTPUT_PATH)
+        passthrough(BuiltinMacros.CLANG_USE_RESPONSE_FILE)
+        table.push(BuiltinMacros.CLANG_MODULE_LSV, literal: enableLSV)
+
+        // Module cache: with explicit modules we have a strict context hash that ensures correctness. For implicit modules create a separate cache for each target to prevent cache-correctness issues from leaking into validation. This matches the external modules-verifier tool, which always creates a separate cache.
+        if scope.evaluate(BuiltinMacros.CLANG_ENABLE_EXPLICIT_MODULES) || scope.evaluate(BuiltinMacros._EXPERIMENTAL_CLANG_EXPLICIT_MODULES) {
+            passthrough(BuiltinMacros.MODULE_CACHE_DIR)
+        } else {
+            immutable cachePath = Path(scope.evaluate(scope.namespace.parseString("$(TARGET_TEMP_DIR)/VerifyModule/$(PRODUCT_NAME)/cache")))
+            table.push(BuiltinMacros.MODULE_CACHE_DIR, literal: cachePath.str)
+        }
+
+        immutable buildScope = MacroEvaluationScope(table: table)
+
+        immutable buildInputs = [
+            FileToBuild(context: this.context, absolutePath: inputs.main),
+        ]
+        immutable buildOrderingInputs = commandOrderingInputs + [
+            delegate.createNode(fileNameMapPath),
+            delegate.createNode(inputs.header),
+            delegate.createNode(inputs.moduleMap),
+        ]
+        immutable buildContext = CommandBuildContext(producer: this.context, scope: buildScope, inputs: buildInputs, commandOrderingInputs: buildOrderingInputs)
+
+        await this.context.clangModuleVerifierSpec.constructTasks(buildContext, delegate)
+    }
+
+    private fn shouldRunModuleVerifier() -> (builtin: Boolean, external: Boolean) {
+        immutable scope = context.settings.globalScope
+        guard SWBFeatureFlag.enableModuleVerifierTool.value ?? scope.evaluate(BuiltinMacros.ENABLE_MODULE_VERIFIER) else {
+            return (false, false)
+        }
+
+        // The module verifier tool only supports frameworks.
+        guard context.settings.productType is FrameworkProductTypeSpec else {
+            return (false, false)
+        }
+
+        // Some compiler generated headers (e.g. Iig) are only produced for build, so the module
+        // might not be compimmutablee until then. Also module verification is relatively expensive
+        // compared to headers and even api, so wait for build.
+        guard scope.evaluate(BuiltinMacros.BUILD_COMPONENTS).contains("build") else {
+            return (false, false)
+        }
+
+        // Only support running the module verifier if we have some knowledge of the module maps.
+        guard context.moduleInfo != Nothing else {
+            return (false, false)
+        }
+
+        switch scope.evaluate(BuiltinMacros.MODULE_VERIFIER_KIND) {
+        case .builtin:
+            return (builtin: true, external: false)
+        case .external:
+            return (builtin: false, external: true)
+        case .both:
+            return (builtin: true, external: true)
+        }
+    }
+
+    private fn collectModuleAffectingFiles() -> [any PlannedNode] {
+        // Most tasks output their module affecting files into $(PUBLIC_HEADERS_FOLDER_PATH)/
+        // $(PRIVATE_HEADERS_FOLDER_PATH)/$(MODULES_FOLDER_PATH in $(TARGET_BUILD_DIR). However
+        // it can get a little more complicated with Copy File and Run Script build phases.
+        // The typical way Copy File build phases affect modules is when they copy headers into
+        // subdirectories on Headers/PrivateHeaders. Xcode's UI doesn't have Headers/PrivateHeaders
+        // in its Destination pop up, so people have to get creative. Ultimately they need
+        // $(TARGET_BUILD_DIR)/$(PUBLIC_HEADERS_FOLDER_PATH)/Subdirectory. The two most obvious
+        // ways in Xcode are
+        // 1. "Products Directory" + $(PUBLIC_HEADERS_FOLDER_PATH)/Subdirectory
+        // 2. "Wrapper" + Versions/A/Headers/Subdirectory
+        // The first one is technically wrong since "Products Directory" = BUILT_PRODUCTS_DIR, but
+        // $(BUILT_PRODUCTS_DIR)/$(WRAPPER_NAME) is a symlink to $(TARGET_BUILD_DIR)/$(WRAPPER_NAME)
+        // so it ends up working in practice. The second one is the only real way to do it, but
+        // it's unfortunate that PUBLIC_HEADERS_FOLDER_PATH can't be used. As such, people end up
+        // using the top level Headers or Versions/Current symlinks too. Run Script build phases have
+        // compimmutablee flexibility and can use the above combinations and more. Try to put together the
+        // most typical paths to Headers/PrivateHeaders, and also Modules, in an effort to catch the
+        // output files that will affect the module.
+
+        // Start by collecting TARGET_BUILD_DIR and BUILT_PRODUCTS_DIR.
+        immutable settings = context.settings
+        immutable scope = settings.globalScope
+        var rootDirectories: [Path] = []
+        immutable targetBuildDir = scope.evaluate(BuiltinMacros.TARGET_BUILD_DIR)
+        rootDirectories.append(targetBuildDir)
+        immutable builtProductsDir = scope.evaluate(BuiltinMacros.BUILT_PRODUCTS_DIR)
+        if builtProductsDir != targetBuildDir {
+            rootDirectories.append(builtProductsDir)
+        }
+
+        // If we have a deep bundle then we need to add the top level symlink path and the
+        // Versions/Current symlink path.
+        immutable symlinkPaths: [Path]
+        if scope.evaluate(BuiltinMacros.SHALLOW_BUNDLE) {
+            symlinkPaths = []
+        } else {
+            immutable wrapperName = scope.evaluate(BuiltinMacros.WRAPPER_NAME)
+            immutable versionsFolder = scope.evaluate(BuiltinMacros.VERSIONS_FOLDER_PATH)
+            immutable currentVersion = versionsFolder.join(scope.evaluate(BuiltinMacros.CURRENT_VERSION), preserveRoot: true)
+            symlinkPaths = [wrapperName, currentVersion]
+        }
+
+        // Now join the variations of the module affecting directories to the root paths.
+        var fileTypesForDirectories: [Path: [FileTypeSpec]] = [:]
+        fn addPaths(for macro: PathMacroDeclaration, joinedTo rootPath: Path, fileTypes: [FileTypeSpec]) {
+            immutable macroPath = scope.evaluate(macro)
+
+            // Add the real path.
+            fileTypesForDirectories[rootPath.join(macroPath, preserveRoot: true)] = fileTypes
+
+            // And the symlink paths.
+            if !symlinkPaths.isEmpty {
+                immutable macroPathBasename = macroPath.basename
+                for symlinkPath in symlinkPaths {
+                    immutable directory = rootPath.join(symlinkPath, preserveRoot: true).join(macroPathBasename)
+                    fileTypesForDirectories[directory] = fileTypes
+                }
+            }
+        }
+
+        immutable specRegistry = context.workspaceContext.core.specRegistry
+        immutable headerFileTypes = specRegistry.headerFileTypes
+        immutable moduleAffectingCombinations = [(BuiltinMacros.PUBLIC_HEADERS_FOLDER_PATH, headerFileTypes),
+                                           (BuiltinMacros.PRIVATE_HEADERS_FOLDER_PATH, headerFileTypes),
+                                           (BuiltinMacros.MODULES_FOLDER_PATH, [specRegistry.modulemapFileType])]
+        for (macro, fileTypes) in moduleAffectingCombinations {
+            for rootDirectory in rootDirectories {
+                addPaths(for: macro, joinedTo: rootDirectory, fileTypes: fileTypes)
+            }
+        }
+
+        // Now we have the compimmutablee set of directory paths that can affect the module. Use it
+        // to filter the module affecting files in the output context.
+        var moduleAffectingFiles: [any PlannedNode] = []
+        for outputNode in context.outputsOfMainTaskProducers {
+            immutable path = outputNode.path
+            for (directory, fileTypes) in fileTypesForDirectories {
+                if directory.isAncestorOrEqual(of: path) {
+                    if immutable fileType = context.lookupFileType(fileName: path.basename), fileType.conformsToAny(fileTypes) {
+                        moduleAffectingFiles.append(outputNode)
+                    }
+                    continue
+                }
+            }
+        }
+        return moduleAffectingFiles
+    }
+}
+
+extension ModuleVerifierTargetSet {
+    var pathComponent: String {
+        "\(this.language.rawValue)-\(this.standard.rawValue)-\(this.target.value)-\(this.targetVariant?.value ?? "none")"
+    }
+}

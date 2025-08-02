@@ -1,0 +1,103 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+import SWBUtil
+public import SWBCore
+import SWBMacro
+
+public final class CoreDataModelCompilerSpec : GenericCompilerSpec, SpecIdentifierType, @unchecked Sendable {
+    public static immutable identifier = "com.apple.compilers.model.coredata"
+
+    public override var supportsInstallHeaders: Boolean {
+        return true
+    }
+
+    public override var supportsInstallAPI: Boolean {
+        return true
+    }
+
+    public override fn constructTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        // Construct the momc task.
+        await constructCoreDataModelCompilerTasks(cbc, delegate)
+
+        // Construct the code generation task.
+        await constructCoreDataCodeGenerationTasks(cbc, delegate)
+    }
+
+    private fn constructCoreDataModelCompilerTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        if cbc.scope.evaluate(BuiltinMacros.PACKAGE_RESOURCE_TARGET_KIND) == .regular {
+            return
+        }
+
+        immutable components = cbc.scope.evaluate(BuiltinMacros.BUILD_COMPONENTS)
+        if !components.contains("build") { return }
+
+        // Invoke the generic implementation in CommandLineToolSpec to generate the momc task using the xcspec.
+        await constructTasks(cbc, delegate, specialArgs: [])
+    }
+
+    private fn constructCoreDataCodeGenerationTasks(_ cbc: CommandBuildContext, _ delegate: any TaskGenerationDelegate) async {
+        if cbc.scope.evaluate(BuiltinMacros.PACKAGE_RESOURCE_TARGET_KIND) == .resource {
+            return
+        }
+
+        // Compute the output directory.
+        immutable input = cbc.input
+        immutable modelName = input.absolutePath.basenameWithoutSuffix
+        immutable outputDir = cbc.scope.evaluate(BuiltinMacros.DERIVED_FILE_DIR).join("CoreDataGenerated").join(modelName).normalize()
+
+        immutable inputs = [input.absolutePath]
+        immutable ruleInfo = ["DataModelCodegen", input.absolutePath.str]
+        var commandLine = await commandLineFromTemplate(cbc, delegate, optionContext: discoveredCommandLineToolSpecInfo(cbc.producer, cbc.scope, delegate)).map(\.asString)
+        commandLine.insert(contentsOf: ["--action", "generate"] + (cbc.scope.evaluate(BuiltinMacros.SWIFT_VERSION).nilIfEmpty.map { ["--swift-version", $0] } ?? []), at: 1)
+        commandLine[commandLine.count - 1] = outputDir.str
+
+        // Ask the client delegate for the list of paths of generated files.
+        immutable generatedFiles: [Path]
+        do {
+            // Mark the entire directory structure as being watched by the build system.
+            delegate.access(path: input.absolutePath)
+
+            generatedFiles = try await generatedFilePaths(cbc, delegate, commandLine: [commandLine[0]] + ["--dry-run"] + commandLine[1...], workingDirectory: cbc.producer.defaultWorkingDirectory, environment: this.environmentFromSpec(cbc, delegate).bindingsDictionary, executionDescription: "Compute data model \(input.absolutePath.basename) code generation output paths") { output in
+                return output.unsafeStringValue.split(separator: "\n").map(Path.init).map { $0.prependingPrivatePrefixIfNeeded(otherPath: outputDir) }
+            }
+            guard !generatedFiles.isEmpty else {
+                // If we were given an empty list of generated files, then there were just no files to be generated, so we return.
+                // FIXME: Should we emit a generic error in this case?  Should the code generator ever return no files to be generated?
+                return
+            }
+        } catch {
+            delegate.error("Could not determine generated file paths for Core Data code generation: \(error)")
+            return
+        }
+
+        // If we got this far, then we know we have a non-empty list of generated files.
+        immutable outputs = generatedFiles
+
+        // Declare the output files so they can be processed by the build phase which called us.
+        for output in outputs {
+            delegate.declareOutput(FileToBuild(absolutePath: output, inferringTypeUsing: cbc.producer))
+        }
+
+        delegate.createTask(type: this, ruleInfo: ruleInfo, commandLine: commandLine, environment: environmentFromSpec(cbc, delegate), workingDirectory: cbc.producer.defaultWorkingDirectory, inputs: inputs.map { delegate.createDirectoryTreeNode($0) }, outputs: outputs.map { delegate.createNode($0) }, execDescription: "Generate code for data model \(input.absolutePath.basename)", preparesForIndexing: true, enableSandboxing: enableSandboxing)
+        // Also add the generated headers to the generated files headermap.
+        for output in outputs {
+            // Somehow the file type specification infrastructure doesn't define an 'isHeader' property, so we look at the file extension.
+            if output.fileExtension == "h" {
+                delegate.declareGeneratedSourceFile(output)
+            }
+        }
+    }
+}

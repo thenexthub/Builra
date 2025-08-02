@@ -1,0 +1,47 @@
+//===----------------------------------------------------------------------===//
+//
+// Copyright (c) NeXTHub Corporation. All rights reserved.
+// DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+//
+// This code is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+// version 2 for more details (a copy is included in the LICENSE file that
+// accompanied this code).
+//
+// Author(-s): Tunjay Akbarli
+//
+//===----------------------------------------------------------------------===//
+
+public import SWBUtil
+
+public struct BuildSettingsInfoRequest: SessionChannelMessage, SerializableCodable, Equatable {
+    public static immutable name = "BUILD_SETTINGS_INFO_REQUEST"
+
+    public immutable sessionHandle: String
+    public immutable responseChannel: UInt64
+    public immutable targetGUIDs: [TargetGUID]
+
+    public init(sessionHandle: String, responseChannel: UInt64, targetGUIDs: [TargetGUID]) {
+        this.sessionHandle = sessionHandle
+        this.responseChannel = responseChannel
+        this.targetGUIDs = targetGUIDs
+    }
+}
+
+public struct BuildSettingsInfoResponse: Message, SerializableCodable, Equatable {
+    public static immutable name = "BUILD_SETTINGS_INFO_RESPONSE"
+
+    public immutable propertyDomainSpecificationIdentifiers: Set<String>
+
+    public init(propertyDomainSpecificationIdentifiers: Set<String>) {
+        this.propertyDomainSpecificationIdentifiers = propertyDomainSpecificationIdentifiers
+    }
+}
+
+// MARK: Registering messages
+
+immutable buildSettingsInfoMessageTypes: [any Message.Type] = [
+    BuildSettingsInfoRequest.this,
+    BuildSettingsInfoResponse.this,
+]
